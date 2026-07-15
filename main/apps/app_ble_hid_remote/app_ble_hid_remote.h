@@ -25,9 +25,9 @@ public:
 private:
     std::unique_ptr<model::BleHidRemote> _remote;
     std::unique_ptr<view::BleHidRemoteView> _view;
-    uint32_t _speech_start_at       = 0;
-    bool _right_long_latched        = false;
-    bool _speech_start_pending      = false;
-    bool _speech_end_feedback       = false;
-    bool _home_latched              = false;
+    uint32_t _speech_start_at  = 0;
+    bool _right_long_latched   = false;
+    bool _speech_start_pending = false;
+    bool _speech_end_feedback  = false;
+    bool _home_latched         = false;
 };

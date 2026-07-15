@@ -45,7 +45,7 @@ void AppBleHidRemote::onOpen()
 
 void AppBleHidRemote::onRunning()
 {
-    constexpr uint32_t SpeechHoldMs       = 500;
+    constexpr uint32_t SpeechHoldMs      = 500;
     constexpr uint32_t VibrationSettleMs = 70;
 
     auto& hal = GetHAL();
@@ -83,7 +83,7 @@ void AppBleHidRemote::onRunning()
         _right_long_latched = true;
         if (_remote->isSpeechReady()) {
             hal.vibrate(20, 70);
-            _speech_start_at       = now + VibrationSettleMs;
+            _speech_start_at      = now + VibrationSettleMs;
             _speech_start_pending = true;
         } else {
             hal.vibrate(160, 100);

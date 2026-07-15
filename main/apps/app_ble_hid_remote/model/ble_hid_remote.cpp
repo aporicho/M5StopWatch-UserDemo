@@ -54,14 +54,14 @@ enum SpeechEvent : uint8_t {
 };
 
 // NimBLE stores 128-bit UUIDs least-significant byte first.
-const ble_uuid128_t SpeechServiceUuid = BLE_UUID128_INIT(
-    0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x00, 0x10, 0x3a, 0x7f);
-const ble_uuid128_t SpeechStatusUuid = BLE_UUID128_INIT(
-    0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x01, 0x10, 0x3a, 0x7f);
-const ble_uuid128_t SpeechAudioUuid = BLE_UUID128_INIT(
-    0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x02, 0x10, 0x3a, 0x7f);
-const ble_uuid128_t HostStatusUuid = BLE_UUID128_INIT(
-    0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x03, 0x10, 0x3a, 0x7f);
+const ble_uuid128_t SpeechServiceUuid =
+    BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x00, 0x10, 0x3a, 0x7f);
+const ble_uuid128_t SpeechStatusUuid =
+    BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x01, 0x10, 0x3a, 0x7f);
+const ble_uuid128_t SpeechAudioUuid =
+    BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x02, 0x10, 0x3a, 0x7f);
+const ble_uuid128_t HostStatusUuid =
+    BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x03, 0x10, 0x3a, 0x7f);
 
 constexpr uint8_t HidReportMap[] = {
     // Keyboard, report ID 1.
@@ -323,9 +323,9 @@ bool BleHidRemote::sendWheel(int8_t delta)
 
 bool BleHidRemote::isSpeechReady() const
 {
-    const uint16_t handle = _connection_handle.load();
+    const uint16_t handle       = _connection_handle.load();
     const HostStatus hostStatus = _host_status.load();
-    const bool hostReady = hostStatus == HostStatus::Waiting || hostStatus == HostStatus::Ready;
+    const bool hostReady        = hostStatus == HostStatus::Waiting || hostStatus == HostStatus::Ready;
     return isConnected() && handle != InvalidConnectionHandle && _speech_subscribed.load() &&
            _speech_status_subscribed.load() && hostReady && ble_att_mtu(handle) >= MinimumSpeechMtu;
 }
@@ -729,7 +729,7 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
             _speech_status_subscribed = false;
             _host_status              = HostStatus::Waiting;
             _host_error               = 0;
-            _connection_handle = InvalidConnectionHandle;
+            _connection_handle        = InvalidConnectionHandle;
             if (_active.load()) {
                 _state = State::Advertising;
                 startAdvertising();
@@ -741,8 +741,7 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
                 ESP_LOGI(Tag, "speech audio subscription: %s", _speech_subscribed.load() ? "on" : "off");
             } else if (event->subscribe.attr_handle == _speech_status_handle) {
                 _speech_status_subscribed = event->subscribe.cur_notify != 0;
-                ESP_LOGI(Tag, "speech status subscription: %s",
-                         _speech_status_subscribed.load() ? "on" : "off");
+                ESP_LOGI(Tag, "speech status subscription: %s", _speech_status_subscribed.load() ? "on" : "off");
             }
             if (isSpeechReady()) {
                 sendSpeechStatus(SpeechReady);
@@ -852,8 +851,8 @@ void BleHidRemote::configureConnection(uint16_t connectionHandle)
     if (result != 0) {
         ESP_LOGW(Tag, "data length update failed: %d", result);
     }
-    result = ble_gap_set_prefered_le_phy(connectionHandle, BLE_GAP_LE_PHY_2M_MASK,
-                                         BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_CODED_ANY);
+    result = ble_gap_set_prefered_le_phy(connectionHandle, BLE_GAP_LE_PHY_2M_MASK, BLE_GAP_LE_PHY_2M_MASK,
+                                         BLE_GAP_LE_PHY_CODED_ANY);
     if (result != 0) {
         ESP_LOGW(Tag, "2M PHY request failed; continuing on 1M PHY: %d", result);
     }
@@ -952,8 +951,8 @@ void BleHidRemote::runSpeechWorker()
     } else {
         sendSpeechStatus(aborted ? SpeechAbort : SpeechEnd);
     }
-    ESP_LOGI(Tag, "speech session %u %s after %u frames", _speech_session,
-             aborted ? "aborted" : "ended", _speech_sequence);
+    ESP_LOGI(Tag, "speech session %u %s after %u frames", _speech_session, aborted ? "aborted" : "ended",
+             _speech_sequence);
     _speech_worker_running = false;
     _speech_worker_task    = nullptr;
 }
@@ -971,8 +970,8 @@ void BleHidRemote::waitForSpeechWorker()
     }
 }
 
-int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attributeHandle,
-                                   ble_gatt_access_ctxt* context, void* argument)
+int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attributeHandle, ble_gatt_access_ctxt* context,
+                                   void* argument)
 {
     (void)connectionHandle;
     (void)argument;

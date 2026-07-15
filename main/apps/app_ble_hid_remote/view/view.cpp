@@ -221,8 +221,7 @@ void BleHidRemoteView::init(lv_obj_t* parent)
 
     _displayed_state = model::BleHidRemote::State::Stopped;
     _displayed_error = 0;
-    updateStatus(model::BleHidRemote::State::Starting, 0, false, false,
-                 model::BleHidRemote::HostStatus::Waiting, 0);
+    updateStatus(model::BleHidRemote::State::Starting, 0, false, false, model::BleHidRemote::HostStatus::Waiting, 0);
     setControlsVisible(false);
 }
 
@@ -290,8 +289,7 @@ bool BleHidRemoteView::consumeForgetRequested()
 }
 
 void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastError, bool speechReady,
-                                    bool speechActive, model::BleHidRemote::HostStatus hostStatus,
-                                    uint16_t hostError)
+                                    bool speechActive, model::BleHidRemote::HostStatus hostStatus, uint16_t hostError)
 {
     const char* text = "Stopped";
     uint32_t color   = SecondaryTextColor;
@@ -361,8 +359,8 @@ void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastEr
 
     _status_label->setText(text);
     _status_dot->setBgColor(lv_color_hex(color));
-    _displayed_state = state;
-    _displayed_error = lastError;
+    _displayed_state         = state;
+    _displayed_error         = lastError;
     _displayed_speech_ready  = speechReady;
     _displayed_speech_active = speechActive;
     _displayed_host_status   = hostStatus;
