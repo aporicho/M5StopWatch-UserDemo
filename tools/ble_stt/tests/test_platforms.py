@@ -22,7 +22,9 @@ from ble_stt.service import (
 
 class ConfigTests(unittest.TestCase):
     def test_platform_config_paths(self):
-        self.assertTrue(str(config_dir("darwin")).endswith("Library/Application Support/M5StopWatch"))
+        self.assertTrue(
+            config_dir("darwin").as_posix().endswith("Library/Application Support/M5StopWatch")
+        )
         with patch.dict(os.environ, {"LOCALAPPDATA": "C:/Users/test/AppData/Local"}):
             self.assertEqual(config_dir("win32"), Path("C:/Users/test/AppData/Local/M5StopWatch"))
             self.assertEqual(
@@ -49,12 +51,12 @@ class RecognizerSelectionTests(unittest.TestCase):
         self.assertEqual(resolve_model("mlx", "organization/custom-model"), "organization/custom-model")
         self.assertEqual(resolve_model("faster-whisper", "medium"), "medium")
 
+    @patch("ble_stt.recognizers.model_cache_dir", return_value=Path("/tmp/ble-stt-test/model-cache"))
     @patch("ble_stt.recognizers.FasterWhisperRecognizer")
-    def test_recognizer_uses_private_model_cache(self, recognizer: Mock):
-        with patch("ble_stt.config.sys.platform", "linux"):
-            with patch.dict(os.environ, {"HOME": "/tmp/ble-stt-test"}, clear=True):
-                create_recognizer("faster-whisper", "small", "cpu", 2)
-                self.assertTrue(os.environ["HF_HOME"].endswith(".cache/m5stopwatch/ble-stt"))
+    def test_recognizer_uses_private_model_cache(self, recognizer: Mock, cache_dir: Mock):
+        with patch.dict(os.environ, {}, clear=True):
+            create_recognizer("faster-whisper", "small", "cpu", 2)
+            self.assertEqual(os.environ["HF_HOME"], str(cache_dir.return_value))
         recognizer.assert_called_once_with("small", "cpu", 2)
 
 
