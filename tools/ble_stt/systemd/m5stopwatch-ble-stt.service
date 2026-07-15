@@ -1,0 +1,15 @@
+[Unit]
+Description=M5StopWatch BLE push-to-talk speech input
+After=bluetooth.target graphical-session.target
+Wants=bluetooth.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/Desktop/github/M5StopWatch-UserDemo/tools/ble_stt
+ExecStart=%h/Desktop/github/M5StopWatch-UserDemo/tools/ble_stt/run-service.sh
+Restart=on-failure
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
