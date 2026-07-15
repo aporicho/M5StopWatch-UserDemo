@@ -133,7 +133,6 @@ class MlxWhisperRecognizer(_SimplifyingRecognizer):
             path_or_hf_repo=self.model_name,
             language=None,
             task="transcribe",
-            beam_size=1,
             temperature=0.0,
             condition_on_previous_text=True,
             verbose=None,

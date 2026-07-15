@@ -1,3 +1,3 @@
 """M5StopWatch BLE speech input helper."""
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"

@@ -10,7 +10,7 @@ from ble_stt.platforms import create_platform
 from ble_stt.platforms.linux import LinuxTextInjector
 from ble_stt.platforms.macos import MacOSTextInjector, MacWindowToken
 from ble_stt.platforms.windows import WindowsTextInjector
-from ble_stt.recognizers import create_recognizer, resolve_engine, resolve_model
+from ble_stt.recognizers import MlxWhisperRecognizer, create_recognizer, resolve_engine, resolve_model
 from ble_stt.service import (
     SERVICE_LABEL,
     render_launch_agent,
@@ -50,6 +50,20 @@ class RecognizerSelectionTests(unittest.TestCase):
         self.assertEqual(resolve_model("mlx", "medium"), "mlx-community/whisper-medium-mlx")
         self.assertEqual(resolve_model("mlx", "organization/custom-model"), "organization/custom-model")
         self.assertEqual(resolve_model("faster-whisper", "medium"), "medium")
+
+    def test_mlx_uses_greedy_decoder(self):
+        module = Mock()
+        module.transcribe.return_value = {"segments": []}
+        recognizer = MlxWhisperRecognizer.__new__(MlxWhisperRecognizer)
+        recognizer.module = module
+        recognizer.model_name = "mlx-community/whisper-small-mlx"
+        recognizer.simplifier = Mock()
+
+        recognizer.transcribe([0] * 320)
+
+        options = module.transcribe.call_args.kwargs
+        self.assertNotIn("beam_size", options)
+        self.assertEqual(options["temperature"], 0.0)
 
     @patch("ble_stt.recognizers.model_cache_dir", return_value=Path("/tmp/ble-stt-test/model-cache"))
     @patch("ble_stt.recognizers.FasterWhisperRecognizer")
