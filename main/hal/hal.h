@@ -7,6 +7,7 @@
 #include "utils/button/Button_Class.hpp"
 #include <apps/common/common.h>
 #include <memory>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <lvgl.h>
@@ -189,6 +190,7 @@ public:
     int getSpeakerVolume(bool loadFromSettings = false);
     int getAudioSampleRate();
     void audioRecord(std::vector<int16_t>& data, uint16_t durationMs, float gain = 30.0f);
+    bool audioReadSamples(int16_t* data, std::size_t sampleCount, float gain = 30.0f);
     void audioPlay(std::vector<int16_t>& data, bool async = true);
 
     struct AudioSpectrumFrame {
@@ -247,7 +249,7 @@ public:
         bool vibrateEnabled = true;
     };
 
-    void updateButtonStates();
+    void updateButtonStates(bool feedback = true);
     void setButtonConfig(ButtonConfig config, bool saveToSettings = false);
     const ButtonConfig& getButtonConfig(bool loadFromSettings = false);
 

@@ -152,6 +152,22 @@ public:
         }
     }
 
+    bool readSamples(int16_t* data, std::size_t sampleCount, float gain)
+    {
+        if (data == nullptr || sampleCount == 0) {
+            return false;
+        }
+
+        std::lock_guard<std::mutex> lock(_mutex);
+        esp_codec_dev_set_in_gain(_codec_dev, gain);
+        const esp_err_t ret = esp_codec_dev_read(_codec_dev, data, sampleCount * sizeof(int16_t));
+        if (ret != ESP_OK) {
+            mclog::tagError(_tag, "stream read failed: {}", ret);
+            return false;
+        }
+        return true;
+    }
+
 private:
     void _task_entry()
     {
@@ -479,6 +495,11 @@ int Hal::getSpeakerVolume(bool loadFromSettings)
 void Hal::audioRecord(std::vector<int16_t>& data, uint16_t durationMs, float gain)
 {
     _audio_codec.record(data, durationMs, gain);
+}
+
+bool Hal::audioReadSamples(int16_t* data, std::size_t sampleCount, float gain)
+{
+    return _audio_codec.readSamples(data, sampleCount, gain);
 }
 
 void Hal::audioPlay(std::vector<int16_t>& data, bool async)

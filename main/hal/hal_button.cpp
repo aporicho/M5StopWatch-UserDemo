@@ -32,21 +32,21 @@ void Hal::button_init()
     getButtonConfig(true);
 }
 
-void Hal::updateButtonStates()
+void Hal::updateButtonStates(bool feedback)
 {
     btnA.setRawState(millis(), !gpio_get_level(USER_BUTTONA_PIN));
     btnB.setRawState(millis(), !gpio_get_level(USER_BUTTONB_PIN));
     // btnPwr.setRawState(millis(), pmic_get_pwr_btn_state());
 
     auto& config = getButtonConfig();
-    if (btnA.wasPressed()) {
+    if (feedback && btnA.wasPressed()) {
         if (config.sfxEnabled) {
             audio::play_tone_from_midi(62 + 32, 0.02);
         }
         if (config.vibrateEnabled) {
             vibrate(20, 60);
         }
-    } else if (btnB.wasPressed()) {
+    } else if (feedback && btnB.wasPressed()) {
         if (config.sfxEnabled) {
             audio::play_tone_from_midi(64 + 32, 0.02);
         }
