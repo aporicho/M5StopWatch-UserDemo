@@ -221,15 +221,18 @@ void BleHidRemoteView::init(lv_obj_t* parent)
 
     _displayed_state = model::BleHidRemote::State::Stopped;
     _displayed_error = 0;
-    updateStatus(model::BleHidRemote::State::Starting, 0, false, false);
+    updateStatus(model::BleHidRemote::State::Starting, 0, false, false,
+                 model::BleHidRemote::HostStatus::Waiting, 0);
     setControlsVisible(false);
 }
 
-void BleHidRemoteView::update(model::BleHidRemote::State state, int lastError, bool speechReady, bool speechActive)
+void BleHidRemoteView::update(model::BleHidRemote::State state, int lastError, bool speechReady, bool speechActive,
+                              model::BleHidRemote::HostStatus hostStatus, uint16_t hostError)
 {
     if (state != _displayed_state || (state == model::BleHidRemote::State::Error && lastError != _displayed_error) ||
-        speechReady != _displayed_speech_ready || speechActive != _displayed_speech_active) {
-        updateStatus(state, lastError, speechReady, speechActive);
+        speechReady != _displayed_speech_ready || speechActive != _displayed_speech_active ||
+        hostStatus != _displayed_host_status || hostError != _displayed_host_error) {
+        updateStatus(state, lastError, speechReady, speechActive, hostStatus, hostError);
     }
 
     const uint32_t now = GetHAL().millis();
@@ -287,7 +290,8 @@ bool BleHidRemoteView::consumeForgetRequested()
 }
 
 void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastError, bool speechReady,
-                                    bool speechActive)
+                                    bool speechActive, model::BleHidRemote::HostStatus hostStatus,
+                                    uint16_t hostError)
 {
     const char* text = "Stopped";
     uint32_t color   = SecondaryTextColor;
@@ -306,12 +310,43 @@ void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastEr
             if (speechActive) {
                 text  = "Listening...";
                 color = ErrorColor;
-            } else if (speechReady) {
-                text  = "Speech input ready";
-                color = ConnectedColor;
             } else {
-                text  = "HID connected - run STT helper";
-                color = AdvertisingColor;
+                switch (hostStatus) {
+                    case model::BleHidRemote::HostStatus::Preparing:
+                        text  = "Preparing speech model...";
+                        color = AdvertisingColor;
+                        break;
+                    case model::BleHidRemote::HostStatus::Ready:
+                        text  = speechReady ? "Speech input ready" : "Connecting speech input...";
+                        color = speechReady ? ConnectedColor : AdvertisingColor;
+                        break;
+                    case model::BleHidRemote::HostStatus::Recognizing:
+                        text  = "Recognizing...";
+                        color = AdvertisingColor;
+                        break;
+                    case model::BleHidRemote::HostStatus::PermissionError:
+                        text  = "Computer permission needed";
+                        color = ErrorColor;
+                        break;
+                    case model::BleHidRemote::HostStatus::ModelError:
+                        text  = "Speech model error";
+                        color = ErrorColor;
+                        break;
+                    case model::BleHidRemote::HostStatus::HostError:
+                        if (hostError != 0) {
+                            std::snprintf(errorText, sizeof(errorText), "STT helper error (%u)", hostError);
+                            text = errorText;
+                        } else {
+                            text = "STT helper error";
+                        }
+                        color = ErrorColor;
+                        break;
+                    case model::BleHidRemote::HostStatus::Waiting:
+                    default:
+                        text  = speechReady ? "Speech input ready" : "HID connected - run STT helper";
+                        color = speechReady ? ConnectedColor : AdvertisingColor;
+                        break;
+                }
             }
             break;
         case model::BleHidRemote::State::Error:
@@ -330,6 +365,8 @@ void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastEr
     _displayed_error = lastError;
     _displayed_speech_ready  = speechReady;
     _displayed_speech_active = speechActive;
+    _displayed_host_status   = hostStatus;
+    _displayed_host_error    = hostError;
 }
 
 bool BleHidRemoteView::updateUiToggleGesture()

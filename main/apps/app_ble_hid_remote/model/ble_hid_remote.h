@@ -37,6 +37,16 @@ public:
         Enter  = 0x28,
     };
 
+    enum class HostStatus : uint8_t {
+        Waiting = 0,
+        Preparing,
+        Ready,
+        Recognizing,
+        PermissionError,
+        ModelError,
+        HostError,
+    };
+
     BleHidRemote() = default;
     ~BleHidRemote();
 
@@ -48,6 +58,16 @@ public:
     bool startSpeech();
     void stopSpeech(bool abort = false);
     bool isSpeechReady() const;
+
+    HostStatus hostStatus() const
+    {
+        return _host_status.load();
+    }
+
+    uint16_t hostError() const
+    {
+        return _host_error.load();
+    }
 
     bool isSpeechActive() const
     {
@@ -93,6 +113,8 @@ private:
     std::atomic<bool> _speech_abort_requested{false};
     std::atomic<bool> _speech_status_subscribed{false};
     std::atomic<bool> _speech_subscribed{false};
+    std::atomic<HostStatus> _host_status{HostStatus::Waiting};
+    std::atomic<uint16_t> _host_error{0};
     std::atomic<uint16_t> _connection_handle{InvalidConnectionHandle};
 
     esp_hidd_dev_t* _hid_device      = nullptr;
@@ -101,6 +123,7 @@ private:
     TaskHandle_t _speech_worker_task = nullptr;
     uint16_t _speech_status_handle   = 0;
     uint16_t _speech_audio_handle    = 0;
+    uint16_t _host_status_handle     = 0;
     uint16_t _speech_session         = 0;
     uint16_t _speech_sequence        = 0;
     bool _controller_initialized     = false;

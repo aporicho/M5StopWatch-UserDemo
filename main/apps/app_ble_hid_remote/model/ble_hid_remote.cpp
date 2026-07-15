@@ -60,6 +60,8 @@ const ble_uuid128_t SpeechStatusUuid = BLE_UUID128_INIT(
     0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x01, 0x10, 0x3a, 0x7f);
 const ble_uuid128_t SpeechAudioUuid = BLE_UUID128_INIT(
     0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x02, 0x10, 0x3a, 0x7f);
+const ble_uuid128_t HostStatusUuid = BLE_UUID128_INIT(
+    0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x03, 0x10, 0x3a, 0x7f);
 
 constexpr uint8_t HidReportMap[] = {
     // Keyboard, report ID 1.
@@ -231,6 +233,8 @@ bool BleHidRemote::start()
     _speech_abort_requested   = false;
     _speech_subscribed        = false;
     _speech_status_subscribed = false;
+    _host_status              = HostStatus::Waiting;
+    _host_error               = 0;
 
     _command_queue = xQueueCreate(16, sizeof(Command));
     if (_command_queue == nullptr) {
@@ -320,8 +324,10 @@ bool BleHidRemote::sendWheel(int8_t delta)
 bool BleHidRemote::isSpeechReady() const
 {
     const uint16_t handle = _connection_handle.load();
+    const HostStatus hostStatus = _host_status.load();
+    const bool hostReady = hostStatus == HostStatus::Waiting || hostStatus == HostStatus::Ready;
     return isConnected() && handle != InvalidConnectionHandle && _speech_subscribed.load() &&
-           _speech_status_subscribed.load() && ble_att_mtu(handle) >= MinimumSpeechMtu;
+           _speech_status_subscribed.load() && hostReady && ble_att_mtu(handle) >= MinimumSpeechMtu;
 }
 
 bool BleHidRemote::startSpeech()
@@ -474,7 +480,7 @@ bool BleHidRemote::initializeBluetooth()
 
 bool BleHidRemote::registerSpeechService()
 {
-    static ble_gatt_chr_def characteristics[3]{};
+    static ble_gatt_chr_def characteristics[4]{};
     static ble_gatt_svc_def services[2]{};
     static bool initialized = false;
 
@@ -489,6 +495,11 @@ bool BleHidRemote::registerSpeechService()
         characteristics[1].flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_NOTIFY;
         characteristics[1].val_handle = &_speech_audio_handle;
 
+        characteristics[2].uuid       = &HostStatusUuid.u;
+        characteristics[2].access_cb  = speechGattAccess;
+        characteristics[2].flags      = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC;
+        characteristics[2].val_handle = &_host_status_handle;
+
         services[0].type            = BLE_GATT_SVC_TYPE_PRIMARY;
         services[0].uuid            = &SpeechServiceUuid.u;
         services[0].characteristics = characteristics;
@@ -498,6 +509,7 @@ bool BleHidRemote::registerSpeechService()
         // current app instance and must be written into this instance.
         characteristics[0].val_handle = &_speech_status_handle;
         characteristics[1].val_handle = &_speech_audio_handle;
+        characteristics[2].val_handle = &_host_status_handle;
     }
 
     int result = ble_gatts_count_cfg(services);
@@ -518,6 +530,8 @@ void BleHidRemote::cleanupBluetooth()
     waitForSpeechWorker();
     _speech_subscribed        = false;
     _speech_status_subscribed = false;
+    _host_status              = HostStatus::Waiting;
+    _host_error               = 0;
 
     if (_nimble_initialized && ble_gap_adv_active()) {
         ble_gap_adv_stop();
@@ -713,6 +727,8 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
             stopSpeech(true);
             _speech_subscribed        = false;
             _speech_status_subscribed = false;
+            _host_status              = HostStatus::Waiting;
+            _host_error               = 0;
             _connection_handle = InvalidConnectionHandle;
             if (_active.load()) {
                 _state = State::Advertising;
@@ -960,11 +976,11 @@ int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attribute
 {
     (void)connectionHandle;
     (void)argument;
-    if (ActiveInstance == nullptr || context == nullptr || context->op != BLE_GATT_ACCESS_OP_READ_CHR) {
+    if (ActiveInstance == nullptr || context == nullptr) {
         return BLE_ATT_ERR_UNLIKELY;
     }
 
-    if (attributeHandle == ActiveInstance->_speech_status_handle) {
+    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == ActiveInstance->_speech_status_handle) {
         std::array<uint8_t, 12> packet{};
         packet[0] = SpeechProtocolVersion;
         packet[1] = ActiveInstance->_speech_active.load() ? SpeechStart : SpeechReady;
@@ -978,7 +994,26 @@ int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attribute
         packet[9] = ActiveInstance->_speech_active.load() ? 1 : 0;
         return os_mbuf_append(context->om, packet.data(), packet.size()) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
-    if (attributeHandle == ActiveInstance->_speech_audio_handle) {
+    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == ActiveInstance->_speech_audio_handle) {
+        return 0;
+    }
+    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == ActiveInstance->_host_status_handle) {
+        if (OS_MBUF_PKTLEN(context->om) != 4) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        std::array<uint8_t, 4> packet{};
+        if (os_mbuf_copydata(context->om, 0, packet.size(), packet.data()) != 0) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        if (packet[0] != SpeechProtocolVersion || packet[1] > static_cast<uint8_t>(HostStatus::HostError)) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        ActiveInstance->_host_status = static_cast<HostStatus>(packet[1]);
+        ActiveInstance->_host_error  = static_cast<uint16_t>(packet[2] | (packet[3] << 8));
+        ESP_LOGI(Tag, "desktop helper status: %u, error: %u", packet[1], ActiveInstance->_host_error.load());
+        if (ActiveInstance->isSpeechReady()) {
+            ActiveInstance->sendSpeechStatus(SpeechReady);
+        }
         return 0;
     }
     return BLE_ATT_ERR_UNLIKELY;

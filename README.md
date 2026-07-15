@@ -24,3 +24,15 @@ idf.py build
 ```bash
 idf.py flash
 ```
+
+## BLE speech input helper
+
+The BLE Remote app can stream push-to-talk audio to a local login service on
+Linux/Hyprland, Apple Silicon macOS, or Windows 11. Installation is one command:
+
+```bash
+curl -fsSL https://github.com/aporicho/M5StopWatch-UserDemo/releases/latest/download/ble-stt-install.sh | sh
+```
+
+See [tools/ble_stt/README.md](tools/ble_stt/README.md) for the Windows command,
+pairing flow, management commands, and development setup.

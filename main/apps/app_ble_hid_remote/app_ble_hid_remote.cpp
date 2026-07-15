@@ -126,7 +126,8 @@ void AppBleHidRemote::onRunning()
         if (keyFlashed) {
             _view->flashKey(leftKey);
         }
-        _view->update(_remote->state(), _remote->lastError(), _remote->isSpeechReady(), _remote->isSpeechActive());
+        _view->update(_remote->state(), _remote->lastError(), _remote->isSpeechReady(), _remote->isSpeechActive(),
+                      _remote->hostStatus(), _remote->hostError());
         wheelDelta = _view->consumeWheelDelta();
         forgetBond = _view->consumeForgetRequested();
     }

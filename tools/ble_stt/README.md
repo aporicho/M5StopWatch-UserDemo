@@ -1,86 +1,119 @@
-# M5StopWatch BLE STT helper
+# M5StopWatch BLE STT
 
-This Linux/Hyprland helper receives push-to-talk audio from the **BLE Remote** app,
-runs `faster-whisper` locally, and types stable transcript segments into the
-window that was focused when recording started. Recognized Chinese is
-normalized to Simplified Chinese and Mainland terminology with OpenCC before
-it is typed.
+The BLE Remote watch app streams push-to-talk audio to a local, login-time
+service. Stable transcript fragments are inserted into the window that was
+focused when recording began. Audio and recognition stay on the computer.
 
-## Install
+| Platform | Bluetooth | Text input | Recognition | Login service |
+| --- | --- | --- | --- | --- |
+| Linux/Hyprland | BlueZ/Bleak | `hyprctl` + `wtype` | faster-whisper | systemd user service |
+| Apple Silicon macOS | CoreBluetooth/Bleak | Accessibility + Quartz | MLX Whisper | LaunchAgent |
+| Windows 11 | WinRT/Bleak | `GetForegroundWindow` + `SendInput` | faster-whisper | Scheduled Task |
 
-Requirements: BlueZ, `bluetoothctl`, `wtype`, Python 3.10+, and a paired
-`M5StopWatch HID` device.
+## Install once
+
+macOS or Linux:
 
 ```bash
-cd tools/ble_stt
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -e .
+curl -fsSL https://github.com/aporicho/M5StopWatch-UserDemo/releases/latest/download/ble-stt-install.sh | sh
 ```
 
-The default multilingual Medium model is downloaded on first launch. After the
-download, recognition is fully offline.
+Windows PowerShell:
 
-For NVIDIA GPU inference on Linux, install the CUDA 12 runtime wheels inside
-the virtual environment. `run-service.sh` automatically exposes their library
-directories to CTranslate2 when the background service starts.
-
-```bash
-.venv/bin/python -m pip install nvidia-cublas-cu12 'nvidia-cudnn-cu12==9.*'
+```powershell
+irm https://github.com/aporicho/M5StopWatch-UserDemo/releases/latest/download/ble-stt-install.ps1 | iex
 ```
 
-## Run
+The installer downloads the latest stable Release, verifies its SHA-256,
+creates an isolated user installation, installs the current platform backend,
+downloads and exercises the `medium` model, checks permissions, guides pairing,
+and asks for one real push-to-talk test. Only then does it register the login
+service. Administrator access is not required unless the computer is missing a
+system package such as Python, BlueZ, or `wtype`.
 
-Open **BLE Remote** on the watch, then run:
+The model download is large. Its progress is shown during installation so the
+first daily use never waits for a hidden download. Interrupted installs may be
+rerun safely; model caches and completed downloads are reused.
+
+For unattended setup, set `BLE_STT_SKIP_TEST=1`. `BLE_STT_MODEL=small` selects a
+smaller model, `BLE_STT_VERSION=ble-stt-v0.3.0` pins a Release tag, and
+`BLE_STT_ASSET_BASE` selects a trusted internal Release mirror.
+
+## Pair and verify
+
+Keep **BLE Remote** open on the watch during installation.
+
+- macOS pairs when CoreBluetooth first connects. Accept the Bluetooth prompt
+  and grant the displayed Python executable access in **System Settings →
+  Privacy & Security → Accessibility**.
+- Windows and Linux use the operating system's Bluetooth pairing flow. Select
+  `M5StopWatch HID` and enter `123456` when requested.
+
+For the final test, focus an empty text document, hold the right watch button,
+speak, and release. The watch progresses through `Preparing speech model`,
+`Speech input ready`, `Listening`, and `Recognizing`. A short right-button press
+still sends Enter; releasing after speech never submits the recognized text.
+
+## Daily management
+
+The service starts automatically at login. The bare command gives a short
+health summary:
 
 ```bash
-source tools/ble_stt/.venv/bin/activate
 ble-stt
+ble-stt status
 ```
 
-Wait for `speech input ready`, focus a text field, hold the right watch button
-for 500 ms, speak, and release it. A short right-button press still sends Enter.
-The release does not automatically submit the recognized text.
-
-## Background service
-
-The repository includes a user service at
-`systemd/m5stopwatch-ble-stt.service`. Once linked and enabled, it starts at
-login and reconnects to the watch automatically.
+Maintenance commands are consistent on all three platforms:
 
 ```bash
-systemctl --user status m5stopwatch-ble-stt.service
-journalctl --user -u m5stopwatch-ble-stt.service -f
-systemctl --user restart m5stopwatch-ble-stt.service
+ble-stt doctor --request-permissions
+ble-stt doctor --ble
+ble-stt test
+ble-stt logs -n 100
+ble-stt logs --follow
+ble-stt restart
+ble-stt upgrade
+ble-stt uninstall
+ble-stt uninstall --purge-models
 ```
 
-To stop it temporarily, run `systemctl --user stop
-m5stopwatch-ble-stt.service`. To remove it from login startup, run `systemctl
---user disable m5stopwatch-ble-stt.service`.
+Uninstall preserves the downloaded model by default so reinstalling is fast;
+`--purge-models` removes it as well.
 
-Useful overrides:
+Foreground and development use remains available under `run`:
 
 ```bash
-ble-stt --device cpu
-ble-stt --device cuda
-ble-stt --model small
-ble-stt --address AA:BB:CC:DD:EE:FF
+ble-stt run --engine auto --model medium
+ble-stt run --engine faster-whisper --device cpu --model small
 ```
 
-To verify the BLE service without loading or downloading a speech model:
+Old invocations such as `ble-stt --model small` are routed to `run` for
+compatibility. Device identifiers are cached automatically; `--device-id` (and
+the legacy `--address` alias) are only for troubleshooting.
+
+Logs live in `~/.local/state/m5stopwatch` on Linux,
+`~/Library/Logs/M5StopWatch` on macOS, and `%LOCALAPPDATA%\M5StopWatch\Logs` on
+Windows. If the bond exposes only the old HID service, choose **Forget
+computer** on the watch, remove it from the operating system, and pair again.
+
+## Local development
+
+Running the checked-in installer directly uses this checkout instead of a
+Release asset:
 
 ```bash
-python -m ble_stt.check
+./tools/ble_stt/install.sh
 ```
 
-If the existing bond still exposes only the old HID service, use **Forget
-computer** in the app, remove the device with `bluetoothctl remove ADDRESS`, and
-pair it again with PIN `123456`.
+On Windows:
 
-## Tests
+```powershell
+tools\ble_stt\install.ps1
+```
+
+Tests do not download models:
 
 ```bash
-cd tools/ble_stt
-PYTHONPATH=. python -m unittest discover -s tests -v
+PYTHONPATH=tools/ble_stt python -m unittest discover -s tools/ble_stt/tests -v
 ```

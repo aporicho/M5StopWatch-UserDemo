@@ -1,0 +1,44 @@
+name: Release BLE STT installer
+
+on:
+  push:
+    tags:
+      - "ble-stt-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build source and installer assets
+        shell: bash
+        run: |
+          VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' tools/ble_stt/pyproject.toml | head -n 1)"
+          test "${GITHUB_REF_NAME}" = "ble-stt-v${VERSION}"
+          tar \
+            --exclude='ble_stt/.venv' \
+            --exclude='ble_stt/**/__pycache__' \
+            -czf ble-stt-source.tar.gz -C tools ble_stt
+          (cd tools && zip -qr ../ble-stt-source.zip ble_stt \
+            -x 'ble_stt/.venv/*' 'ble_stt/**/__pycache__/*')
+          sha256sum ble-stt-source.tar.gz > ble-stt-source.tar.gz.sha256
+          sha256sum ble-stt-source.zip > ble-stt-source.zip.sha256
+          cp tools/ble_stt/install.sh ble-stt-install.sh
+          cp tools/ble_stt/install.ps1 ble-stt-install.ps1
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "M5StopWatch BLE STT ${GITHUB_REF_NAME#ble-stt-v}" \
+            --generate-notes \
+            ble-stt-source.tar.gz \
+            ble-stt-source.tar.gz.sha256 \
+            ble-stt-source.zip \
+            ble-stt-source.zip.sha256 \
+            ble-stt-install.sh \
+            ble-stt-install.ps1

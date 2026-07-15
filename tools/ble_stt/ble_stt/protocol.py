@@ -8,6 +8,7 @@ PROTOCOL_VERSION = 1
 SERVICE_UUID = "7f3a1000-6b2e-4c6d-a7c0-5e0d8b1f9a01"
 STATUS_UUID = "7f3a1001-6b2e-4c6d-a7c0-5e0d8b1f9a01"
 AUDIO_UUID = "7f3a1002-6b2e-4c6d-a7c0-5e0d8b1f9a01"
+HOST_STATUS_UUID = "7f3a1003-6b2e-4c6d-a7c0-5e0d8b1f9a01"
 DEVICE_NAME = "M5StopWatch HID"
 
 STEP_TABLE = (
@@ -33,6 +34,42 @@ class StatusEvent(IntEnum):
     END = 2
     ABORT = 3
     ERROR = 4
+
+
+class HostStatus(IntEnum):
+    """Lifecycle state written by the desktop helper to compatible firmware."""
+
+    WAITING = 0
+    PREPARING = 1
+    READY = 2
+    RECOGNIZING = 3
+    PERMISSION_ERROR = 4
+    MODEL_ERROR = 5
+    HOST_ERROR = 6
+
+
+@dataclass(frozen=True)
+class HostStatusPacket:
+    status: HostStatus
+    error: int = 0
+
+    def build(self) -> bytes:
+        if not 0 <= self.error <= 0xFFFF:
+            raise ProtocolError(f"host error code is out of range: {self.error}")
+        return struct.pack("<BBH", PROTOCOL_VERSION, int(self.status), self.error)
+
+    @classmethod
+    def parse(cls, data: bytes) -> "HostStatusPacket":
+        if len(data) != 4:
+            raise ProtocolError(f"host status packet has {len(data)} bytes, expected 4")
+        version, status, error = struct.unpack("<BBH", data)
+        if version != PROTOCOL_VERSION:
+            raise ProtocolError(f"unsupported protocol version {version}")
+        try:
+            value = HostStatus(status)
+        except ValueError as exc:
+            raise ProtocolError(f"unknown host status {status}") from exc
+        return cls(value, error)
 
 
 @dataclass(frozen=True)

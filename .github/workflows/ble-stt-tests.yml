@@ -1,0 +1,62 @@
+name: BLE STT tests
+
+on:
+  push:
+    paths:
+      - "tools/ble_stt/**"
+      - "main/apps/app_ble_hid_remote/**"
+      - ".github/workflows/ble-stt-tests.yml"
+  pull_request:
+    paths:
+      - "tools/ble_stt/**"
+      - "main/apps/app_ble_hid_remote/**"
+      - ".github/workflows/ble-stt-tests.yml"
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Run platform-independent tests
+        shell: bash
+        run: PYTHONPATH=tools/ble_stt python -m unittest discover -s tools/ble_stt/tests -v
+      - name: Check Python CLI
+        shell: bash
+        run: |
+          PYTHONPATH=tools/ble_stt python -m ble_stt --help
+          PYTHONPATH=tools/ble_stt python -m compileall -q tools/ble_stt/ble_stt
+      - name: Build and smoke-test the Python package
+        shell: bash
+        run: |
+          python -m pip install --upgrade build
+          python -m build tools/ble_stt
+          python -m pip install --no-deps --force-reinstall dist/*.whl
+          ble-stt --help
+          ble-stt-check --help
+          ble-stt-doctor --help
+          ble-stt-service --help
+      - name: Check POSIX installers
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sh -n tools/ble_stt/install.sh
+          bash -n tools/ble_stt/run-service.sh
+      - name: Check PowerShell installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path tools/ble_stt/install.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count) { throw ($errors | Out-String) }

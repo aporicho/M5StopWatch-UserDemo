@@ -40,13 +40,15 @@ private:
 class BleHidRemoteView {
 public:
     void init(lv_obj_t* parent);
-    void update(model::BleHidRemote::State state, int lastError, bool speechReady, bool speechActive);
+    void update(model::BleHidRemote::State state, int lastError, bool speechReady, bool speechActive,
+                model::BleHidRemote::HostStatus hostStatus, uint16_t hostError);
     void flashKey(bool leftKey);
     int8_t consumeWheelDelta();
     bool consumeForgetRequested();
 
 private:
-    void updateStatus(model::BleHidRemote::State state, int lastError, bool speechReady, bool speechActive);
+    void updateStatus(model::BleHidRemote::State state, int lastError, bool speechReady, bool speechActive,
+                      model::BleHidRemote::HostStatus hostStatus, uint16_t hostError);
     bool updateUiToggleGesture();
     void setControlsVisible(bool visible);
     void updateGesture(model::BleHidRemote::State state);
@@ -74,6 +76,8 @@ private:
     int _displayed_error                        = 0;
     bool _displayed_speech_ready                = false;
     bool _displayed_speech_active               = false;
+    model::BleHidRemote::HostStatus _displayed_host_status = model::BleHidRemote::HostStatus::Waiting;
+    uint16_t _displayed_host_error                         = 0;
     uint32_t _left_flash_until                  = 0;
     uint32_t _right_flash_until                 = 0;
     uint32_t _tap_started_at                    = 0;

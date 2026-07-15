@@ -4,14 +4,15 @@ import argparse
 import asyncio
 import sys
 
-from .main import acquire_mtu, find_device, use_cached_bluez_device
+from .platforms import PlatformAdapter, create_platform
 from .protocol import AUDIO_UUID, SERVICE_UUID, STATUS_UUID, StatusPacket
 
 
-async def check(address: str | None) -> None:
+async def check(identifier: str | None, adapter: PlatformAdapter | None = None) -> None:
     from bleak import BleakClient
 
-    device = await find_device(address)
+    adapter = adapter or create_platform()
+    device = await adapter.find_device(identifier)
     ready = asyncio.Event()
 
     def status_received(_, data: bytearray) -> None:
@@ -22,16 +23,16 @@ async def check(address: str | None) -> None:
         )
         ready.set()
 
-    client = BleakClient(device, timeout=20)
-    await use_cached_bluez_device(client, device)
+    client = BleakClient(device, timeout=60)
+    await adapter.prepare_client(client, device)
     async with client:
         uuids = {str(service.uuid).lower() for service in client.services}
         for uuid in sorted(uuids):
             print(uuid)
         if SERVICE_UUID not in uuids:
-            raise RuntimeError("Speech GATT service not discovered (BlueZ may still have the old service cache)")
+            raise RuntimeError("Speech GATT service was not discovered; forget the device and pair it again")
         await client.read_gatt_char(STATUS_UUID)
-        mtu = await acquire_mtu(client)
+        mtu = await adapter.acquire_mtu(client)
         print(f"connected={client.is_connected} mtu={mtu}")
         if mtu < 185:
             raise RuntimeError(f"negotiated MTU {mtu} is too small for speech audio (need 185)")
@@ -46,10 +47,15 @@ async def check(address: str | None) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Check the M5StopWatch Speech GATT service without loading STT")
-    parser.add_argument("--address", help="Bluetooth address; normally detected from bluetoothctl")
+    parser.add_argument(
+        "--device-id",
+        "--address",
+        dest="device_id",
+        help="platform device identifier; normally detected and cached automatically",
+    )
     args = parser.parse_args()
     try:
-        asyncio.run(check(args.address))
+        asyncio.run(check(args.device_id))
     except KeyboardInterrupt:
         pass
     except Exception as exc:

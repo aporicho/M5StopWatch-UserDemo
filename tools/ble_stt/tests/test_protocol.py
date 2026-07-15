@@ -2,7 +2,7 @@ import struct
 import unittest
 
 from ble_stt.agreement import common_prefix, stable_extension
-from ble_stt.protocol import AudioFrame, ProtocolError, StatusEvent, StatusPacket
+from ble_stt.protocol import AudioFrame, HostStatus, HostStatusPacket, ProtocolError, StatusEvent, StatusPacket
 from ble_stt.main import TranscriptSegment, output_text
 
 
@@ -12,6 +12,14 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(packet.event, StatusEvent.START)
         self.assertEqual(packet.session_id, 7)
         self.assertTrue(packet.active)
+
+    def test_host_status_packet(self):
+        value = HostStatusPacket(HostStatus.RECOGNIZING, 17)
+        self.assertEqual(HostStatusPacket.parse(value.build()), value)
+
+    def test_invalid_host_status_packet(self):
+        with self.assertRaises(ProtocolError):
+            HostStatusPacket.parse(bytes((1, 99, 0, 0)))
 
     def test_zero_adpcm_block(self):
         header = struct.pack("<BBHHH", 1, 1, 3, 9, 320)

@@ -3,37 +3,35 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-import shutil
-import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Awaitable, Callable, Sequence
 
-from .agreement import TextInjector, common_prefix
+from .agreement import common_prefix
+from .platforms import PlatformAdapter, create_platform
 from .protocol import (
     AUDIO_UUID,
-    DEVICE_NAME,
+    HOST_STATUS_UUID,
     SERVICE_UUID,
     STATUS_UUID,
     AudioFrame,
+    HostStatus,
+    HostStatusPacket,
     ProtocolError,
     StatusEvent,
     StatusPacket,
 )
+from .recognizers import FasterWhisperRecognizer, create_recognizer
+from .types import Recognizer, TextInjector, TranscriptSegment
 
-
-@dataclass(frozen=True)
-class TranscriptSegment:
-    start: float
-    end: float
-    text: str
+# Compatibility name for code that imported the old recognizer directly.
+LocalRecognizer = FasterWhisperRecognizer
 
 
 @dataclass
 class SpeechSession:
     session_id: int
-    focus_window: str | None
+    focus_window: object | None
     audio: list[int] = field(default_factory=list)
     audio_cursor: int = 0
     expected_sequence: int = 0
@@ -42,60 +40,6 @@ class SpeechSession:
     has_output: bool = False
     injection_enabled: bool = True
     inference_pending: bool = False
-
-
-class LocalRecognizer:
-    def __init__(self, model_name: str, device: str, cpu_threads: int) -> None:
-        from faster_whisper import WhisperModel
-        from opencc import OpenCC
-
-        self.simplifier = OpenCC("tw2sp")
-        kwargs: dict[str, Any] = {"cpu_threads": cpu_threads, "num_workers": 1}
-        if device == "auto":
-            import ctranslate2
-
-            cuda_available = ctranslate2.get_cuda_device_count() > 0
-            if cuda_available:
-                try:
-                    print(f"[model] loading {model_name} on CUDA")
-                    self.model = WhisperModel(model_name, device="cuda", compute_type="float16", **kwargs)
-                    self.device = "cuda"
-                except Exception as exc:  # Driver/runtime failures use several exception types.
-                    print(f"[model] CUDA initialization failed ({exc}); falling back to CPU INT8")
-                    self.model = WhisperModel(model_name, device="cpu", compute_type="int8", **kwargs)
-                    self.device = "cpu"
-            else:
-                print("[model] CUDA unavailable; using CPU INT8")
-                self.model = WhisperModel(model_name, device="cpu", compute_type="int8", **kwargs)
-                self.device = "cpu"
-        else:
-            compute_type = "float16" if device == "cuda" else "int8"
-            print(f"[model] loading {model_name} on {device} ({compute_type})")
-            self.model = WhisperModel(model_name, device=device, compute_type=compute_type, **kwargs)
-            self.device = device
-        print(f"[model] ready on {self.device}")
-
-    def transcribe(self, pcm: list[int]) -> list[TranscriptSegment]:
-        import numpy as np
-
-        if not pcm:
-            return []
-        audio = np.asarray(pcm, dtype=np.float32) / 32768.0
-        segments, _ = self.model.transcribe(
-            audio,
-            language=None,
-            task="transcribe",
-            beam_size=1,
-            best_of=1,
-            temperature=0.0,
-            condition_on_previous_text=True,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300},
-        )
-        return [
-            TranscriptSegment(float(item.start), float(item.end), self.simplifier.convert(item.text))
-            for item in segments
-        ]
 
 
 def canonical_text(segments: list[TranscriptSegment]) -> str:
@@ -115,17 +59,40 @@ def output_text(segments: list[TranscriptSegment], has_output: bool) -> str:
 
 
 class SpeechController:
-    def __init__(self, recognizer: LocalRecognizer, interval: float, stable_lag: float) -> None:
+    def __init__(
+        self,
+        recognizer: Recognizer | None,
+        injector: TextInjector,
+        interval: float,
+        stable_lag: float,
+        once: bool = False,
+    ) -> None:
         self.recognizer = recognizer
         self.interval = interval
         self.stable_lag = stable_lag
-        self.injector = TextInjector()
+        self.injector = injector
         self.session: SpeechSession | None = None
+        self.once = once
+        self.completed = asyncio.Event()
+        self.test_succeeded = False
+        self._host_status_writer: Callable[[HostStatus, int], Awaitable[None]] | None = None
         self.inference_lock = asyncio.Lock()
         self._rolling_task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
         self._rolling_task = asyncio.create_task(self._rolling_loop())
+
+    def set_host_status_writer(self, writer: Callable[[HostStatus, int], Awaitable[None]] | None) -> None:
+        self._host_status_writer = writer
+
+    def report_host_status(self, status: HostStatus, error: int = 0) -> None:
+        if self._host_status_writer is not None:
+            asyncio.create_task(self._host_status_writer(status, error))
+
+    async def _restore_ready(self, delay: float = 5.0) -> None:
+        await asyncio.sleep(delay)
+        if self.session is None:
+            self.report_host_status(HostStatus.READY)
 
     async def close(self) -> None:
         if self._rolling_task:
@@ -153,6 +120,7 @@ class SpeechController:
             session = self.session
             if session and session.session_id == status.session_id:
                 self.session = None
+                self.report_host_status(HostStatus.RECOGNIZING)
                 asyncio.create_task(self._finalize(session))
         elif status.event == StatusEvent.ABORT:
             self.abort("device aborted the session")
@@ -189,9 +157,7 @@ class SpeechController:
         while True:
             await asyncio.sleep(0.25)
             session = self.session
-            if session is None:
-                continue
-            if session.inference_pending:
+            if session is None or session.inference_pending:
                 continue
             available = len(session.audio) - session.audio_cursor
             growth = len(session.audio) - session.last_inference_size
@@ -202,6 +168,8 @@ class SpeechController:
             asyncio.create_task(self._recognize_stable(session))
 
     async def _recognize(self, pcm: list[int]) -> list[TranscriptSegment]:
+        if self.recognizer is None:
+            raise RuntimeError("speech model is not ready")
         async with self.inference_lock:
             return await asyncio.to_thread(self.recognizer.transcribe, pcm)
 
@@ -209,7 +177,7 @@ class SpeechController:
         try:
             if self.session is not session:
                 return
-            snapshot = session.audio[session.audio_cursor:]
+            snapshot = session.audio[session.audio_cursor :]
             segments = await self._recognize(snapshot)
             if self.session is not session:
                 return
@@ -245,172 +213,212 @@ class SpeechController:
         except Exception as exc:
             if self.session is session:
                 self.abort(f"recognition failed: {exc}")
+                self.report_host_status(HostStatus.MODEL_ERROR, 1)
+                if not self.once:
+                    asyncio.create_task(self._restore_ready())
         finally:
             session.inference_pending = False
 
     async def _finalize(self, session: SpeechSession) -> None:
-        snapshot = session.audio[session.audio_cursor:]
+        snapshot = session.audio[session.audio_cursor :]
+        succeeded = session.has_output
         try:
             segments = await self._recognize(snapshot)
         except Exception as exc:
             print(f"[speech {session.session_id}] final recognition failed: {exc}")
-            return
-        text = output_text(segments, session.has_output)
-        if session.injection_enabled and text:
-            session.injection_enabled = self.injector.type_text(text, session.focus_window)
-            if session.injection_enabled:
-                print(f"[text final] {text}")
-        elapsed = len(session.audio) / 16000.0
-        print(f"[speech {session.session_id}] finished ({elapsed:.1f}s)")
+            self.report_host_status(HostStatus.MODEL_ERROR, 1)
+            if not self.once:
+                asyncio.create_task(self._restore_ready())
+        else:
+            text = output_text(segments, session.has_output)
+            if session.injection_enabled and text:
+                try:
+                    session.injection_enabled = self.injector.type_text(text, session.focus_window)
+                    if session.injection_enabled:
+                        print(f"[text final] {text}")
+                        succeeded = True
+                except Exception as exc:
+                    print(f"[text] insertion failed: {exc}")
+                    session.injection_enabled = False
+                    status = HostStatus.PERMISSION_ERROR if "permission" in str(exc).lower() else HostStatus.HOST_ERROR
+                    self.report_host_status(status, 1)
+                    if not self.once:
+                        asyncio.create_task(self._restore_ready(10.0))
+            elapsed = len(session.audio) / 16000.0
+            print(f"[speech {session.session_id}] finished ({elapsed:.1f}s)")
+            if succeeded or not self.once:
+                self.report_host_status(HostStatus.READY)
+            elif session.injection_enabled:
+                self.report_host_status(HostStatus.HOST_ERROR, 1)
+        if self.once:
+            self.test_succeeded = succeeded
+            self.completed.set()
 
 
-def paired_address() -> str | None:
-    if shutil.which("bluetoothctl") is None:
-        return None
-    try:
-        result = subprocess.run(
-            ["bluetoothctl", "devices", "Paired"], check=True, capture_output=True, text=True, timeout=5
-        )
-    except subprocess.SubprocessError:
-        return None
-    for line in result.stdout.splitlines():
-        parts = line.split(maxsplit=2)
-        if len(parts) == 3 and parts[0] == "Device" and parts[2] == DEVICE_NAME:
-            return parts[1]
-    return None
+async def find_device(identifier: str | None, adapter: PlatformAdapter | None = None):
+    return await (adapter or create_platform()).find_device(identifier)
 
 
-async def find_device(address: str | None):
-    from bleak import BleakScanner
-
-    if address:
-        device = await BleakScanner.find_device_by_address(address, timeout=5)
-        return device or address
-    paired = paired_address()
-    if paired:
-        print(f"[ble] using paired device {paired}")
-        device = await BleakScanner.find_device_by_address(paired, timeout=3)
-        return device or paired
-    print(f"[ble] scanning for {DEVICE_NAME}")
-    device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=10)
-    if device is None:
-        raise RuntimeError(f"{DEVICE_NAME} was not found; open BLE Remote and pair it first")
-    return device
+async def acquire_mtu(client: Any, adapter: PlatformAdapter | None = None) -> int:
+    return await (adapter or create_platform()).acquire_mtu(client)
 
 
-async def acquire_mtu(client: Any) -> int:
-    """Ask BlueZ for the negotiated MTU instead of its default value of 23."""
-    backend = getattr(client, "_backend", None)
-    if sys.platform == "linux" and backend is not None:
-        # Bleak's generic BlueZ helper selects the first notifying
-        # characteristic. On a HID composite device that characteristic is
-        # already owned by BlueZ's input plugin, so target our audio stream.
-        from bleak.backends.bluezdbus import defs
-        from bleak.backends.bluezdbus.utils import assert_reply
-        from dbus_fast.message import Message
-
-        characteristic = client.services.get_characteristic(AUDIO_UUID)
-        if characteristic is None:
-            raise RuntimeError("speech audio characteristic is missing")
-        reply = await backend._bus.call(
-            Message(
-                destination=defs.BLUEZ_SERVICE,
-                path=characteristic.obj[0],
-                interface=defs.GATT_CHARACTERISTIC_INTERFACE,
-                member="AcquireNotify",
-                signature="a{sv}",
-                body=[{}],
-            )
-        )
-        assert_reply(reply)
-        os.close(reply.unix_fds[0])
-        backend._mtu_size = int(reply.body[1])
-    else:
-        acquire = getattr(backend, "_acquire_mtu", None)
-        if acquire is not None:
-            await acquire()
-    return int(client.mtu_size)
+async def use_cached_bluez_device(
+    client: Any,
+    device: Any,
+    adapter: PlatformAdapter | None = None,
+) -> None:
+    # Compatibility wrapper retained for ble_stt.check and external callers.
+    await (adapter or create_platform()).prepare_client(client, device)
 
 
-async def use_cached_bluez_device(client: Any, device: Any) -> None:
-    """Let Bleak attach to an already-connected paired device on Linux.
-
-    A HID host normally reconnects before the peripheral can advertise again,
-    so a fresh scan cannot rediscover it. BlueZ still has the stable D-Bus
-    device path and Bleak can safely attach to that cached object.
-    """
-    if sys.platform != "linux" or not isinstance(device, str):
-        return
-    backend = getattr(client, "_backend", None)
-    get_path = getattr(backend, "_get_device_path", None)
-    if get_path is not None:
-        backend._device_path = await get_path()
-
-
-async def run_ble(controller: SpeechController, address: str | None) -> None:
+async def run_ble(
+    controller: SpeechController,
+    identifier: str | None,
+    adapter: PlatformAdapter,
+    recognizer_factory: Callable[[], Recognizer] | None = None,
+    runtime_validator: Callable[[], None] | None = None,
+) -> None:
     from bleak import BleakClient
 
     delay = 1.0
     while True:
         disconnect_event = asyncio.Event()
         try:
-            device = await find_device(address)
+            device = await adapter.find_device(identifier)
             print(f"[ble] connecting to {device}")
-            client = BleakClient(device, disconnected_callback=lambda _: disconnect_event.set())
-            await use_cached_bluez_device(client, device)
+            client = BleakClient(device, disconnected_callback=lambda _: disconnect_event.set(), timeout=60)
+            await adapter.prepare_client(client, device)
             async with client:
                 service_uuids = {str(service.uuid).lower() for service in client.services}
                 if SERVICE_UUID not in service_uuids:
                     raise RuntimeError(
-                        "Speech GATT service is missing. Reopen BLE Remote; if BlueZ cached the old firmware, "
-                        "forget the device on both sides and pair again."
+                        "Speech GATT service is missing. Forget the device on both sides, reopen BLE Remote, "
+                        "and pair again."
                     )
-                # Accessing an encrypted characteristic makes BlueZ restore the
-                # bond and encrypt the link before AcquireNotify negotiates MTU.
+                # Reading the encrypted status characteristic restores or initiates pairing.
                 await client.read_gatt_char(STATUS_UUID)
-                mtu = await acquire_mtu(client)
+                mtu = await adapter.acquire_mtu(client)
                 if mtu < 185:
                     raise RuntimeError(f"negotiated MTU {mtu} is too small for speech audio (need 185)")
                 print(f"[ble] connected, MTU {mtu}")
                 await client.start_notify(STATUS_UUID, lambda _, data: controller.receive_status(bytes(data)))
                 await client.start_notify(AUDIO_UUID, lambda _, data: controller.receive_audio(bytes(data)))
+                host_characteristic = client.services.get_characteristic(HOST_STATUS_UUID)
+
+                async def write_host_status(status: HostStatus, error: int = 0) -> None:
+                    if host_characteristic is None or not client.is_connected:
+                        return
+                    try:
+                        packet = HostStatusPacket(status, error).build()
+                        await client.write_gatt_char(host_characteristic, packet, response=True)
+                    except Exception as exc:
+                        print(f"[ble] could not update watch status: {exc}")
+
+                controller.set_host_status_writer(write_host_status)
+                if runtime_validator is not None:
+                    while True:
+                        try:
+                            runtime_validator()
+                            break
+                        except Exception as exc:
+                            print(f"[host] runtime requirement is not ready: {exc}")
+                            message = str(exc).lower()
+                            status = (
+                                HostStatus.PERMISSION_ERROR
+                                if "permission" in message or "accessibility" in message
+                                else HostStatus.HOST_ERROR
+                            )
+                            await write_host_status(status, 1)
+                            await asyncio.sleep(10)
+                            if not client.is_connected:
+                                raise RuntimeError("Bluetooth disconnected while waiting for host requirements")
+                if controller.recognizer is None:
+                    while controller.recognizer is None:
+                        await write_host_status(HostStatus.PREPARING)
+                        try:
+                            if recognizer_factory is None:
+                                raise RuntimeError("speech recognizer factory is missing")
+                            controller.recognizer = await asyncio.to_thread(recognizer_factory)
+                        except Exception as exc:
+                            print(f"[model] preparation failed: {exc}; retrying in 10s")
+                            await write_host_status(HostStatus.MODEL_ERROR, 1)
+                            await asyncio.sleep(10)
+                            if not client.is_connected:
+                                raise RuntimeError("Bluetooth disconnected while preparing the model")
+                await write_host_status(HostStatus.READY)
                 delay = 1.0
-                await disconnect_event.wait()
+                if controller.once:
+                    disconnect_task = asyncio.create_task(disconnect_event.wait())
+                    complete_task = asyncio.create_task(controller.completed.wait())
+                    done, pending = await asyncio.wait(
+                        (disconnect_task, complete_task), return_when=asyncio.FIRST_COMPLETED
+                    )
+                    for task in pending:
+                        task.cancel()
+                    if complete_task in done:
+                        return
+                else:
+                    await disconnect_event.wait()
+            controller.abort("Bluetooth disconnected")
+            controller.set_host_status_writer(None)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             print(f"[ble] {exc}; retrying in {delay:.0f}s")
             controller.abort("Bluetooth disconnected")
+            controller.set_host_status_writer(None)
+            if controller.once and controller.completed.is_set():
+                return
             await asyncio.sleep(delay)
             delay = min(delay * 2, 10.0)
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="M5StopWatch BLE push-to-talk helper")
-    parser.add_argument("--address", help="Bluetooth address; normally detected from bluetoothctl")
-    parser.add_argument("--model", default="medium", help="faster-whisper model name (default: medium)")
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="ble-stt run", description="M5StopWatch BLE push-to-talk helper")
+    parser.add_argument(
+        "--device-id",
+        "--address",
+        dest="device_id",
+        help="cached platform device identifier (Bluetooth address, or CoreBluetooth UUID on macOS)",
+    )
+    parser.add_argument("--engine", choices=("auto", "faster-whisper", "mlx"), default="auto")
+    parser.add_argument("--model", default="medium", help="Whisper model name or repository/path (default: medium)")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--cpu-threads", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     parser.add_argument("--interval", type=float, default=1.0, help="minimum seconds of new audio per pass")
     parser.add_argument("--stable-lag", type=float, default=0.8, help="uncommitted audio tail in seconds")
-    return parser.parse_args()
+    parser.add_argument("--once", action="store_true", help=argparse.SUPPRESS)
+    return parser.parse_args(argv)
 
 
 async def async_main(args: argparse.Namespace) -> None:
-    if shutil.which("wtype") is None:
-        raise RuntimeError("wtype is required for Wayland text injection")
-    recognizer = await asyncio.to_thread(LocalRecognizer, args.model, args.device, args.cpu_threads)
-    controller = SpeechController(recognizer, args.interval, args.stable_lag)
+    adapter = create_platform()
+    controller = SpeechController(
+        None,
+        adapter.create_text_injector(),
+        args.interval,
+        args.stable_lag,
+        once=args.once,
+    )
     controller.start()
     try:
-        await run_ble(controller, args.address)
+        await run_ble(
+            controller,
+            args.device_id,
+            adapter,
+            lambda: create_recognizer(args.engine, args.model, args.device, args.cpu_threads),
+            adapter.validate_runtime,
+        )
+        if args.once and not controller.test_succeeded:
+            raise RuntimeError("test speech was not recognized or could not be inserted")
     finally:
         await controller.close()
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     try:
-        asyncio.run(async_main(parse_args()))
+        asyncio.run(async_main(parse_args(argv)))
     except KeyboardInterrupt:
         print("\nStopped")
     except Exception as exc:
