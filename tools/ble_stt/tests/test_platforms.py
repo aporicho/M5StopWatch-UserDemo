@@ -1,9 +1,10 @@
 import os
 import plistlib
+import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from ble_stt.config import UserConfig, config_dir, install_dir, model_cache_dir
 from ble_stt.platforms import create_platform
@@ -54,12 +55,16 @@ class RecognizerSelectionTests(unittest.TestCase):
     def test_mlx_uses_greedy_decoder(self):
         module = Mock()
         module.transcribe.return_value = {"segments": []}
+        numpy = Mock()
+        numpy.float32 = "float32"
+        numpy.asarray.return_value = MagicMock()
         recognizer = MlxWhisperRecognizer.__new__(MlxWhisperRecognizer)
         recognizer.module = module
         recognizer.model_name = "mlx-community/whisper-small-mlx"
         recognizer.simplifier = Mock()
 
-        recognizer.transcribe([0] * 320)
+        with patch.dict(sys.modules, {"numpy": numpy}):
+            recognizer.transcribe([0] * 320)
 
         options = module.transcribe.call_args.kwargs
         self.assertNotIn("beam_size", options)
