@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "m5stopwatch-ble-stt"
-version = "0.3.1"
+version = "0.3.2"
 description = "Cross-platform local speech-to-text helper for the M5StopWatch BLE Remote app"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
     "mlx-whisper>=0.4,<1; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "numpy>=2,<3",
     "opencc-python-reimplemented>=0.1.7,<1",
+    "pyobjc-framework-ApplicationServices>=11,<13; sys_platform == 'darwin'",
     "pyobjc-framework-Cocoa>=11,<13; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=11,<13; sys_platform == 'darwin'",
 ]

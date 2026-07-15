@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 from ble_stt.config import UserConfig, config_dir, install_dir, model_cache_dir
 from ble_stt.platforms import create_platform
 from ble_stt.platforms.linux import LinuxTextInjector
-from ble_stt.platforms.macos import MacOSTextInjector, MacWindowToken
+from ble_stt.platforms.macos import MacOSPlatform, MacOSTextInjector, MacWindowToken
 from ble_stt.platforms.windows import WindowsTextInjector
 from ble_stt.recognizers import MlxWhisperRecognizer, create_recognizer, resolve_engine, resolve_model
 from ble_stt.service import (
@@ -153,6 +153,27 @@ class FakeAppKit:
 
 
 class MacInjectorTests(unittest.TestCase):
+    def test_accessibility_uses_application_services_binding(self):
+        accessibility = Mock()
+        accessibility.kAXTrustedCheckOptionPrompt = "application-services-prompt"
+        accessibility.AXIsProcessTrustedWithOptions.return_value = True
+        injector = MacOSTextInjector(FakeQuartz(), FakeAppKit, accessibility)
+
+        self.assertTrue(injector.check_accessibility(True))
+        accessibility.AXIsProcessTrustedWithOptions.assert_called_once_with(
+            {"application-services-prompt": True}
+        )
+
+    def test_permission_error_identifies_python(self):
+        adapter = MacOSPlatform()
+        injector = Mock()
+        injector.check_accessibility.return_value = False
+        with patch.object(adapter, "create_text_injector", return_value=injector):
+            with patch("ble_stt.platforms.macos.sys.executable", "/tmp/ble-stt/python"):
+                passed, message = adapter.check_input_permission(True)
+        self.assertFalse(passed)
+        self.assertIn("/tmp/ble-stt/python", message)
+
     def test_unicode_input_and_focus_guard(self):
         quartz = FakeQuartz()
         injector = MacOSTextInjector(quartz, FakeAppKit)

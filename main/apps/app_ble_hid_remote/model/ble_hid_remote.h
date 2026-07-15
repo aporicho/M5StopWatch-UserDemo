@@ -5,6 +5,7 @@
  */
 #pragma once
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -22,8 +23,6 @@ namespace model {
 
 class BleHidRemote {
 public:
-    static constexpr uint32_t PairingPasskey = 123456;
-
     enum class State : uint8_t {
         Stopped,
         Starting,
@@ -54,7 +53,7 @@ public:
     void stop();
     bool sendKeyTap(Key key);
     bool sendWheel(int8_t delta);
-    bool forgetBond();
+    bool pairNewComputer();
     bool startSpeech();
     void stopSpeech(bool abort = false);
     bool isSpeechReady() const;
@@ -113,6 +112,7 @@ private:
     std::atomic<bool> _speech_abort_requested{false};
     std::atomic<bool> _speech_status_subscribed{false};
     std::atomic<bool> _speech_subscribed{false};
+    std::atomic<bool> _pairing_replacement{false};
     std::atomic<HostStatus> _host_status{HostStatus::Waiting};
     std::atomic<uint16_t> _host_error{0};
     std::atomic<uint16_t> _connection_handle{InvalidConnectionHandle};
@@ -126,9 +126,15 @@ private:
     uint16_t _host_status_handle     = 0;
     uint16_t _speech_session         = 0;
     uint16_t _speech_sequence        = 0;
-    bool _controller_initialized     = false;
-    bool _controller_enabled         = false;
-    bool _nimble_initialized         = false;
+    std::array<std::array<uint8_t, 6>, 3> _replacement_peer_addresses{};
+    std::array<uint8_t, 3> _replacement_peer_types{};
+    uint8_t _replacement_peer_count = 0;
+    std::array<uint8_t, 6> _last_peer_address{};
+    uint8_t _last_peer_type      = 0;
+    bool _last_peer_valid        = false;
+    bool _controller_initialized = false;
+    bool _controller_enabled     = false;
+    bool _nimble_initialized     = false;
 
     bool initializeBluetooth();
     bool registerSpeechService();

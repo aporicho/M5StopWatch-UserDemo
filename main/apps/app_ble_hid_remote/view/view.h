@@ -15,7 +15,7 @@
 
 namespace view {
 
-class ForgetBondDialog {
+class PairComputerDialog {
 public:
     void init(lv_obj_t* parent);
     bool isConfirmed() const
@@ -44,7 +44,7 @@ public:
                 model::BleHidRemote::HostStatus hostStatus, uint16_t hostError);
     void flashKey(bool leftKey);
     int8_t consumeWheelDelta();
-    bool consumeForgetRequested();
+    bool consumePairRequested();
 
 private:
     void updateStatus(model::BleHidRemote::State state, int lastError, bool speechReady, bool speechActive,
@@ -53,7 +53,7 @@ private:
     void setControlsVisible(bool visible);
     void updateGesture(model::BleHidRemote::State state);
     void resetGesture();
-    void showForgetDialog();
+    void showPairDialog();
 
     std::unique_ptr<uitk::lvgl_cpp::Container> _panel;
     std::unique_ptr<uitk::lvgl_cpp::Container> _controls_layer;
@@ -69,8 +69,8 @@ private:
     std::unique_ptr<uitk::lvgl_cpp::Label> _right_hint_label;
     std::unique_ptr<uitk::lvgl_cpp::Label> _gesture_label;
     std::unique_ptr<uitk::lvgl_cpp::Label> _gesture_hint_label;
-    std::unique_ptr<uitk::lvgl_cpp::Button> _forget_button;
-    std::unique_ptr<ForgetBondDialog> _forget_dialog;
+    std::unique_ptr<uitk::lvgl_cpp::Button> _pair_button;
+    std::unique_ptr<PairComputerDialog> _pair_dialog;
 
     model::BleHidRemote::State _displayed_state            = model::BleHidRemote::State::Stopped;
     int _displayed_error                                   = 0;
@@ -83,7 +83,7 @@ private:
     uint32_t _tap_started_at                               = 0;
     uint32_t _last_tap_at                                  = 0;
     uint8_t _tap_count                                     = 0;
-    bool _forget_requested                                 = false;
+    bool _pair_requested                                   = false;
     bool _controls_visible                                 = false;
     bool _tap_pressing                                     = false;
     bool _tap_moved                                        = false;

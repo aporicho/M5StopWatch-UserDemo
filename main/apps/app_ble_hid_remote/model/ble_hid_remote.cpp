@@ -233,6 +233,9 @@ bool BleHidRemote::start()
     _speech_abort_requested   = false;
     _speech_subscribed        = false;
     _speech_status_subscribed = false;
+    _pairing_replacement      = false;
+    _replacement_peer_count   = 0;
+    _last_peer_valid          = false;
     _host_status              = HostStatus::Waiting;
     _host_error               = 0;
 
@@ -369,11 +372,50 @@ void BleHidRemote::stopSpeech(bool abort)
     _speech_active = false;
 }
 
-bool BleHidRemote::forgetBond()
+bool BleHidRemote::pairNewComputer()
 {
     if (!_active.load() || !_nimble_initialized) {
         return false;
     }
+
+    std::array<ble_addr_t, 2> bondedPeers{};
+    int bondedCount = 0;
+    const int storeResult =
+        ble_store_util_bonded_peers(bondedPeers.data(), &bondedCount, static_cast<int>(bondedPeers.size()));
+    if (storeResult != 0) {
+        ESP_LOGE(Tag, "failed to read BLE bonds: %d", storeResult);
+        setError(storeResult);
+        return false;
+    }
+
+    _replacement_peer_count = static_cast<uint8_t>(std::min(bondedCount, static_cast<int>(bondedPeers.size())));
+    for (uint8_t index = 0; index < _replacement_peer_count; ++index) {
+        _replacement_peer_types[index] = bondedPeers[index].type;
+        std::copy(std::begin(bondedPeers[index].val), std::end(bondedPeers[index].val),
+                  _replacement_peer_addresses[index].begin());
+    }
+
+    // A computer can keep reconnecting before it has completed bonding.  Keep
+    // the most recently connected address as well as stored bonds so Pair new
+    // computer can reject that race on the next advertising cycle.
+    if (_last_peer_valid && _replacement_peer_count < _replacement_peer_addresses.size()) {
+        ble_addr_t lastPeer{};
+        lastPeer.type = _last_peer_type;
+        std::copy(_last_peer_address.begin(), _last_peer_address.end(), std::begin(lastPeer.val));
+        bool alreadyStored = false;
+        for (uint8_t index = 0; index < _replacement_peer_count; ++index) {
+            if (sameAddress(lastPeer, bondedPeers[index])) {
+                alreadyStored = true;
+                break;
+            }
+        }
+        if (!alreadyStored) {
+            _replacement_peer_types[_replacement_peer_count]     = lastPeer.type;
+            _replacement_peer_addresses[_replacement_peer_count] = _last_peer_address;
+            ++_replacement_peer_count;
+        }
+    }
+    _pairing_replacement = _replacement_peer_count != 0;
 
     const uint16_t handle     = _connection_handle.load();
     bool waitingForDisconnect = false;
@@ -388,14 +430,7 @@ bool BleHidRemote::forgetBond()
         }
     }
 
-    const int result = ble_store_clear();
-    if (result != 0) {
-        ESP_LOGE(Tag, "failed to clear BLE bonds: %d", result);
-        setError(result);
-        return false;
-    }
-
-    ESP_LOGI(Tag, "BLE bonds cleared");
+    ESP_LOGI(Tag, "pair-new-computer mode started; blocking %u previous peer(s)", _replacement_peer_count);
     _state = State::Advertising;
     if (waitingForDisconnect) {
         return true;
@@ -440,9 +475,13 @@ bool BleHidRemote::initializeBluetooth()
         return false;
     }
 
-    ble_hs_cfg.sm_io_cap         = BLE_SM_IO_CAP_DISP_ONLY;
+    // CoreBluetooth does not reliably present a passkey sheet for pairing
+    // initiated by an application.  These characteristics require encrypted,
+    // bonded access but not MITM authentication, so Secure Connections Just
+    // Works gives macOS, Linux, and Windows one automatic pairing flow.
+    ble_hs_cfg.sm_io_cap         = BLE_SM_IO_CAP_NO_IO;
     ble_hs_cfg.sm_bonding        = 1;
-    ble_hs_cfg.sm_mitm           = 1;
+    ble_hs_cfg.sm_mitm           = 0;
     ble_hs_cfg.sm_sc             = 1;
     ble_hs_cfg.sm_our_key_dist   = BLE_SM_PAIR_KEY_DIST_ID | BLE_SM_PAIR_KEY_DIST_ENC;
     ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ID | BLE_SM_PAIR_KEY_DIST_ENC;
@@ -641,11 +680,13 @@ bool BleHidRemote::startAdvertising()
 
 bool BleHidRemote::isAllowedPeer(uint16_t connectionHandle)
 {
-    std::array<ble_addr_t, 1> bonded_peers{};
+    std::array<ble_addr_t, 2> bonded_peers{};
     int bonded_count = 0;
-    if (ble_store_util_bonded_peers(bonded_peers.data(), &bonded_count, static_cast<int>(bonded_peers.size())) != 0 ||
-        bonded_count == 0) {
-        return true;
+    const int storeResult =
+        ble_store_util_bonded_peers(bonded_peers.data(), &bonded_count, static_cast<int>(bonded_peers.size()));
+    if (storeResult != 0) {
+        ESP_LOGW(Tag, "failed to inspect BLE bonds: %d", storeResult);
+        return false;
     }
 
     ble_gap_conn_desc description{};
@@ -653,8 +694,31 @@ bool BleHidRemote::isAllowedPeer(uint16_t connectionHandle)
         return false;
     }
 
-    return sameAddress(description.peer_id_addr, bonded_peers[0]) ||
-           sameAddress(description.peer_ota_addr, bonded_peers[0]);
+    if (_pairing_replacement.load()) {
+        for (uint8_t index = 0; index < _replacement_peer_count; ++index) {
+            ble_addr_t previousPeer{};
+            previousPeer.type = _replacement_peer_types[index];
+            std::copy(_replacement_peer_addresses[index].begin(), _replacement_peer_addresses[index].end(),
+                      std::begin(previousPeer.val));
+            if (sameAddress(description.peer_id_addr, previousPeer) ||
+                sameAddress(description.peer_ota_addr, previousPeer)) {
+                ESP_LOGI(Tag, "ignoring automatic reconnect from the previous computer");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    if (bonded_count == 0) {
+        return true;
+    }
+    for (int index = 0; index < bonded_count; ++index) {
+        if (sameAddress(description.peer_id_addr, bonded_peers[index]) ||
+            sameAddress(description.peer_ota_addr, bonded_peers[index])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void BleHidRemote::handleHidEvent(int32_t eventId, void* eventData)
@@ -688,7 +752,7 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
     }
 
     switch (event->type) {
-        case BLE_GAP_EVENT_CONNECT:
+        case BLE_GAP_EVENT_CONNECT: {
             if (event->connect.status != 0) {
                 ESP_LOGW(Tag, "connection failed: %d", event->connect.status);
                 if (_active.load()) {
@@ -697,29 +761,48 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
                 break;
             }
 
-            ESP_LOGI(Tag, "computer connected, starting authenticated pairing");
+            ESP_LOGI(Tag, "computer connected; waiting for the central to request pairing");
             _connection_handle = event->connect.conn_handle;
+            ble_gap_conn_desc connectedPeer{};
+            if (ble_gap_conn_find(event->connect.conn_handle, &connectedPeer) == 0) {
+                _last_peer_type = connectedPeer.peer_id_addr.type;
+                std::copy(std::begin(connectedPeer.peer_id_addr.val), std::end(connectedPeer.peer_id_addr.val),
+                          _last_peer_address.begin());
+                _last_peer_valid = true;
+            }
             if (!isAllowedPeer(event->connect.conn_handle)) {
                 ESP_LOGW(Tag, "rejecting connection from an unpaired computer");
                 ble_gap_terminate(event->connect.conn_handle, BLE_ERR_AUTH_FAIL);
                 break;
             }
-
-            {
-                const int result = ble_gap_security_initiate(event->connect.conn_handle);
-                if (result != 0 && result != BLE_HS_EALREADY) {
-                    ESP_LOGW(Tag, "failed to initiate security: %d", result);
-                }
-            }
             break;
+        }
         case BLE_GAP_EVENT_ENC_CHANGE:
             if (event->enc_change.status == 0 && _active.load()) {
                 ESP_LOGI(Tag, "pairing complete; encrypted connection ready");
+                if (_pairing_replacement.exchange(false)) {
+                    for (uint8_t index = 0; index < _replacement_peer_count; ++index) {
+                        ble_addr_t previousPeer{};
+                        previousPeer.type = _replacement_peer_types[index];
+                        std::copy(_replacement_peer_addresses[index].begin(), _replacement_peer_addresses[index].end(),
+                                  std::begin(previousPeer.val));
+                        const int result = ble_store_util_delete_peer(&previousPeer);
+                        if (result != 0 && result != BLE_HS_ENOENT) {
+                            ESP_LOGW(Tag, "failed to remove previous computer bond: %d", result);
+                        }
+                    }
+                    ESP_LOGI(Tag, "previous computer bond replaced successfully");
+                    _replacement_peer_count = 0;
+                }
                 _state = State::Connected;
                 configureConnection(event->enc_change.conn_handle);
                 ble_svc_gatt_changed(0x0001, 0xFFFF);
             } else {
                 ESP_LOGW(Tag, "pairing/encryption failed: %d", event->enc_change.status);
+                const int result = ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_AUTH_FAIL);
+                if (result != 0 && result != BLE_HS_ENOTCONN) {
+                    ESP_LOGW(Tag, "failed to disconnect after pairing error: %d", result);
+                }
             }
             break;
         case BLE_GAP_EVENT_DISCONNECT:
@@ -764,22 +847,6 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
             if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &description) == 0) {
                 ble_store_util_delete_peer(&description.peer_id_addr);
                 return BLE_GAP_REPEAT_PAIRING_RETRY;
-            }
-            break;
-        }
-        case BLE_GAP_EVENT_PASSKEY_ACTION: {
-            ESP_LOGI(Tag, "pairing passkey requested: action=%u", event->passkey.params.action);
-            if (event->passkey.params.action != BLE_SM_IOACT_DISP) {
-                ESP_LOGW(Tag, "unsupported pairing action: %u", event->passkey.params.action);
-                break;
-            }
-
-            ble_sm_io response{};
-            response.action  = BLE_SM_IOACT_DISP;
-            response.passkey = PairingPasskey;
-            const int result = ble_sm_inject_io(event->passkey.conn_handle, &response);
-            if (result != 0) {
-                ESP_LOGW(Tag, "failed to provide pairing passkey: %d", result);
             }
             break;
         }

@@ -9,8 +9,11 @@ SKIP_TEST="${BLE_STT_SKIP_TEST:-0}"
 PURGE_MODELS=0
 WORK=""
 TARGET=""
+TARGET_READY=0
 SERVICE_SWITCH_STARTED=0
 OLD_SERVICE=""
+LOCK_DIR=""
+LOCK_ACQUIRED=0
 
 for option in "$@"; do
     case "$option" in
@@ -92,6 +95,53 @@ esac
 BIN_DIR="$HOME/.local/bin"
 SHIM="$BIN_DIR/ble-stt"
 
+cleanup() {
+    if [ -n "$WORK" ] && [ -d "$WORK" ]; then
+        rm -rf "$WORK"
+    fi
+    if [ -n "$TARGET" ] && [ "${INSTALL_COMPLETE:-0}" != "1" ] && [ -d "$TARGET" ]; then
+        if [ "$SERVICE_SWITCH_STARTED" = "1" ]; then
+            if [ -x "$OLD_SERVICE" ]; then
+                printf '\nRestoring the previous login service...\n' >&2
+                "$OLD_SERVICE" install -- --engine "$ENGINE" --model "$MODEL" || true
+            elif [ -x "$TARGET/source/.venv/bin/ble-stt-service" ]; then
+                printf '\nRemoving the incomplete login service...\n' >&2
+                "$TARGET/source/.venv/bin/ble-stt-service" uninstall || true
+            fi
+        fi
+        # Once the environment is complete, keep its exact Python path stable
+        # across Ctrl-C and retries so a macOS Accessibility grant does not
+        # point at an executable the installer has deleted.
+        if [ "$TARGET_READY" != "1" ]; then
+            rm -rf "$TARGET"
+        fi
+    fi
+    if [ "$LOCK_ACQUIRED" = "1" ] && [ -n "$LOCK_DIR" ]; then
+        rm -rf "$LOCK_DIR"
+    fi
+}
+
+stop_install() {
+    trap - EXIT HUP INT TERM
+    cleanup
+    exit 130
+}
+
+mkdir -p "$ROOT"
+LOCK_DIR="$ROOT/.install.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    lock_pid="$(sed -n '1p' "$LOCK_DIR/pid" 2>/dev/null || true)"
+    if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+        fail "another M5StopWatch BLE STT install or upgrade is already running (PID $lock_pid); stop it before retrying"
+    fi
+    rm -rf "$LOCK_DIR"
+    mkdir "$LOCK_DIR" 2>/dev/null || fail "could not recover the stale installer lock at $LOCK_DIR"
+fi
+LOCK_ACQUIRED=1
+printf '%s\n' "$$" >"$LOCK_DIR/pid"
+trap cleanup EXIT
+trap stop_install HUP INT TERM
+
 if [ "$MODE" = "uninstall" ]; then
     say "Removing M5StopWatch BLE STT"
     if [ -x "$ROOT/current/source/.venv/bin/ble-stt-service" ]; then
@@ -110,25 +160,6 @@ if [ "$MODE" = "uninstall" ]; then
     fi
     exit 0
 fi
-
-cleanup() {
-    if [ -n "$WORK" ] && [ -d "$WORK" ]; then
-        rm -rf "$WORK"
-    fi
-    if [ -n "$TARGET" ] && [ "${INSTALL_COMPLETE:-0}" != "1" ] && [ -d "$TARGET" ]; then
-        if [ "$SERVICE_SWITCH_STARTED" = "1" ]; then
-            if [ -x "$OLD_SERVICE" ]; then
-                printf '\nRestoring the previous login service...\n' >&2
-                "$OLD_SERVICE" install -- --engine "$ENGINE" --model "$MODEL" || true
-            elif [ -x "$TARGET/source/.venv/bin/ble-stt-service" ]; then
-                printf '\nRemoving the incomplete login service...\n' >&2
-                "$TARGET/source/.venv/bin/ble-stt-service" uninstall || true
-            fi
-        fi
-        rm -rf "$TARGET"
-    fi
-}
-trap cleanup EXIT HUP INT TERM
 
 say "Checking this computer"
 LINUX_MISSING=""
@@ -228,23 +259,34 @@ if [ -x "$ROOT/current/source/.venv/bin/ble-stt-service" ]; then
     OLD_SERVICE="$ROOT/current/source/.venv/bin/ble-stt-service"
 fi
 TARGET="$ROOT/versions/$VERSION"
-if [ -e "$TARGET" ]; then
+REUSE_TARGET=0
+if [ -f "$TARGET/.environment-ready" ] && [ -x "$TARGET/source/.venv/bin/ble-stt" ]; then
+    REUSE_TARGET=1
+    TARGET_READY=1
+elif [ -e "$TARGET" ]; then
     TARGET="$ROOT/versions/$VERSION-$(date +%Y%m%d%H%M%S)"
 fi
-mkdir -p "$TARGET"
-mkdir -p "$TARGET/source"
-source_copy="$WORK/source-copy.tar"
-(cd "$SOURCE_DIR" && tar --exclude='.venv' --exclude='__pycache__' -cf "$source_copy" .)
-tar -xf "$source_copy" -C "$TARGET/source"
-
-say "Installing platform components"
-"$PYTHON" -m venv "$TARGET/source/.venv"
 VENV="$TARGET/source/.venv"
-"$VENV/bin/python" -m pip install --upgrade pip
-"$VENV/bin/python" -m pip install "$TARGET/source"
-if [ "$platform" = "Linux" ]; then
-    cp "$TARGET/source/run-service.sh" "$VENV/bin/ble-stt-run-service"
-    chmod +x "$VENV/bin/ble-stt-run-service"
+
+if [ "$REUSE_TARGET" = "1" ]; then
+    say "Reusing the prepared platform environment"
+    printf '[ok] Stable permission executable: %s\n' "$VENV/bin/python"
+else
+    mkdir -p "$TARGET/source"
+    source_copy="$WORK/source-copy.tar"
+    (cd "$SOURCE_DIR" && tar --exclude='.venv' --exclude='__pycache__' -cf "$source_copy" .)
+    tar -xf "$source_copy" -C "$TARGET/source"
+
+    say "Installing platform components"
+    "$PYTHON" -m venv "$VENV"
+    "$VENV/bin/python" -m pip install --upgrade pip
+    "$VENV/bin/python" -m pip install "$TARGET/source"
+    if [ "$platform" = "Linux" ]; then
+        cp "$TARGET/source/run-service.sh" "$VENV/bin/ble-stt-run-service"
+        chmod +x "$VENV/bin/ble-stt-run-service"
+    fi
+    printf '%s\n' "$VERSION" >"$TARGET/.environment-ready"
+    TARGET_READY=1
 fi
 
 say "Downloading and verifying the $MODEL speech model"
@@ -252,8 +294,12 @@ say "Downloading and verifying the $MODEL speech model"
 
 say "Checking input permissions"
 if [ "$platform" = "Darwin" ]; then
-    while ! "$VENV/bin/ble-stt" doctor --request-permissions; do
-        prompt_retry "Allow Python under System Settings > Privacy & Security > Accessibility."
+    while :; do
+        [ -x "$VENV/bin/ble-stt" ] || fail "the prepared install environment disappeared; stop any other installer and rerun this command"
+        "$VENV/bin/ble-stt" doctor --request-permissions && break
+        printf '\nmacOS does not always create a Python row automatically. In Accessibility, click +,\n'
+        printf 'press Shift-Command-G, paste this stable path, then add and enable it:\n  %s\n' "$VENV/bin/python"
+        prompt_retry "After adding that Python executable under System Settings > Privacy & Security > Accessibility,"
     done
 else
     "$VENV/bin/ble-stt" doctor
@@ -261,8 +307,14 @@ fi
 
 if [ "$MODE" = "install" ] && [ "$SKIP_TEST" != "1" ]; then
     say "Connecting and testing the watch"
-    while ! "$VENV/bin/ble-stt-check"; do
-        prompt_retry "Open BLE Remote on the watch and complete the computer's Bluetooth pairing prompt."
+    while :; do
+        [ -x "$VENV/bin/ble-stt-check" ] || fail "the prepared install environment disappeared; stop any other installer and rerun this command"
+        "$VENV/bin/ble-stt-check" && break
+        if [ "$platform" = "Darwin" ]; then
+            prompt_retry "Keep BLE Remote open while this installer triggers automatic encrypted pairing. If another computer keeps reconnecting, triple-tap the watch screen and choose Pair new computer; to stop Linux reconnect notifications, forget M5StopWatch HID on that Linux computer."
+        else
+            prompt_retry "Open BLE Remote on the watch and complete the computer's Bluetooth pairing prompt."
+        fi
     done
     "$VENV/bin/ble-stt" test --engine "$ENGINE" --model "$MODEL"
 fi

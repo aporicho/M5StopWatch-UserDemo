@@ -54,8 +54,9 @@ irm https://github.com/aporicho/M5StopWatch-UserDemo/releases/latest/download/bl
 
 ### 快速体验
 
-1. 在手表上保持 **BLE Remote** 打开，并接受电脑弹出的蓝牙配对请求；系统要求 PIN 时输入 `123456`。
-2. macOS 按提示授予“辅助功能”权限。Linux 需要 Hyprland 和 `wtype`，安装器可以补齐缺少的系统软件包。
+1. 在手表上保持 **BLE Remote** 打开；安装器会触发自动加密配对，macOS 无需提前在蓝牙设置中手动连接，也不需要输入 PIN。
+   如果旧电脑持续自动重连，请连续轻点手表屏幕三次，选择 **Pair new computer** 后再继续。
+2. macOS 按提示授予“辅助功能”权限；若列表没有 Python，点击 `+`，按 `Shift-Command-G` 粘贴安装器打印的稳定路径后添加。Linux 需要 Hyprland 和 `wtype`，安装器可以补齐缺少的系统软件包。
 3. 聚焦一个空白文本窗口，按住手表右键说话，然后松开。识别结果会写入该窗口，但不会自动提交或发送。
 4. 运行 `ble-stt status` 查看登录服务、手表配对、语音模型和文字输入权限状态。
 

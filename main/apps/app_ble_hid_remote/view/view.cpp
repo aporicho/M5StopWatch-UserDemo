@@ -35,7 +35,7 @@ constexpr uint32_t ConnectedColor        = 0x4AD78C;
 constexpr uint32_t AdvertisingColor      = 0x65A9FF;
 constexpr uint32_t StartingColor         = 0xF4CA63;
 constexpr uint32_t ErrorColor            = 0xFF7187;
-constexpr uint32_t ForgetButtonColor     = 0x3A404D;
+constexpr uint32_t PairButtonColor       = 0x3A404D;
 constexpr uint32_t DialogBackgroundColor = 0x292E39;
 
 void configureKeyPanel(Container& panel, int x)
@@ -53,7 +53,7 @@ void configureKeyPanel(Container& panel, int x)
 
 }  // namespace
 
-void ForgetBondDialog::init(lv_obj_t* parent)
+void PairComputerDialog::init(lv_obj_t* parent)
 {
     _confirmed = false;
     _cancelled = false;
@@ -71,13 +71,13 @@ void ForgetBondDialog::init(lv_obj_t* parent)
     _panel->moveForeground();
 
     _title = std::make_unique<Label>(_panel->get());
-    _title->setText("Forget computer?");
+    _title->setText("Pair new computer?");
     _title->setTextFont(&MontserratSemiBold26);
     _title->setTextColor(lv_color_hex(PrimaryTextColor));
     _title->align(LV_ALIGN_TOP_MID, 0, 29);
 
     _message = std::make_unique<Label>(_panel->get());
-    _message->setText("A new computer can pair afterwards");
+    _message->setText("The old computer will be disconnected");
     _message->setTextFont(&lv_font_montserrat_16);
     _message->setTextColor(lv_color_hex(SecondaryTextColor));
     _message->align(LV_ALIGN_TOP_MID, 0, 70);
@@ -89,7 +89,7 @@ void ForgetBondDialog::init(lv_obj_t* parent)
     _confirm_button->setBorderWidth(0);
     _confirm_button->setShadowWidth(0);
     _confirm_button->setBgColor(lv_color_hex(ErrorColor));
-    _confirm_button->label().setText("Forget");
+    _confirm_button->label().setText("Pair");
     _confirm_button->label().setTextFont(&lv_font_montserrat_22);
     _confirm_button->label().setTextColor(lv_color_hex(PrimaryTextColor));
     _confirm_button->label().align(LV_ALIGN_CENTER, 0, 0);
@@ -111,8 +111,8 @@ void ForgetBondDialog::init(lv_obj_t* parent)
 
 void BleHidRemoteView::init(lv_obj_t* parent)
 {
-    _forget_requested = false;
-    _wheel_pending    = 0;
+    _pair_requested = false;
+    _wheel_pending  = 0;
     resetGesture();
 
     _panel = std::make_unique<Container>(parent);
@@ -162,7 +162,7 @@ void BleHidRemoteView::init(lv_obj_t* parent)
     _status_label->align(LV_ALIGN_LEFT_MID, 51, 0);
 
     _device_label = std::make_unique<Label>(_controls_layer->get());
-    _device_label->setText("M5StopWatch HID + STT  |  PIN 123456");
+    _device_label->setText("M5StopWatch HID + STT  |  Secure auto pairing");
     _device_label->setTextFont(&lv_font_montserrat_16);
     _device_label->setTextColor(lv_color_hex(SecondaryTextColor));
     _device_label->align(LV_ALIGN_TOP_MID, 0, 88);
@@ -206,18 +206,18 @@ void BleHidRemoteView::init(lv_obj_t* parent)
     _gesture_hint_label->setTextColor(lv_color_hex(SecondaryTextColor));
     _gesture_hint_label->align(LV_ALIGN_CENTER, 0, 96);
 
-    _forget_button = std::make_unique<Button>(_controls_layer->get());
-    _forget_button->setSize(210, 54);
-    _forget_button->align(LV_ALIGN_BOTTOM_MID, 0, -31);
-    _forget_button->setRadius(LV_RADIUS_CIRCLE);
-    _forget_button->setBorderWidth(0);
-    _forget_button->setShadowWidth(0);
-    _forget_button->setBgColor(lv_color_hex(ForgetButtonColor));
-    _forget_button->label().setText("Forget computer");
-    _forget_button->label().setTextFont(&lv_font_montserrat_18);
-    _forget_button->label().setTextColor(lv_color_hex(PrimaryTextColor));
-    _forget_button->label().align(LV_ALIGN_CENTER, 0, 0);
-    _forget_button->onClick().connect([this]() { showForgetDialog(); });
+    _pair_button = std::make_unique<Button>(_controls_layer->get());
+    _pair_button->setSize(210, 54);
+    _pair_button->align(LV_ALIGN_BOTTOM_MID, 0, -31);
+    _pair_button->setRadius(LV_RADIUS_CIRCLE);
+    _pair_button->setBorderWidth(0);
+    _pair_button->setShadowWidth(0);
+    _pair_button->setBgColor(lv_color_hex(PairButtonColor));
+    _pair_button->label().setText("Pair new computer");
+    _pair_button->label().setTextFont(&lv_font_montserrat_18);
+    _pair_button->label().setTextColor(lv_color_hex(PrimaryTextColor));
+    _pair_button->label().align(LV_ALIGN_CENTER, 0, 0);
+    _pair_button->onClick().connect([this]() { showPairDialog(); });
 
     _displayed_state = model::BleHidRemote::State::Stopped;
     _displayed_error = 0;
@@ -248,13 +248,13 @@ void BleHidRemoteView::update(model::BleHidRemote::State state, int lastError, b
         return;
     }
 
-    if (_forget_dialog) {
+    if (_pair_dialog) {
         resetGesture();
-        if (_forget_dialog->isConfirmed()) {
-            _forget_requested = true;
-            _forget_dialog.reset();
-        } else if (_forget_dialog->isCancelled()) {
-            _forget_dialog.reset();
+        if (_pair_dialog->isConfirmed()) {
+            _pair_requested = true;
+            _pair_dialog.reset();
+        } else if (_pair_dialog->isCancelled()) {
+            _pair_dialog.reset();
         }
         return;
     }
@@ -281,10 +281,10 @@ int8_t BleHidRemoteView::consumeWheelDelta()
     return static_cast<int8_t>(delta);
 }
 
-bool BleHidRemoteView::consumeForgetRequested()
+bool BleHidRemoteView::consumePairRequested()
 {
-    const bool requested = _forget_requested;
-    _forget_requested    = false;
+    const bool requested = _pair_requested;
+    _pair_requested      = false;
     return requested;
 }
 
@@ -426,8 +426,8 @@ void BleHidRemoteView::setControlsVisible(bool visible)
         _controls_layer->removeFlag(LV_OBJ_FLAG_HIDDEN);
     } else {
         _controls_layer->addFlag(LV_OBJ_FLAG_HIDDEN);
-        _forget_dialog.reset();
-        _forget_requested = false;
+        _pair_dialog.reset();
+        _pair_requested = false;
     }
 }
 
@@ -502,9 +502,9 @@ void BleHidRemoteView::resetGesture()
     _gesture_remainder = 0;
 }
 
-void BleHidRemoteView::showForgetDialog()
+void BleHidRemoteView::showPairDialog()
 {
     resetGesture();
-    _forget_dialog = std::make_unique<ForgetBondDialog>();
-    _forget_dialog->init(_controls_layer->get());
+    _pair_dialog = std::make_unique<PairComputerDialog>();
+    _pair_dialog->init(_controls_layer->get());
 }

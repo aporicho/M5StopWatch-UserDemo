@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import platform
+import sys
 from dataclasses import dataclass
 from typing import Any
 
@@ -15,7 +16,13 @@ class MacWindowToken:
 
 
 class MacOSTextInjector:
-    def __init__(self, quartz: Any | None = None, appkit: Any | None = None) -> None:
+    def __init__(
+        self,
+        quartz: Any | None = None,
+        appkit: Any | None = None,
+        accessibility: Any | None = None,
+    ) -> None:
+        injected_quartz = quartz is not None
         if quartz is None:
             import Quartz
 
@@ -24,17 +31,31 @@ class MacOSTextInjector:
             import AppKit
 
             appkit = AppKit
+        if accessibility is None:
+            if injected_quartz:
+                # Tests and embedders may provide a combined compatibility
+                # object matching older PyObjC releases.
+                accessibility = quartz
+            else:
+                import ApplicationServices
+
+                accessibility = ApplicationServices
         self.quartz = quartz
         self.appkit = appkit
+        self.accessibility = accessibility
         self._warned_no_window = False
 
     def check_accessibility(self, prompt: bool = False) -> bool:
-        options = {self.quartz.kAXTrustedCheckOptionPrompt: bool(prompt)}
-        return bool(self.quartz.AXIsProcessTrustedWithOptions(options))
+        prompt_key = getattr(
+            self.accessibility,
+            "kAXTrustedCheckOptionPrompt",
+            "AXTrustedCheckOptionPrompt",
+        )
+        return bool(self.accessibility.AXIsProcessTrustedWithOptions({prompt_key: bool(prompt)}))
 
     def _copy_ax_value(self, element: object, attribute: str) -> object | None:
         try:
-            result = self.quartz.AXUIElementCopyAttributeValue(element, attribute, None)
+            result = self.accessibility.AXUIElementCopyAttributeValue(element, attribute, None)
         except Exception:
             return None
         if isinstance(result, tuple):
@@ -48,8 +69,8 @@ class MacOSTextInjector:
         if application is None:
             return None
         pid = int(application.processIdentifier())
-        ax_application = self.quartz.AXUIElementCreateApplication(pid)
-        window = self._copy_ax_value(ax_application, self.quartz.kAXFocusedWindowAttribute)
+        ax_application = self.accessibility.AXUIElementCreateApplication(pid)
+        window = self._copy_ax_value(ax_application, self.accessibility.kAXFocusedWindowAttribute)
         return MacWindowToken(pid, window)
 
     def _same_window(self, expected: MacWindowToken, current: MacWindowToken) -> bool:
@@ -118,7 +139,10 @@ class MacOSPlatform(PlatformAdapter):
             return False, f"PyObjC is unavailable: {exc}"
         if trusted:
             return True, "macOS Accessibility permission is granted"
-        return False, "allow this Python executable in System Settings > Privacy & Security > Accessibility"
+        return False, (
+            "in System Settings > Privacy & Security > Accessibility, click +, press Shift-Command-G, "
+            f"then add and enable {sys.executable}"
+        )
 
     async def _retrieve_system_device(self, identifier: str | None):
         from bleak.backends.corebluetooth.CentralManagerDelegate import CentralManagerDelegate

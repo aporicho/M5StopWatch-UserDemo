@@ -120,7 +120,7 @@ void AppBleHidRemote::onRunning()
     }
 
     int8_t wheelDelta = 0;
-    bool forgetBond   = false;
+    bool pairComputer = false;
     if (_view) {
         LvglLockGuard lock;
         if (keyFlashed) {
@@ -128,12 +128,12 @@ void AppBleHidRemote::onRunning()
         }
         _view->update(_remote->state(), _remote->lastError(), _remote->isSpeechReady(), _remote->isSpeechActive(),
                       _remote->hostStatus(), _remote->hostError());
-        wheelDelta = _view->consumeWheelDelta();
-        forgetBond = _view->consumeForgetRequested();
+        wheelDelta   = _view->consumeWheelDelta();
+        pairComputer = _view->consumePairRequested();
     }
 
-    if (forgetBond) {
-        _remote->forgetBond();
+    if (pairComputer) {
+        _remote->pairNewComputer();
     } else if (wheelDelta != 0) {
         _remote->sendWheel(wheelDelta);
     }

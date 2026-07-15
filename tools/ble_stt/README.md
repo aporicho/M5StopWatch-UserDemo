@@ -33,6 +33,8 @@ irm https://github.com/aporicho/M5StopWatch-UserDemo/releases/latest/download/bl
 
 模型文件较大，安装期间会显示下载进度。安装中断后可以直接重试，已经完成的模型缓存会被复用。安装、升级和回滚按版本隔离；新版本验证失败时会保留原有可用版本。
 
+同一时间只能运行一个安装或升级过程。如果先前的安装仍停在权限或配对提示，请先按 `Ctrl-C` 停止它再重试；安装器会立即退出并清理尚未安装完成的临时文件。已经准备好的版本环境会保留，因此 macOS 辅助功能授权对应的 Python 路径在重试后仍然有效。权限检查会打印完整路径；如果列表里没有现成的 Python 项，点击 `+`，按 `Shift-Command-G` 粘贴该路径，再添加并启用。环境意外消失时安装器会直接报错，不会继续误报为权限未授权。
+
 一般不需要管理员权限。只有电脑缺少 Python、BlueZ 或 `wtype` 等系统软件包时，Linux 安装器才可能请求 `sudo`。
 
 可通过环境变量调整安装行为：
@@ -40,15 +42,15 @@ irm https://github.com/aporicho/M5StopWatch-UserDemo/releases/latest/download/bl
 - `BLE_STT_SKIP_TEST=1`：跳过交互式手表测试，适合无人值守安装。
 - `BLE_STT_MODEL=small`：使用体积更小、速度更快的模型。
 - `BLE_STT_ENGINE=auto`：选择识别后端；默认已是 `auto`。
-- `BLE_STT_VERSION=ble-stt-v0.3.0`：固定到指定 Release 标签。
+- `BLE_STT_VERSION=ble-stt-v0.3.2`：固定到指定 Release 标签。
 - `BLE_STT_ASSET_BASE=...`：从可信的内部 Release 镜像下载安装资源。
 
 ## 配对与安装验证
 
 安装期间请在手表上保持 **BLE Remote** 打开。
 
-- **macOS**：CoreBluetooth 首次连接时会发起配对。接受蓝牙提示，并按安装器提示在“系统设置 → 隐私与安全性 → 辅助功能”中允许显示的 Python 可执行程序。
-- **Windows / Linux**：使用系统蓝牙设置配对 `M5StopWatch HID`，系统要求 PIN 时输入 `123456`。
+- **macOS**：保持 BLE Remote 打开，由安装器连接加密特征并触发自动配对；无需提前在蓝牙设置中手动连接，也不需要输入 PIN。按安装器提示在“系统设置 → 隐私与安全性 → 辅助功能”中添加显示的 Python 可执行程序。
+- **Windows / Linux**：保持 BLE Remote 打开后连接 `M5StopWatch HID`；使用 Secure Connections 自动加密配对，不需要输入 PIN。
 
 最终测试时，先聚焦一个空白文本窗口，再按住手表右键说话并松开。手表会依次显示“正在准备语音模型”“语音输入已就绪”“正在聆听”和“正在识别”。短按右键仍然发送 Enter；一次语音输入结束后不会自动提交识别出的文字。
 
@@ -92,7 +94,7 @@ ble-stt run --engine faster-whisper --device cpu --model small
 - macOS：`~/Library/Logs/M5StopWatch`
 - Windows：`%LOCALAPPDATA%\M5StopWatch\Logs`
 
-如果操作系统中的旧绑定只暴露 HID 服务，没有语音 GATT 服务，请先在手表上选择 **Forget computer**，再从电脑的蓝牙设置中移除该设备，然后重新配对。
+如果另一台电脑持续自动重连，请在 BLE Remote 屏幕连续轻点三次打开控制页，再选择 **Pair new computer**。手表会记住并暂时拒绝最后连接的电脑以及已有绑定，新电脑加密配对成功后才删除旧绑定。固件无法命令另一台电脑停止主动重试；若要停止 Linux 自己的重连通知，还需在那台 Linux 的蓝牙设置中“忘记”`M5StopWatch HID`。若 macOS 系统里存在失败连接留下的旧条目，也可先移除后重试。
 
 ## 本地开发
 
