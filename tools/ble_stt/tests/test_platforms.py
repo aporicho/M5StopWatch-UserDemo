@@ -30,8 +30,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(
                 install_dir("win32"), Path("C:/Users/test/AppData/Local/M5StopWatch/ble-stt")
             )
-        self.assertTrue(str(install_dir("darwin")).endswith("M5StopWatch/ble-stt"))
-        self.assertTrue(str(model_cache_dir("darwin")).endswith("Caches/M5StopWatch/ble-stt"))
+        self.assertTrue(install_dir("darwin").as_posix().endswith("M5StopWatch/ble-stt"))
+        self.assertTrue(model_cache_dir("darwin").as_posix().endswith("Caches/M5StopWatch/ble-stt"))
 
     def test_device_identifier_round_trip(self):
         with tempfile.TemporaryDirectory() as directory:
