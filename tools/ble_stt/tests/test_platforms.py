@@ -265,11 +265,12 @@ class ServiceRenderingTests(unittest.TestCase):
         from ble_stt.service import ServiceManager
 
         manager = ServiceManager("darwin")
-        with patch.object(manager, "is_installed", return_value=True):
-            run.return_value = Mock(returncode=0, stdout="state = exited\n", stderr="")
-            self.assertFalse(manager.is_active())
-            run.return_value = Mock(returncode=0, stdout="state = running\n", stderr="")
-            self.assertTrue(manager.is_active())
+        with patch("ble_stt.service.os.getuid", return_value=501, create=True):
+            with patch.object(manager, "is_installed", return_value=True):
+                run.return_value = Mock(returncode=0, stdout="state = exited\n", stderr="")
+                self.assertFalse(manager.is_active())
+                run.return_value = Mock(returncode=0, stdout="state = running\n", stderr="")
+                self.assertTrue(manager.is_active())
 
     def test_windows_action_quotes_paths(self):
         value = windows_task_action(["C:\\Program Files\\Python\\python.exe", "-m", "ble_stt"])
