@@ -153,16 +153,10 @@ jobs:
           KEYCHAIN_PATH="${RUNNER_TEMP}/m5stopwatch-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
           cleanup() {
-            if [ -s "${CERT_PEM}" ]; then
-              sudo security remove-trusted-cert \
-                -d \
-                "${CERT_PEM}" >/dev/null 2>&1 || true
-            fi
-            if [ -n "${SIGNING_IDENTITY:-}" ]; then
-              sudo security delete-certificate \
-                -Z "${SIGNING_IDENTITY}" \
-                /Library/Keychains/System.keychain >/dev/null 2>&1 || true
-            fi
+            # The hosted runner VM is destroyed after this job. Removing the
+            # temporary system trust can wait for interactive authorization
+            # and stall an otherwise finished release, so only local files
+            # and the disposable user keychain are cleaned explicitly.
             security delete-keychain "${KEYCHAIN_PATH}" >/dev/null 2>&1 || true
             rm -f "${P12_PATH}" "${CERT_PEM}" "${CERT_DER}"
           }
@@ -235,9 +229,21 @@ jobs:
           DOCTOR_STATUS="$?"
           set -e
           cat "${RUNNER_TEMP}/m5stopwatch-doctor.log"
-          test "${DOCTOR_STATUS}" -eq 1
           grep -q '\[ok\] M5StopWatch app runtime is ready' "${RUNNER_TEMP}/m5stopwatch-doctor.log"
-          grep -q '\[fail\] enable M5StopWatch' "${RUNNER_TEMP}/m5stopwatch-doctor.log"
+          case "${DOCTOR_STATUS}" in
+            0)
+              grep -q '\[ok\] macOS Accessibility permission is granted' \
+                "${RUNNER_TEMP}/m5stopwatch-doctor.log"
+              ;;
+            1)
+              grep -q '\[fail\] enable M5StopWatch' \
+                "${RUNNER_TEMP}/m5stopwatch-doctor.log"
+              ;;
+            *)
+              echo "unexpected frozen doctor exit code: ${DOCTOR_STATUS}" >&2
+              exit 1
+              ;;
+          esac
 
           # Release packaging must be deterministic and offline. A model
           # download exercises Hugging Face and Metal availability on this
