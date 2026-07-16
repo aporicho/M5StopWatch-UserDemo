@@ -1,12 +1,33 @@
 from __future__ import annotations
 
 import platform
+import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Any
 
 from ..protocol import DEVICE_NAME, SERVICE_UUID
 from .base import PlatformAdapter
+
+
+ACCESSIBILITY_SETTINGS_URL = (
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+)
+
+
+def _accessibility_principal() -> str:
+    return "M5StopWatch" if getattr(sys, "frozen", False) else sys.executable
+
+
+def _accessibility_instructions() -> str:
+    if getattr(sys, "frozen", False):
+        return (
+            "enable M5StopWatch in System Settings > Privacy & Security > Accessibility"
+        )
+    return (
+        "in System Settings > Privacy & Security > Accessibility, click +, press Shift-Command-G, "
+        f"then add and enable {sys.executable}"
+    )
 
 
 @dataclass(frozen=True)
@@ -103,7 +124,8 @@ class MacOSTextInjector:
             return True
         if not self.check_accessibility(False):
             raise RuntimeError(
-                "Accessibility permission is required; run 'ble-stt-doctor --request-permissions' and allow Python"
+                "Accessibility permission is required; run 'ble-stt doctor --request-permissions' "
+                f"and allow {_accessibility_principal()}"
             )
         current = self.active_window()
         if isinstance(expected_window, MacWindowToken):
@@ -129,7 +151,7 @@ class MacOSPlatform(PlatformAdapter):
         injector = self.create_text_injector()
         if not injector.check_accessibility(False):
             raise RuntimeError(
-                "Accessibility permission is required; run 'ble-stt-doctor --request-permissions' first"
+                "Accessibility permission is required; run 'ble-stt doctor --request-permissions' first"
             )
 
     def check_input_permission(self, prompt: bool = False) -> tuple[bool, str]:
@@ -139,9 +161,14 @@ class MacOSPlatform(PlatformAdapter):
             return False, f"PyObjC is unavailable: {exc}"
         if trusted:
             return True, "macOS Accessibility permission is granted"
-        return False, (
-            "in System Settings > Privacy & Security > Accessibility, click +, press Shift-Command-G, "
-            f"then add and enable {sys.executable}"
+        return False, _accessibility_instructions()
+
+    def open_input_permission_settings(self) -> None:
+        subprocess.run(
+            ["open", ACCESSIBILITY_SETTINGS_URL],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
 
     async def _retrieve_system_device(self, identifier: str | None):

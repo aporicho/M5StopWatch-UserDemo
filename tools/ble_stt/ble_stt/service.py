@@ -6,6 +6,7 @@ import plistlib
 import subprocess
 import sys
 from pathlib import Path
+from typing import Sequence
 
 from .config import log_dir
 
@@ -14,7 +15,10 @@ WINDOWS_TASK_NAME = "M5StopWatch BLE STT"
 
 
 def service_arguments(extra_args: list[str] | None = None) -> list[str]:
-    return [sys.executable, "-m", "ble_stt", "run", *(extra_args or [])]
+    arguments = [sys.executable]
+    if not getattr(sys, "frozen", False):
+        arguments.extend(("-m", "ble_stt"))
+    return [*arguments, "run", *(extra_args or [])]
 
 
 def _systemd_quote(value: str) -> str:
@@ -50,6 +54,7 @@ def render_launch_agent(arguments: list[str], stdout_path: Path, stderr_path: Pa
             "RunAtLoad": True,
             "KeepAlive": {"SuccessfulExit": False},
             "ProcessType": "Interactive",
+            "LimitLoadToSessionType": "Aqua",
             "StandardOutPath": str(stdout_path),
             "StandardErrorPath": str(stderr_path),
             "EnvironmentVariables": {"PYTHONUNBUFFERED": "1"},
@@ -165,7 +170,12 @@ class ServiceManager:
             command = ["powershell", "-NoProfile", "-Command", expression]
         else:
             return False
-        return subprocess.run(command, text=True, capture_output=True).returncode == 0
+        result = subprocess.run(command, text=True, capture_output=True)
+        if result.returncode != 0:
+            return False
+        if self.platform_name == "darwin":
+            return any(line.strip() == "state = running" for line in result.stdout.splitlines())
+        return True
 
     def stop(self) -> None:
         if not self.is_installed():
@@ -218,14 +228,17 @@ class ServiceManager:
         result = subprocess.run(command, text=True, capture_output=True)
         output = result.stdout if result.returncode == 0 else result.stderr
         print(output.rstrip())
+        if self.platform_name == "darwin" and result.returncode == 0:
+            running = any(line.strip() == "state = running" for line in result.stdout.splitlines())
+            return 0 if running else 1
         return result.returncode
 
 
-def main() -> None:
+def main(argv: Sequence[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Manage the M5StopWatch STT login service")
     parser.add_argument("action", choices=("install", "status", "uninstall"))
     parser.add_argument("service_args", nargs=argparse.REMAINDER, help="arguments passed to ble-stt after --")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     manager = ServiceManager()
     service_args = args.service_args[1:] if args.service_args[:1] == ["--"] else args.service_args
     if args.action == "install":

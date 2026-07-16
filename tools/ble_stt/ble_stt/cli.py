@@ -22,6 +22,7 @@ COMMANDS = {
     "test",
     "logs",
     "restart",
+    "service",
     "upgrade",
     "uninstall",
     "prepare",
@@ -85,8 +86,20 @@ def run_test(argv: Sequence[str]) -> int:
     try:
         from .main import main as runtime_main
 
-        runtime_main(["--once", *argv])
-    finally:
+        try:
+            runtime_main(["--once", *argv])
+        except SystemExit as exc:
+            if exc.code not in (None, 0):
+                raise
+    except BaseException:
+        if was_active:
+            print("Restarting the background helper...")
+            try:
+                manager.start()
+            except Exception as exc:
+                print(f"[warn] Could not restart the background helper: {exc}", file=sys.stderr)
+        raise
+    else:
         if was_active:
             print("Restarting the background helper...")
             manager.start()
@@ -177,6 +190,7 @@ Commands:
   test         Complete one push-to-talk insertion and exit
   logs         Show or follow background service logs
   restart      Restart the login service
+  service      Install, inspect, or remove the login service
   upgrade      Install the latest stable release
   uninstall    Remove the service and program (models are kept unless requested)
   run          Run the helper in the foreground (development/troubleshooting)
@@ -222,6 +236,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             ServiceManager().restart()
             print("[ok] Background helper restarted.")
             code = 0
+        elif command == "service":
+            from .service import main as service_main
+
+            service_main(values)
+            return
         elif command in ("upgrade", "uninstall"):
             if command == "uninstall":
                 parser = argparse.ArgumentParser(prog="ble-stt uninstall")

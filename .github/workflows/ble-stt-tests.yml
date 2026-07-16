@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
       - name: Run platform-independent tests
         shell: bash
-        run: PYTHONPATH=tools/ble_stt python -m unittest discover -s tools/ble_stt/tests -v
+        run: PYTHONPATH=tools/ble_stt python -W error -m unittest discover -s tools/ble_stt/tests -v
       - name: Check Python CLI
         shell: bash
         run: |
@@ -50,6 +50,8 @@ jobs:
         run: |
           sh -n tools/ble_stt/install.sh
           bash -n tools/ble_stt/run-service.sh
+          bash -n tools/ble_stt/macos/build-app.sh
+          bash -n tools/ble_stt/macos/bootstrap-self-signing.sh
       - name: Check PowerShell installer
         if: runner.os == 'Windows'
         shell: pwsh

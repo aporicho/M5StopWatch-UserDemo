@@ -61,6 +61,8 @@ release/
 out/
 bin/
 obj/
+tools/ble_stt/.macos-build/
+tools/ble_stt/dist-macos/
 
 *.code-workspace
 

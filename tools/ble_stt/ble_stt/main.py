@@ -420,7 +420,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     try:
         asyncio.run(async_main(parse_args(argv)))
     except KeyboardInterrupt:
-        print("\nStopped")
+        print("\nStopped", file=sys.stderr)
+        raise SystemExit(130) from None
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc

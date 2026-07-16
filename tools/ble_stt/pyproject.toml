@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "m5stopwatch-ble-stt"
-version = "0.3.2"
+version = "0.3.3"
 description = "Cross-platform local speech-to-text helper for the M5StopWatch BLE Remote app"
 requires-python = ">=3.10"
 dependencies = [

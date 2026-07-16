@@ -8,9 +8,67 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: ble-stt-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  release:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Run platform-independent tests
+        shell: bash
+        run: PYTHONPATH=tools/ble_stt python -W error -m unittest discover -s tools/ble_stt/tests -v
+      - name: Check Python CLI
+        shell: bash
+        run: |
+          PYTHONPATH=tools/ble_stt python -m ble_stt --help
+          PYTHONPATH=tools/ble_stt python -m compileall -q tools/ble_stt/ble_stt
+      - name: Build and smoke-test the Python package
+        shell: bash
+        run: |
+          python -m pip install --upgrade build
+          python -m build tools/ble_stt
+          python -m pip install --no-deps --force-reinstall tools/ble_stt/dist/*.whl
+          ble-stt --help
+          ble-stt-check --help
+          ble-stt-doctor --help
+          ble-stt-service --help
+      - name: Check POSIX installers
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          sh -n tools/ble_stt/install.sh
+          bash -n tools/ble_stt/run-service.sh
+          bash -n tools/ble_stt/macos/build-app.sh
+          bash -n tools/ble_stt/macos/bootstrap-self-signing.sh
+      - name: Check PowerShell installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path tools/ble_stt/install.ps1),
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count) { throw ($errors | Out-String) }
+
+  source-assets:
+    name: Build source installers
     runs-on: ubuntu-latest
+    env:
+      MACOS_SIGNING_CERT_SHA256: ${{ vars.MACOS_SIGNING_CERT_SHA256 }}
     steps:
       - uses: actions/checkout@v5
       - name: Build source and installer assets
@@ -18,27 +76,295 @@ jobs:
         run: |
           VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' tools/ble_stt/pyproject.toml | head -n 1)"
           test "${GITHUB_REF_NAME}" = "ble-stt-v${VERSION}"
+
+          FINGERPRINT="$(printf '%s' "${MACOS_SIGNING_CERT_SHA256}" | tr '[:lower:]' '[:upper:]')"
+          test "${#FINGERPRINT}" -eq 64
+          case "${FINGERPRINT}" in
+            *[!0-9A-F]*) echo "MACOS_SIGNING_CERT_SHA256 must be 64 hexadecimal characters" >&2; exit 1 ;;
+          esac
+
           tar \
             --exclude='ble_stt/.venv' \
+            --exclude='ble_stt/.macos-build' \
+            --exclude='ble_stt/dist-macos' \
             --exclude='ble_stt/**/__pycache__' \
             -czf ble-stt-source.tar.gz -C tools ble_stt
           (cd tools && zip -qr ../ble-stt-source.zip ble_stt \
-            -x 'ble_stt/.venv/*' 'ble_stt/**/__pycache__/*')
+            -x 'ble_stt/.venv/*' \
+               'ble_stt/.macos-build/*' \
+               'ble_stt/dist-macos/*' \
+               'ble_stt/**/__pycache__/*')
           sha256sum ble-stt-source.tar.gz > ble-stt-source.tar.gz.sha256
           sha256sum ble-stt-source.zip > ble-stt-source.zip.sha256
+
           cp tools/ble_stt/install.sh ble-stt-install.sh
+          sed -i "s/__MACOS_SIGNING_CERTIFICATE_SHA256__/${FINGERPRINT}/g" ble-stt-install.sh
+          if grep -q '__MACOS_SIGNING_CERTIFICATE_SHA256__' ble-stt-install.sh; then
+            echo "macOS signing certificate placeholder was not replaced" >&2
+            exit 1
+          fi
+          sh -n ble-stt-install.sh
           cp tools/ble_stt/install.ps1 ble-stt-install.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ble-stt-source-assets
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            ble-stt-source.tar.gz
+            ble-stt-source.tar.gz.sha256
+            ble-stt-source.zip
+            ble-stt-source.zip.sha256
+            ble-stt-install.sh
+            ble-stt-install.ps1
+
+  macos-app:
+    name: Build signed macOS App
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      MACOS_SIGNING_P12_BASE64: ${{ secrets.MACOS_SIGNING_P12_BASE64 }}
+      MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+      MACOS_SIGNING_CERT_SHA256: ${{ vars.MACOS_SIGNING_CERT_SHA256 }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: tools/ble_stt/macos/requirements-build.txt
+      - name: Import signing identity, build, and verify App
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = arm64
+          test -n "${MACOS_SIGNING_P12_BASE64}"
+          test -n "${MACOS_SIGNING_P12_PASSWORD}"
+
+          EXPECTED_FINGERPRINT="$(printf '%s' "${MACOS_SIGNING_CERT_SHA256}" | tr '[:lower:]' '[:upper:]')"
+          test "${#EXPECTED_FINGERPRINT}" -eq 64
+          case "${EXPECTED_FINGERPRINT}" in
+            *[!0-9A-F]*) echo "MACOS_SIGNING_CERT_SHA256 must be 64 hexadecimal characters" >&2; exit 1 ;;
+          esac
+
+          P12_PATH="${RUNNER_TEMP}/m5stopwatch-signing.p12"
+          CERT_PEM="${RUNNER_TEMP}/m5stopwatch-signing.pem"
+          CERT_DER="${RUNNER_TEMP}/m5stopwatch-signing.der"
+          KEYCHAIN_PATH="${RUNNER_TEMP}/m5stopwatch-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          cleanup() {
+            if [ -s "${CERT_PEM}" ]; then
+              sudo security remove-trusted-cert \
+                -d \
+                "${CERT_PEM}" >/dev/null 2>&1 || true
+            fi
+            if [ -n "${SIGNING_IDENTITY:-}" ]; then
+              sudo security delete-certificate \
+                -Z "${SIGNING_IDENTITY}" \
+                /Library/Keychains/System.keychain >/dev/null 2>&1 || true
+            fi
+            security delete-keychain "${KEYCHAIN_PATH}" >/dev/null 2>&1 || true
+            rm -f "${P12_PATH}" "${CERT_PEM}" "${CERT_DER}"
+          }
+          trap cleanup EXIT HUP INT TERM
+
+          printf '%s' "${MACOS_SIGNING_P12_BASE64}" | /usr/bin/base64 -D >"${P12_PATH}"
+          openssl pkcs12 \
+            -in "${P12_PATH}" \
+            -nokeys \
+            -passin "pass:${MACOS_SIGNING_P12_PASSWORD}" \
+            -out "${CERT_PEM}"
+          openssl x509 -in "${CERT_PEM}" -noout
+          openssl x509 -in "${CERT_PEM}" -outform DER -out "${CERT_DER}"
+          ACTUAL_FINGERPRINT="$(shasum -a 256 "${CERT_DER}" | awk '{print toupper($1)}')"
+          test "${ACTUAL_FINGERPRINT}" = "${EXPECTED_FINGERPRINT}" || {
+            echo "signing certificate fingerprint does not match the repository variable" >&2
+            exit 1
+          }
+          SIGNING_IDENTITY="$(openssl x509 -in "${CERT_PEM}" -noout -fingerprint -sha1 | cut -d= -f2 | tr -d ':')"
+
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${P12_PATH}" \
+            -k "${KEYCHAIN_PATH}" \
+            -P "${MACOS_SIGNING_P12_PASSWORD}" \
+            -T /usr/bin/codesign
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "${KEYCHAIN_PASSWORD}" \
+            "${KEYCHAIN_PATH}"
+          # Hosted runners have passwordless sudo. Trust is added only to this
+          # disposable build VM, so code signing never opens an auth dialog.
+          sudo security add-trusted-cert \
+            -d \
+            -r trustRoot \
+            -p codeSign \
+            -k /Library/Keychains/System.keychain \
+            "${CERT_PEM}"
+          security list-keychains -d user -s "${KEYCHAIN_PATH}"
+          security find-certificate -Z "${KEYCHAIN_PATH}" | grep -qi "${SIGNING_IDENTITY}"
+          security find-identity -v -p codesigning "${KEYCHAIN_PATH}" \
+            | grep -qi "${SIGNING_IDENTITY}"
+
+          CODESIGN_IDENTITY="${SIGNING_IDENTITY}" PYTHON=python3.12 \
+            bash tools/ble_stt/macos/build-app.sh
+
+          APP="tools/ble_stt/dist-macos/M5StopWatch.app"
+          EXECUTABLE="${APP}/Contents/MacOS/M5StopWatch"
+          test -x "${EXECUTABLE}"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP}/Contents/Info.plist")" \
+            = "com.aporicho.m5stopwatch-ble-stt"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "${APP}/Contents/Info.plist")" \
+            = "14.4"
+          test "$(lipo -archs "${EXECUTABLE}")" = arm64
+          codesign --verify --deep --strict --verbose=2 "${APP}"
+
+          SIGNED_CERT_PREFIX="${RUNNER_TEMP}/m5stopwatch-app-cert-"
+          codesign -d --extract-certificates="${SIGNED_CERT_PREFIX}" "${APP}"
+          SIGNED_FINGERPRINT="$(shasum -a 256 "${SIGNED_CERT_PREFIX}0" | awk '{print toupper($1)}')"
+          test "${SIGNED_FINGERPRINT}" = "${EXPECTED_FINGERPRINT}"
+
+          SMOKE_HOME="${RUNNER_TEMP}/m5stopwatch-smoke-home"
+          mkdir -p "${SMOKE_HOME}"
+          HOME="${SMOKE_HOME}" "${EXECUTABLE}" --version
+          set +e
+          HOME="${SMOKE_HOME}" "${EXECUTABLE}" doctor --wait 0 \
+            >"${RUNNER_TEMP}/m5stopwatch-doctor.log" 2>&1
+          DOCTOR_STATUS="$?"
+          set -e
+          cat "${RUNNER_TEMP}/m5stopwatch-doctor.log"
+          test "${DOCTOR_STATUS}" -eq 1
+          grep -q '\[ok\] MLX Whisper is installed' "${RUNNER_TEMP}/m5stopwatch-doctor.log"
+          grep -q '\[fail\] enable M5StopWatch' "${RUNNER_TEMP}/m5stopwatch-doctor.log"
+          HOME="${SMOKE_HOME}" "${EXECUTABLE}" prepare --engine mlx --model tiny
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            "${APP}" M5StopWatch-macos-arm64.zip
+          shasum -a 256 M5StopWatch-macos-arm64.zip \
+            > M5StopWatch-macos-arm64.zip.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ble-stt-macos-assets
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            M5StopWatch-macos-arm64.zip
+            M5StopWatch-macos-arm64.zip.sha256
+
+  release:
+    name: Publish GitHub Release
+    needs: [test, source-assets, macos-app]
+    runs-on: ubuntu-latest
+    env:
+      MACOS_SIGNING_P12_BASE64: ${{ secrets.MACOS_SIGNING_P12_BASE64 }}
+      MACOS_SIGNING_P12_PASSWORD: ${{ secrets.MACOS_SIGNING_P12_PASSWORD }}
+      MACOS_SIGNING_CERT_SHA256: ${{ vars.MACOS_SIGNING_CERT_SHA256 }}
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: ble-stt-*-assets
+          path: release-assets
+          merge-multiple: true
+      - name: Sign release downloads
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test -n "${MACOS_SIGNING_P12_BASE64}"
+          test -n "${MACOS_SIGNING_P12_PASSWORD}"
+          test -s release-assets/M5StopWatch-macos-arm64.zip
+          test -s release-assets/ble-stt-install.sh
+
+          P12_PATH="${RUNNER_TEMP}/m5stopwatch-signing.p12"
+          PRIVATE_KEY="${RUNNER_TEMP}/m5stopwatch-signing.key"
+          PUBLIC_KEY="${RUNNER_TEMP}/m5stopwatch-signing-public.pem"
+          CERT_DER="${RUNNER_TEMP}/m5stopwatch-signing.der"
+          cleanup() {
+            rm -f "${P12_PATH}" "${PRIVATE_KEY}" "${PUBLIC_KEY}" "${CERT_DER}"
+          }
+          trap cleanup EXIT HUP INT TERM
+
+          printf '%s' "${MACOS_SIGNING_P12_BASE64}" | base64 --decode >"${P12_PATH}"
+          openssl pkcs12 \
+            -legacy \
+            -in "${P12_PATH}" \
+            -nokeys \
+            -passin "pass:${MACOS_SIGNING_P12_PASSWORD}" \
+            -out release-assets/M5StopWatch-signing-certificate.pem
+          openssl x509 \
+            -in release-assets/M5StopWatch-signing-certificate.pem \
+            -noout
+          openssl pkcs12 \
+            -legacy \
+            -in "${P12_PATH}" \
+            -nocerts \
+            -nodes \
+            -passin "pass:${MACOS_SIGNING_P12_PASSWORD}" \
+            -out "${PRIVATE_KEY}"
+          openssl x509 \
+            -in release-assets/M5StopWatch-signing-certificate.pem \
+            -outform DER \
+            -out "${CERT_DER}"
+          ACTUAL_FINGERPRINT="$(sha256sum "${CERT_DER}" | awk '{print toupper($1)}')"
+          EXPECTED_FINGERPRINT="$(printf '%s' "${MACOS_SIGNING_CERT_SHA256}" | tr '[:lower:]' '[:upper:]')"
+          test "${ACTUAL_FINGERPRINT}" = "${EXPECTED_FINGERPRINT}"
+          openssl x509 \
+            -in release-assets/M5StopWatch-signing-certificate.pem \
+            -pubkey \
+            -noout \
+            -out "${PUBLIC_KEY}"
+
+          openssl dgst -sha256 \
+            -sign "${PRIVATE_KEY}" \
+            -out release-assets/M5StopWatch-macos-arm64.zip.sig \
+            release-assets/M5StopWatch-macos-arm64.zip
+          openssl dgst -sha256 \
+            -sign "${PRIVATE_KEY}" \
+            -out release-assets/ble-stt-install.sh.sig \
+            release-assets/ble-stt-install.sh
+          openssl dgst -sha256 -verify "${PUBLIC_KEY}" \
+            -signature release-assets/M5StopWatch-macos-arm64.zip.sig \
+            release-assets/M5StopWatch-macos-arm64.zip
+          openssl dgst -sha256 -verify "${PUBLIC_KEY}" \
+            -signature release-assets/ble-stt-install.sh.sig \
+            release-assets/ble-stt-install.sh
+          (cd release-assets && sha256sum ble-stt-install.sh > ble-stt-install.sh.sha256)
+      - name: Verify release assets
+        shell: bash
+        run: |
+          expected=(
+            ble-stt-source.tar.gz
+            ble-stt-source.tar.gz.sha256
+            ble-stt-source.zip
+            ble-stt-source.zip.sha256
+            ble-stt-install.sh
+            ble-stt-install.sh.sha256
+            ble-stt-install.sh.sig
+            ble-stt-install.ps1
+            M5StopWatch-macos-arm64.zip
+            M5StopWatch-macos-arm64.zip.sha256
+            M5StopWatch-macos-arm64.zip.sig
+            M5StopWatch-signing-certificate.pem
+          )
+          for asset in "${expected[@]}"; do
+            test -s "release-assets/${asset}" || {
+              echo "missing release asset: ${asset}" >&2
+              exit 1
+            }
+          done
+          (cd release-assets && sha256sum --check ble-stt-source.tar.gz.sha256)
+          (cd release-assets && sha256sum --check ble-stt-source.zip.sha256)
+          (cd release-assets && sha256sum --check M5StopWatch-macos-arm64.zip.sha256)
+          (cd release-assets && sha256sum --check ble-stt-install.sh.sha256)
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           gh release create "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
             --title "M5StopWatch BLE STT ${GITHUB_REF_NAME#ble-stt-v}" \
             --generate-notes \
-            ble-stt-source.tar.gz \
-            ble-stt-source.tar.gz.sha256 \
-            ble-stt-source.zip \
-            ble-stt-source.zip.sha256 \
-            ble-stt-install.sh \
-            ble-stt-install.ps1
+            release-assets/*

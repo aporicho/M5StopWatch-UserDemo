@@ -179,6 +179,17 @@ class MacInjectorTests(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("/tmp/ble-stt/python", message)
 
+    def test_frozen_permission_error_identifies_app(self):
+        adapter = MacOSPlatform()
+        injector = Mock()
+        injector.check_accessibility.return_value = False
+        with patch.object(adapter, "create_text_injector", return_value=injector):
+            with patch.object(sys, "frozen", True, create=True):
+                passed, message = adapter.check_input_permission(True)
+        self.assertFalse(passed)
+        self.assertIn("enable M5StopWatch", message)
+        self.assertNotIn(sys.executable, message)
+
     def test_unicode_input_and_focus_guard(self):
         quartz = FakeQuartz()
         injector = MacOSTextInjector(quartz, FakeAppKit)
@@ -216,8 +227,19 @@ class WindowsInjectorTests(unittest.TestCase):
 
 
 class ServiceRenderingTests(unittest.TestCase):
-    def test_service_enters_foreground_runtime(self):
-        self.assertEqual(service_arguments([])[-1], "run")
+    def test_source_service_enters_module_foreground_runtime(self):
+        with patch.object(sys, "frozen", False, create=True):
+            with patch("ble_stt.service.sys.executable", "/tmp/venv/python"):
+                self.assertEqual(
+                    service_arguments(["--model", "small"]),
+                    ["/tmp/venv/python", "-m", "ble_stt", "run", "--model", "small"],
+                )
+
+    def test_frozen_service_uses_stable_app_executable(self):
+        app = "/Users/test/Applications/M5StopWatch.app/Contents/MacOS/M5StopWatch"
+        with patch.object(sys, "frozen", True, create=True):
+            with patch("ble_stt.service.sys.executable", app):
+                self.assertEqual(service_arguments([]), [app, "run"])
 
     def test_systemd_unit_uses_explicit_interpreter(self):
         value = render_systemd_unit(
@@ -236,6 +258,18 @@ class ServiceRenderingTests(unittest.TestCase):
         )
         self.assertEqual(value["Label"], SERVICE_LABEL)
         self.assertTrue(value["RunAtLoad"])
+        self.assertEqual(value["LimitLoadToSessionType"], "Aqua")
+
+    @patch("ble_stt.service.subprocess.run")
+    def test_macos_loaded_but_stopped_service_is_not_active(self, run: Mock):
+        from ble_stt.service import ServiceManager
+
+        manager = ServiceManager("darwin")
+        with patch.object(manager, "is_installed", return_value=True):
+            run.return_value = Mock(returncode=0, stdout="state = exited\n", stderr="")
+            self.assertFalse(manager.is_active())
+            run.return_value = Mock(returncode=0, stdout="state = running\n", stderr="")
+            self.assertTrue(manager.is_active())
 
     def test_windows_action_quotes_paths(self):
         value = windows_task_action(["C:\\Program Files\\Python\\python.exe", "-m", "ble_stt"])

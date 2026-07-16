@@ -57,7 +57,8 @@ def main() -> None:
     try:
         asyncio.run(check(args.device_id))
     except KeyboardInterrupt:
-        pass
+        print("\nCancelled", file=sys.stderr)
+        raise SystemExit(130) from None
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
