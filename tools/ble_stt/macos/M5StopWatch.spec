@@ -28,6 +28,7 @@ for package in (
 
 for distribution in (
     "bleak",
+    "hf-xet",
     "huggingface-hub",
     "mlx",
     "mlx-whisper",
@@ -54,7 +55,6 @@ for package in (
 # to miss when the corresponding branch is not executed during collection.
 hiddenimports += [
     "AppKit",
-    "ApplicationServices",
     "CoreBluetooth",
     "Foundation",
     "Quartz",
@@ -119,7 +119,7 @@ app = BUNDLE(
         "CFBundleName": "M5StopWatch",
         "CFBundleShortVersionString": VERSION,
         "CFBundleVersion": VERSION,
-        "LSMinimumSystemVersion": "14.4",
+        "LSMinimumSystemVersion": "15.0",
         "LSUIElement": True,
         "NSBluetoothAlwaysUsageDescription": "用于连接 M5StopWatch 并接收手表上的语音数据。",
         "NSHighResolutionCapable": True,

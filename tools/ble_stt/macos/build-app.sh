@@ -42,17 +42,29 @@ unset BLE_STT_CODESIGN_IDENTITY
 APP="$DIST_ROOT/M5StopWatch.app"
 [ -x "$APP/Contents/MacOS/M5StopWatch" ] || { printf 'App build failed.\n' >&2; exit 1; }
 # Finder/FileProvider metadata inherited from a build directory is not part of
-# the program and makes codesign reject an otherwise valid bundle. PyInstaller
-# signs first, but clearing metadata and signing once more makes the final
-# artifact deterministic on both developer Macs and hosted runners.
-/usr/bin/xattr -crs "$APP" || true
+# the program and makes codesign reject an otherwise valid bundle. Sign and
+# verify a clean temporary copy; this also works when the repository itself is
+# stored on Desktop/iCloud and FileProvider immediately restores its metadata.
+SIGNING_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/m5stopwatch-codesign.XXXXXX")"
+cleanup_signing_root() {
+    rm -rf "$SIGNING_ROOT"
+}
+trap cleanup_signing_root EXIT HUP INT TERM
+SIGNING_APP="$SIGNING_ROOT/M5StopWatch.app"
+/usr/bin/ditto "$APP" "$SIGNING_APP"
+/usr/bin/xattr -cr "$SIGNING_APP" || true
+while IFS= read -r link; do
+    /usr/bin/xattr -c -s "$link" 2>/dev/null || true
+done < <(find "$SIGNING_APP" -type l)
 FINAL_SIGNING_IDENTITY="${CODESIGN_IDENTITY:--}"
 /usr/bin/codesign \
     --force \
     --deep \
     --timestamp=none \
     --sign "$FINAL_SIGNING_IDENTITY" \
-    "$APP"
-/usr/bin/codesign --verify --deep --strict --verbose=2 "$APP"
-"$APP/Contents/MacOS/M5StopWatch" --version
+    "$SIGNING_APP"
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$SIGNING_APP"
+rm -rf "$APP"
+/usr/bin/ditto "$SIGNING_APP" "$APP"
+"$SIGNING_APP/Contents/MacOS/M5StopWatch" --version
 printf 'Built %s\n' "$APP"

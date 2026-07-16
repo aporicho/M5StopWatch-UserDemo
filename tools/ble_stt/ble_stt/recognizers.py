@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import os
 import platform
 import sys
@@ -117,10 +118,17 @@ class MlxWhisperRecognizer(_SimplifyingRecognizer):
         if sys.platform != "darwin" or platform.machine().lower() != "arm64":
             raise RuntimeError("MLX Whisper requires Apple Silicon macOS")
         import mlx_whisper
+        import mlx.core as mx
 
         self.module = mlx_whisper
         self.model_name = resolve_model("mlx", model_name)
-        print(f"[model] MLX ready; model {self.model_name} will be downloaded on first transcription")
+        print(f"[model] loading {self.model_name} with MLX")
+        # mlx-whisper caches the model in this process through ModelHolder.
+        # Loading it here keeps the watch in PREPARING until the service that
+        # will perform transcription is genuinely ready.
+        transcribe_module = importlib.import_module("mlx_whisper.transcribe")
+        transcribe_module.ModelHolder.get_model(self.model_name, mx.float16)
+        print("[model] MLX ready")
 
     def transcribe(self, pcm: list[int]) -> list[TranscriptSegment]:
         import numpy as np

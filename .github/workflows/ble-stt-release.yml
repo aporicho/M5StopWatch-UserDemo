@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-14, windows-latest]
+        os: [ubuntu-latest, macos-15, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
@@ -120,7 +120,7 @@ jobs:
 
   macos-app:
     name: Build signed macOS App
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 45
     env:
       MACOS_SIGNING_P12_BASE64: ${{ secrets.MACOS_SIGNING_P12_BASE64 }}
@@ -217,7 +217,7 @@ jobs:
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP}/Contents/Info.plist")" \
             = "com.aporicho.m5stopwatch-ble-stt"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "${APP}/Contents/Info.plist")" \
-            = "14.4"
+            = "15.0"
           test "$(lipo -archs "${EXECUTABLE}")" = arm64
           codesign --verify --deep --strict --verbose=2 "${APP}"
 
@@ -236,14 +236,12 @@ jobs:
           set -e
           cat "${RUNNER_TEMP}/m5stopwatch-doctor.log"
           test "${DOCTOR_STATUS}" -eq 1
-          grep -q '\[ok\] MLX Whisper is installed' "${RUNNER_TEMP}/m5stopwatch-doctor.log"
+          grep -q '\[ok\] M5StopWatch app runtime is ready' "${RUNNER_TEMP}/m5stopwatch-doctor.log"
           grep -q '\[fail\] enable M5StopWatch' "${RUNNER_TEMP}/m5stopwatch-doctor.log"
           HOME="${SMOKE_HOME}" "${EXECUTABLE}" prepare --engine mlx --model tiny
 
           ditto -c -k --sequesterRsrc --keepParent \
             "${APP}" M5StopWatch-macos-arm64.zip
-          shasum -a 256 M5StopWatch-macos-arm64.zip \
-            > M5StopWatch-macos-arm64.zip.sha256
       - uses: actions/upload-artifact@v4
         with:
           name: ble-stt-macos-assets
@@ -251,7 +249,6 @@ jobs:
           retention-days: 7
           path: |
             M5StopWatch-macos-arm64.zip
-            M5StopWatch-macos-arm64.zip.sha256
 
   release:
     name: Publish GitHub Release
@@ -330,7 +327,6 @@ jobs:
           openssl dgst -sha256 -verify "${PUBLIC_KEY}" \
             -signature release-assets/ble-stt-install.sh.sig \
             release-assets/ble-stt-install.sh
-          (cd release-assets && sha256sum ble-stt-install.sh > ble-stt-install.sh.sha256)
       - name: Verify release assets
         shell: bash
         run: |
@@ -340,11 +336,9 @@ jobs:
             ble-stt-source.zip
             ble-stt-source.zip.sha256
             ble-stt-install.sh
-            ble-stt-install.sh.sha256
             ble-stt-install.sh.sig
             ble-stt-install.ps1
             M5StopWatch-macos-arm64.zip
-            M5StopWatch-macos-arm64.zip.sha256
             M5StopWatch-macos-arm64.zip.sig
             M5StopWatch-signing-certificate.pem
           )
@@ -356,8 +350,6 @@ jobs:
           done
           (cd release-assets && sha256sum --check ble-stt-source.tar.gz.sha256)
           (cd release-assets && sha256sum --check ble-stt-source.zip.sha256)
-          (cd release-assets && sha256sum --check M5StopWatch-macos-arm64.zip.sha256)
-          (cd release-assets && sha256sum --check ble-stt-install.sh.sha256)
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

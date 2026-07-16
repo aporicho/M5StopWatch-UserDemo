@@ -33,7 +33,6 @@ def _accessibility_instructions() -> str:
 @dataclass(frozen=True)
 class MacWindowToken:
     pid: int
-    window: object | None
 
 
 class MacOSTextInjector:
@@ -41,9 +40,7 @@ class MacOSTextInjector:
         self,
         quartz: Any | None = None,
         appkit: Any | None = None,
-        accessibility: Any | None = None,
     ) -> None:
-        injected_quartz = quartz is not None
         if quartz is None:
             import Quartz
 
@@ -52,60 +49,29 @@ class MacOSTextInjector:
             import AppKit
 
             appkit = AppKit
-        if accessibility is None:
-            if injected_quartz:
-                # Tests and embedders may provide a combined compatibility
-                # object matching older PyObjC releases.
-                accessibility = quartz
-            else:
-                import ApplicationServices
-
-                accessibility = ApplicationServices
         self.quartz = quartz
         self.appkit = appkit
-        self.accessibility = accessibility
-        self._warned_no_window = False
 
     def check_accessibility(self, prompt: bool = False) -> bool:
-        prompt_key = getattr(
-            self.accessibility,
-            "kAXTrustedCheckOptionPrompt",
-            "AXTrustedCheckOptionPrompt",
-        )
-        return bool(self.accessibility.AXIsProcessTrustedWithOptions({prompt_key: bool(prompt)}))
-
-    def _copy_ax_value(self, element: object, attribute: str) -> object | None:
-        try:
-            result = self.accessibility.AXUIElementCopyAttributeValue(element, attribute, None)
-        except Exception:
-            return None
-        if isinstance(result, tuple):
-            if len(result) >= 2 and int(result[0]) == 0:
-                return result[-1]
-            return None
-        return result
+        # Text insertion only needs the narrowly scoped PostEvent privilege.
+        # Requesting full AX access made setup less reliable and exposed APIs
+        # the product does not otherwise need.
+        if prompt:
+            return bool(self.quartz.CGRequestPostEventAccess())
+        return bool(self.quartz.CGPreflightPostEventAccess())
 
     def active_window(self) -> MacWindowToken | None:
         application = self.appkit.NSWorkspace.sharedWorkspace().frontmostApplication()
         if application is None:
             return None
         pid = int(application.processIdentifier())
-        ax_application = self.accessibility.AXUIElementCreateApplication(pid)
-        window = self._copy_ax_value(ax_application, self.accessibility.kAXFocusedWindowAttribute)
-        return MacWindowToken(pid, window)
+        return MacWindowToken(pid)
 
     def _same_window(self, expected: MacWindowToken, current: MacWindowToken) -> bool:
-        if expected.pid != current.pid:
-            return False
-        if expected.window is None or current.window is None:
-            return True
-        compare = getattr(self.quartz, "CFEqual", None)
-        if compare is not None:
-            try:
-                return bool(compare(expected.window, current.window))
-            except Exception:
-                pass
-        return expected.window == current.window
+        # NSWorkspace is available without Accessibility permission. Guarding
+        # by the frontmost application prevents text from leaking into a
+        # different app while keeping the permission request minimal.
+        return expected.pid == current.pid
 
     def _post_unicode(self, text: str) -> None:
         source = self.quartz.CGEventSourceCreate(self.quartz.kCGEventSourceStateCombinedSessionState)
@@ -130,11 +96,8 @@ class MacOSTextInjector:
         current = self.active_window()
         if isinstance(expected_window, MacWindowToken):
             if current is None or not self._same_window(expected_window, current):
-                print("[focus] active window changed; suppressing text injection")
+                print("[focus] frontmost application changed; suppressing text injection")
                 return False
-            if expected_window.window is None and not self._warned_no_window:
-                print("[focus] focused window is unavailable; protecting by frontmost application only")
-                self._warned_no_window = True
         self._post_unicode(text)
         return True
 

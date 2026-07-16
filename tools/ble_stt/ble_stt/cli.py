@@ -188,6 +188,7 @@ Commands:
   status       Show service, watch, model, and permission state (default)
   doctor       Diagnose dependencies, permissions, and optional BLE connectivity
   test         Complete one push-to-talk insertion and exit
+  prepare      Download and validate the speech model now
   logs         Show or follow background service logs
   restart      Restart the login service
   service      Install, inspect, or remove the login service

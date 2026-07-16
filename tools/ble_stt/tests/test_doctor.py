@@ -34,6 +34,36 @@ class PermissionWaitTests(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("broken dependency", message)
 
+    def test_frozen_app_does_not_initialize_ml_modules_during_doctor(self):
+        adapter = FakePermissionAdapter([(True, "granted")])
+        with patch.object(doctor.sys, "frozen", True, create=True):
+            with patch("ble_stt.doctor.create_platform", return_value=adapter):
+                with patch("ble_stt.doctor._module_check") as module_check:
+                    with patch("ble_stt.doctor.UserConfig") as user_config:
+                        user_config.return_value.get.return_value = None
+                        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                            code = doctor.run(["--wait", "0"])
+
+        self.assertEqual(code, 0)
+        module_check.assert_not_called()
+        self.assertIn("M5StopWatch app runtime is ready", stdout.getvalue())
+
+    def test_ble_diagnostic_runs_even_when_input_permission_is_missing(self):
+        adapter = FakePermissionAdapter([(False, "not granted")])
+        with patch.object(doctor.sys, "frozen", True, create=True):
+            with patch("ble_stt.doctor.create_platform", return_value=adapter):
+                with patch("ble_stt.doctor.UserConfig") as user_config:
+                    with patch(
+                        "ble_stt.doctor.asyncio.run",
+                        side_effect=lambda coroutine: coroutine.close(),
+                    ) as run_async:
+                        user_config.return_value.get.return_value = None
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            code = doctor.run(["--ble", "--wait", "0"])
+
+        self.assertEqual(code, 1)
+        run_async.assert_called_once()
+
     def test_prompts_once_then_polls_without_prompt(self):
         adapter = FakePermissionAdapter(
             [
@@ -71,6 +101,18 @@ class PermissionWaitTests(unittest.TestCase):
         self.assertIn("timed out after 2s", message)
         self.assertEqual(adapter.calls, [True, False, False])
 
+    def test_wait_forever_stops_when_permission_is_granted(self):
+        adapter = FakePermissionAdapter(
+            [(False, "not granted"), (False, "not granted"), (True, "granted")]
+        )
+        with patch("ble_stt.doctor.time.sleep") as sleep:
+            passed, message = doctor._wait_for_input_permission(adapter, True, None)
+
+        self.assertTrue(passed)
+        self.assertEqual(message, "granted")
+        self.assertEqual(adapter.calls, [True, False, False])
+        self.assertEqual(sleep.call_count, 2)
+
     def test_keyboard_interrupt_propagates_from_wait(self):
         adapter = FakePermissionAdapter([(False, "not granted")])
         with patch("ble_stt.doctor.time.sleep", side_effect=KeyboardInterrupt):
@@ -105,6 +147,24 @@ class PermissionWaitTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(wait_for_permission.call_args.kwargs["wait_seconds"], 120.0)
         self.assertTrue(wait_for_permission.call_args.kwargs["prompt"])
+
+    @patch("ble_stt.doctor.UserConfig")
+    @patch("ble_stt.doctor._wait_for_input_permission", return_value=(True, "granted"))
+    @patch("ble_stt.doctor.create_platform", return_value=Mock())
+    @patch("ble_stt.doctor._module_check", return_value=(True, "installed"))
+    def test_wait_forever_is_forwarded(
+        self,
+        module_check,
+        create_platform,
+        wait_for_permission,
+        user_config,
+    ):
+        user_config.return_value.get.return_value = None
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = doctor.run(["--request-permissions", "--wait-forever"])
+
+        self.assertEqual(code, 0)
+        self.assertIsNone(wait_for_permission.call_args.kwargs["wait_seconds"])
 
 
 if __name__ == "__main__":

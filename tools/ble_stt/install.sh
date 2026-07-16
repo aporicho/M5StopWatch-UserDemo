@@ -22,18 +22,14 @@ MAC_PLIST_BACKUP=""
 MAC_INSTALLER="$HOME/Library/Application Support/M5StopWatch/ble-stt/install.sh"
 MAC_INSTALLER_BACKUP=""
 MAC_INSTALLER_STAGE=""
-MAC_PROFILE=""
-MAC_PROFILE_BACKUP=""
 MAC_HAD_APP=0
 MAC_HAD_PLIST=0
 MAC_HAD_INSTALLER=0
-MAC_HAD_PROFILE=0
 MAC_TRANSACTION_STARTED=0
 MAC_OLD_APP_BACKED_UP=0
 MAC_NEW_APP_ACTIVATED=0
 MAC_INSTALLER_SWITCHED=0
 MAC_SHIM_SWITCHED=0
-MAC_PROFILE_UPDATED=0
 MAC_OLD_SHIM_TARGET=""
 MAC_SIGNING_CERTIFICATE_DER=""
 MAC_SIGNING_PUBLIC_KEY=""
@@ -221,13 +217,6 @@ cleanup() {
                 ln -s "$MAC_OLD_SHIM_TARGET" "$SHIM"
             fi
         fi
-        if [ "$MAC_PROFILE_UPDATED" = "1" ] && [ -n "$MAC_PROFILE" ]; then
-            if [ "$MAC_HAD_PROFILE" = "1" ] && [ -f "$MAC_PROFILE_BACKUP" ]; then
-                cp "$MAC_PROFILE_BACKUP" "$MAC_PROFILE"
-            else
-                rm -f "$MAC_PROFILE"
-            fi
-        fi
         macos_start_previous_service
     fi
     if [ "$platform" = "Darwin" ] && [ "${INSTALL_COMPLETE:-0}" = "1" ]; then
@@ -330,10 +319,9 @@ fi
 install_macos_app() {
     product_version="$(sw_vers -productVersion)"
     product_major="$(printf '%s' "$product_version" | awk -F. '{print $1}')"
-    product_minor="$(printf '%s' "$product_version" | awk -F. '{print $2 + 0}')"
     case "$product_major" in *[!0-9]*|'') fail "could not determine the macOS version" ;; esac
-    if [ "$product_major" -lt 14 ] || { [ "$product_major" -eq 14 ] && [ "$product_minor" -lt 4 ]; }; then
-        fail "M5StopWatch requires macOS 14.4 or newer (this Mac is running $product_version)"
+    if [ "$product_major" -lt 15 ]; then
+        fail "M5StopWatch requires macOS 15.0 or newer (this Mac is running $product_version)"
     fi
 
     case "$EXPECTED_MACOS_SIGNING_CERT_SHA256" in
@@ -390,18 +378,14 @@ install_macos_app() {
 
     say "Downloading the signed M5StopWatch app"
     download "$ASSET_BASE/M5StopWatch-macos-arm64.zip" "$WORK/M5StopWatch-macos-arm64.zip"
-    download "$ASSET_BASE/M5StopWatch-macos-arm64.zip.sha256" "$WORK/M5StopWatch-macos-arm64.zip.sha256"
     download "$ASSET_BASE/M5StopWatch-macos-arm64.zip.sig" "$WORK/M5StopWatch-macos-arm64.zip.sig"
-    verify_sha256 "$WORK/M5StopWatch-macos-arm64.zip" "$WORK/M5StopWatch-macos-arm64.zip.sha256"
     macos_verify_detached_signature "$WORK/M5StopWatch-macos-arm64.zip" "$WORK/M5StopWatch-macos-arm64.zip.sig"
     mkdir -p "$WORK/unpacked"
     /usr/bin/ditto -x -k "$WORK/M5StopWatch-macos-arm64.zip" "$WORK/unpacked"
     macos_validate_app "$WORK/unpacked/M5StopWatch.app"
 
     download "$ASSET_BASE/ble-stt-install.sh" "$WORK/ble-stt-install.sh"
-    download "$ASSET_BASE/ble-stt-install.sh.sha256" "$WORK/ble-stt-install.sh.sha256"
     download "$ASSET_BASE/ble-stt-install.sh.sig" "$WORK/ble-stt-install.sh.sig"
-    verify_sha256 "$WORK/ble-stt-install.sh" "$WORK/ble-stt-install.sh.sha256"
     macos_verify_detached_signature "$WORK/ble-stt-install.sh" "$WORK/ble-stt-install.sh.sig"
 
     mkdir -p "$HOME/Applications"
@@ -430,16 +414,7 @@ install_macos_app() {
     app_executable="$MAC_APP/Contents/MacOS/M5StopWatch"
 
     say "Requesting macOS text input permission"
-    "$app_executable" doctor --request-permissions --wait 120
-
-    say "Downloading and verifying the $MODEL speech model"
-    "$app_executable" prepare --engine "$ENGINE" --model "$MODEL"
-
-    if [ "$SKIP_TEST" != "1" ]; then
-        say "Connecting and testing the watch"
-        "$app_executable" doctor --ble
-        "$app_executable" test --engine "$ENGINE" --model "$MODEL"
-    fi
+    "$app_executable" doctor --request-permissions --wait-forever
 
     say "Registering the login service"
     "$app_executable" service install -- --engine "$ENGINE" --model "$MODEL"
@@ -448,9 +423,7 @@ install_macos_app() {
     service_attempt=0
     service_consecutive_ok=0
     while [ "$service_attempt" -lt 30 ]; do
-        if "$app_executable" service status >/dev/null 2>&1 \
-            && launchctl print "gui/$(id -u)/com.aporicho.m5stopwatch-ble-stt" 2>/dev/null \
-                | grep -F 'state = running' >/dev/null 2>&1; then
+        if "$app_executable" service status >/dev/null 2>&1; then
             service_consecutive_ok=$((service_consecutive_ok + 1))
             [ "$service_consecutive_ok" -ge 2 ] && break
         else
@@ -472,31 +445,6 @@ install_macos_app() {
     MAC_SHIM_SWITCHED=1
     ln -sfn "$app_executable" "$SHIM"
 
-    shell_name="$(basename "${SHELL:-sh}")"
-    case "$shell_name" in
-        zsh) profile="$HOME/.zprofile" ;;
-        *) profile="$HOME/.profile" ;;
-    esac
-    MAC_PROFILE="$profile"
-    case ":${PATH:-}:" in
-        *":$BIN_DIR:"*) ;;
-        *)
-            marker="# M5StopWatch BLE STT"
-            if ! grep -F "$marker" "$profile" >/dev/null 2>&1; then
-                if [ -f "$profile" ]; then
-                    MAC_HAD_PROFILE=1
-                    MAC_PROFILE_BACKUP="$WORK/previous-shell-profile"
-                    cp "$profile" "$MAC_PROFILE_BACKUP"
-                fi
-                MAC_PROFILE_UPDATED=1
-                {
-                    printf '\n%s\n' "$marker"
-                    printf 'export PATH="$HOME/.local/bin:$PATH"\n'
-                } >>"$profile"
-            fi
-            ;;
-    esac
-
     version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$MAC_APP/Contents/Info.plist" 2>/dev/null || true)"
     [ -n "$version" ] || version="unknown"
     # All externally visible state is now committed. Ignore terminal signals
@@ -505,7 +453,8 @@ install_macos_app() {
     trap '' HUP INT TERM
     INSTALL_COMPLETE=1
     printf '\n[ok] M5StopWatch BLE STT %s is installed and running.\n' "$version"
-    printf '     Open a new terminal and run: ble-stt status\n'
+    printf '     The service will pair with the watch and prepare the speech model on first use.\n'
+    printf '     Status: "%s" status\n' "$SHIM"
 }
 
 if [ "$platform" = "Darwin" ]; then

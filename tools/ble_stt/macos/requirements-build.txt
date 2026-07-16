@@ -1,4 +1,4 @@
-# Exact macOS 14 arm64 build lock for the 0.3.3 release. mlx-whisper also
+# Exact macOS 15 arm64 build lock for the 0.3.3 release. mlx-whisper also
 # declares Torch for model conversion, which the live MLX transcription path
 # does not use; build-app.sh installs mlx-whisper itself with --no-deps.
 altgraph==0.17.5
@@ -27,10 +27,8 @@ packaging==26.2
 pyinstaller==6.21.0
 pyinstaller-hooks-contrib==2026.6
 pyobjc-core==12.2.1
-pyobjc-framework-ApplicationServices==12.2.1
 pyobjc-framework-Cocoa==12.2.1
 pyobjc-framework-CoreBluetooth==12.2.1
-pyobjc-framework-CoreText==12.2.1
 pyobjc-framework-libdispatch==12.2.1
 pyobjc-framework-Quartz==12.2.1
 PyYAML==6.0.3

@@ -44,11 +44,11 @@ def _format_seconds(seconds: float) -> str:
 def _wait_for_input_permission(
     adapter: object,
     prompt: bool,
-    wait_seconds: float,
+    wait_seconds: float | None,
 ) -> tuple[bool, str]:
     check_permission = getattr(adapter, "check_input_permission")
     passed, message = check_permission(prompt)
-    if passed or wait_seconds <= 0:
+    if passed or wait_seconds == 0:
         return bool(passed), str(message)
 
     open_settings = getattr(adapter, "open_input_permission_settings", None)
@@ -58,27 +58,42 @@ def _wait_for_input_permission(
         except Exception as exc:
             print(f"[warn] could not open Accessibility settings: {exc}")
 
-    formatted_wait = _format_seconds(wait_seconds)
-    print(
-        f"[wait] Enable M5StopWatch under Privacy & Security > Accessibility "
-        f"(waiting up to {formatted_wait}s; press Ctrl-C to cancel)",
-        flush=True,
-    )
+    if wait_seconds is None:
+        print(
+            "[wait] Enable M5StopWatch under Privacy & Security > Accessibility "
+            "(press Ctrl-C to cancel)",
+            flush=True,
+        )
+    else:
+        formatted_wait = _format_seconds(wait_seconds)
+        print(
+            f"[wait] Enable M5StopWatch under Privacy & Security > Accessibility "
+            f"(waiting up to {formatted_wait}s; press Ctrl-C to cancel)",
+            flush=True,
+        )
     remaining = wait_seconds
-    while remaining > 0:
-        delay = min(PERMISSION_POLL_INTERVAL_SECONDS, remaining)
+    while remaining is None or remaining > 0:
+        delay = (
+            PERMISSION_POLL_INTERVAL_SECONDS
+            if remaining is None
+            else min(PERMISSION_POLL_INTERVAL_SECONDS, remaining)
+        )
         time.sleep(delay)
-        remaining -= delay
+        if remaining is not None:
+            remaining -= delay
         passed, message = check_permission(False)
         if passed:
             return True, str(message)
+    assert wait_seconds is not None
+    formatted_wait = _format_seconds(wait_seconds)
     return False, f"{message}; timed out after {formatted_wait}s"
 
 
 def run(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check M5StopWatch STT platform requirements")
     parser.add_argument("--request-permissions", action="store_true", help="show the macOS Accessibility prompt")
-    parser.add_argument(
+    wait_group = parser.add_mutually_exclusive_group()
+    wait_group.add_argument(
         "--wait",
         type=_nonnegative_seconds,
         metavar="SECONDS",
@@ -87,25 +102,38 @@ def run(argv: Sequence[str] | None = None) -> int:
             "--request-permissions)"
         ),
     )
+    wait_group.add_argument(
+        "--wait-forever",
+        action="store_true",
+        help="wait until Accessibility approval or Ctrl-C",
+    )
     parser.add_argument("--ble", action="store_true", help="also connect to and validate the watch")
     parser.add_argument("--device-id", "--address", dest="device_id")
     args = parser.parse_args(argv)
 
     checks: list[tuple[bool, str]] = []
-    checks.append((sys.version_info >= (3, 10), f"Python {platform.python_version()} (need 3.10+)"))
-    for module, label in (("bleak", "Bleak"), ("numpy", "NumPy"), ("opencc", "OpenCC")):
-        checks.append(_module_check(module, label))
-
-    engine = resolve_engine("auto")
-    if engine == "mlx":
-        checks.append(_module_check("mlx_whisper", "MLX Whisper"))
+    if getattr(sys, "frozen", False):
+        # A frozen App is validated as one product. Importing every ML module
+        # here is both noisy and can initialize Metal before it is needed.
+        checks.append((True, "M5StopWatch app runtime is ready"))
     else:
-        checks.append(_module_check("faster_whisper", "faster-whisper"))
+        checks.append((sys.version_info >= (3, 10), f"Python {platform.python_version()} (need 3.10+)"))
+        for module, label in (("bleak", "Bleak"), ("numpy", "NumPy"), ("opencc", "OpenCC")):
+            checks.append(_module_check(module, label))
+
+        engine = resolve_engine("auto")
+        if engine == "mlx":
+            checks.append(_module_check("mlx_whisper", "MLX Whisper"))
+        else:
+            checks.append(_module_check("faster_whisper", "faster-whisper"))
 
     try:
         adapter = create_platform()
-        wait_seconds = args.wait
-        if wait_seconds is None:
+        if args.wait_forever:
+            wait_seconds = None
+        else:
+            wait_seconds = args.wait
+        if wait_seconds is None and not args.wait_forever:
             wait_seconds = DEFAULT_PERMISSION_WAIT_SECONDS if args.request_permissions else 0.0
         checks.append(
             _wait_for_input_permission(
@@ -125,7 +153,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         print(f"[{'ok' if passed else 'fail'}] {message}")
     failed = any(not passed for passed, _ in checks)
 
-    if args.ble and adapter is not None and not failed:
+    if args.ble and adapter is not None:
         try:
             asyncio.run(check(args.device_id, adapter))
         except Exception as exc:

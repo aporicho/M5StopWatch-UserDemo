@@ -2,6 +2,7 @@ import os
 import plistlib
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
@@ -70,6 +71,27 @@ class RecognizerSelectionTests(unittest.TestCase):
         self.assertNotIn("beam_size", options)
         self.assertEqual(options["temperature"], 0.0)
 
+    def test_mlx_loads_model_before_reporting_ready(self):
+        mlx_package = types.ModuleType("mlx")
+        mlx_core = types.ModuleType("mlx.core")
+        mlx_core.float16 = object()
+        mlx_package.core = mlx_core
+        mlx_whisper = types.ModuleType("mlx_whisper")
+        holder = Mock()
+        transcribe_module = Mock(ModelHolder=holder)
+
+        with patch("ble_stt.recognizers._SimplifyingRecognizer.__init__", return_value=None):
+            with patch("ble_stt.recognizers.sys.platform", "darwin"):
+                with patch("ble_stt.recognizers.platform.machine", return_value="arm64"):
+                    with patch("ble_stt.recognizers.importlib.import_module", return_value=transcribe_module):
+                        with patch.dict(
+                            sys.modules,
+                            {"mlx": mlx_package, "mlx.core": mlx_core, "mlx_whisper": mlx_whisper},
+                        ):
+                            recognizer = MlxWhisperRecognizer("small")
+
+        holder.get_model.assert_called_once_with(recognizer.model_name, mlx_core.float16)
+
     @patch("ble_stt.recognizers.model_cache_dir", return_value=Path("/tmp/ble-stt-test/model-cache"))
     @patch("ble_stt.recognizers.FasterWhisperRecognizer")
     def test_recognizer_uses_private_model_cache(self, recognizer: Mock, cache_dir: Mock):
@@ -101,25 +123,19 @@ class LinuxInjectorTests(unittest.TestCase):
 
 
 class FakeQuartz:
-    kAXTrustedCheckOptionPrompt = "prompt"
-    kAXFocusedWindowAttribute = "focused-window"
     kCGEventSourceStateCombinedSessionState = 0
     kCGHIDEventTap = 0
 
     def __init__(self):
         self.posts = []
+        self.permission_requests = 0
 
-    def AXIsProcessTrustedWithOptions(self, options):
+    def CGPreflightPostEventAccess(self):
         return True
 
-    def AXUIElementCreateApplication(self, pid):
-        return pid
-
-    def AXUIElementCopyAttributeValue(self, element, attribute, unused):
-        return 0, f"window-{element}"
-
-    def CFEqual(self, left, right):
-        return left == right
+    def CGRequestPostEventAccess(self):
+        self.permission_requests += 1
+        return True
 
     def CGEventSourceCreate(self, state):
         return "source"
@@ -158,16 +174,12 @@ class FakeAppKit:
 
 
 class MacInjectorTests(unittest.TestCase):
-    def test_accessibility_uses_application_services_binding(self):
-        accessibility = Mock()
-        accessibility.kAXTrustedCheckOptionPrompt = "application-services-prompt"
-        accessibility.AXIsProcessTrustedWithOptions.return_value = True
-        injector = MacOSTextInjector(FakeQuartz(), FakeAppKit, accessibility)
+    def test_accessibility_requests_only_post_event_access(self):
+        quartz = FakeQuartz()
+        injector = MacOSTextInjector(quartz, FakeAppKit)
 
         self.assertTrue(injector.check_accessibility(True))
-        accessibility.AXIsProcessTrustedWithOptions.assert_called_once_with(
-            {"application-services-prompt": True}
-        )
+        self.assertEqual(quartz.permission_requests, 1)
 
     def test_permission_error_identifies_python(self):
         adapter = MacOSPlatform()
