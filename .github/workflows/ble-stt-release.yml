@@ -238,7 +238,21 @@ jobs:
           test "${DOCTOR_STATUS}" -eq 1
           grep -q '\[ok\] M5StopWatch app runtime is ready' "${RUNNER_TEMP}/m5stopwatch-doctor.log"
           grep -q '\[fail\] enable M5StopWatch' "${RUNNER_TEMP}/m5stopwatch-doctor.log"
-          HOME="${SMOKE_HOME}" "${EXECUTABLE}" prepare --engine mlx --model tiny
+
+          # Release packaging must be deterministic and offline. A model
+          # download exercises Hugging Face and Metal availability on this
+          # disposable runner, but the downloaded cache is not part of the
+          # App. Verify the frozen ML runtime and data files directly instead.
+          test -d "${APP}/Contents/Frameworks/bleak"
+          test -d "${APP}/Contents/Frameworks/huggingface_hub"
+          test -d "${APP}/Contents/Frameworks/numpy"
+          test -d "${APP}/Contents/Resources/mlx"
+          test -d "${APP}/Contents/Resources/mlx_whisper"
+          test -s "${APP}/Contents/Resources/mlx_whisper/assets/mel_filters.npz"
+          test -d "${APP}/Contents/Resources/opencc"
+          test -s "${APP}/Contents/Frameworks/hf_xet/hf_xet.abi3.so"
+          test -s "${APP}/Contents/Frameworks/mlx/lib/libmlx.dylib"
+          test "$(xcrun lipo -archs "${APP}/Contents/Frameworks/mlx/lib/libmlx.dylib")" = arm64
 
           ditto -c -k --sequesterRsrc --keepParent \
             "${APP}" M5StopWatch-macos-arm64.zip
