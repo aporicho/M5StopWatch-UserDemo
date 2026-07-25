@@ -4,8 +4,9 @@ import sys
 import tempfile
 import types
 import unittest
+import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import MagicMock, Mock, call, patch
 
 from ble_stt.config import UserConfig, config_dir, install_dir, model_cache_dir
 from ble_stt.platforms import create_platform
@@ -202,6 +203,99 @@ class MacInjectorTests(unittest.TestCase):
         self.assertIn("enable M5StopWatch", message)
         self.assertNotIn(sys.executable, message)
 
+    def test_validate_runtime_requests_permission_once(self):
+        adapter = MacOSPlatform()
+        injector = Mock()
+        injector.check_accessibility.return_value = False
+        with patch.object(adapter, "create_text_injector", return_value=injector):
+            with patch("ble_stt.platforms.macos.platform.machine", return_value="arm64"):
+                with self.assertRaises(RuntimeError):
+                    adapter.validate_runtime()
+                with self.assertRaises(RuntimeError):
+                    adapter.validate_runtime()
+
+        injector.check_accessibility.assert_any_call(False)
+        self.assertEqual(injector.check_accessibility.call_args_list.count(call(True)), 1)
+
+    def test_bluetooth_permission_allowed(self):
+        class FakeCBCentralManager:
+            @staticmethod
+            def authorization():
+                return 3
+
+        core_bluetooth = types.SimpleNamespace(
+            CBCentralManager=FakeCBCentralManager,
+            CBManagerAuthorizationAllowedAlways=3,
+            CBManagerAuthorizationDenied=2,
+            CBManagerAuthorizationNotDetermined=0,
+            CBManagerAuthorizationRestricted=1,
+        )
+        with patch.dict(sys.modules, {"CoreBluetooth": core_bluetooth}):
+            passed, message = MacOSPlatform().check_bluetooth_permission(False)
+
+        self.assertTrue(passed)
+        self.assertIn("Bluetooth permission is granted", message)
+
+    def test_bluetooth_permission_not_determined_identifies_app(self):
+        class FakeCBCentralManager:
+            @staticmethod
+            def authorization():
+                return 0
+
+        core_bluetooth = types.SimpleNamespace(
+            CBCentralManager=FakeCBCentralManager,
+            CBManagerAuthorizationAllowedAlways=3,
+            CBManagerAuthorizationDenied=2,
+            CBManagerAuthorizationNotDetermined=0,
+            CBManagerAuthorizationRestricted=1,
+        )
+        with patch.dict(sys.modules, {"CoreBluetooth": core_bluetooth}):
+            with patch.object(sys, "frozen", True, create=True):
+                passed, message = MacOSPlatform().check_bluetooth_permission(False)
+
+        self.assertFalse(passed)
+        self.assertIn("enable M5StopWatch", message)
+        self.assertIn("Bluetooth", message)
+
+    def test_bluetooth_permission_prompt_creates_core_bluetooth_manager(self):
+        calls = []
+
+        class FakeCentralManagerInstance:
+            def initWithDelegate_queue_options_(self, delegate, queue, options):
+                calls.append((delegate, queue, options))
+                return self
+
+        class FakeCBCentralManager:
+            authorizations = [0, 3]
+
+            @classmethod
+            def authorization(cls):
+                return cls.authorizations.pop(0)
+
+            @staticmethod
+            def alloc():
+                return FakeCentralManagerInstance()
+
+        core_bluetooth = types.SimpleNamespace(
+            CBCentralManager=FakeCBCentralManager,
+            CBManagerAuthorizationAllowedAlways=3,
+            CBManagerAuthorizationDenied=2,
+            CBManagerAuthorizationNotDetermined=0,
+            CBManagerAuthorizationRestricted=1,
+        )
+        with patch.dict(sys.modules, {"CoreBluetooth": core_bluetooth}):
+            passed, message = MacOSPlatform().check_bluetooth_permission(True)
+
+        self.assertTrue(passed)
+        self.assertIn("Bluetooth permission is granted", message)
+        self.assertEqual(calls, [(None, None, None)])
+
+    @patch("ble_stt.platforms.macos.subprocess.run")
+    def test_open_bluetooth_permission_settings(self, run: Mock):
+        MacOSPlatform().open_bluetooth_permission_settings()
+
+        self.assertIn("Privacy_Bluetooth", run.call_args.args[0][1])
+
     def test_unicode_input_and_focus_guard(self):
         quartz = FakeQuartz()
         injector = MacOSTextInjector(quartz, FakeAppKit)
@@ -214,6 +308,54 @@ class MacInjectorTests(unittest.TestCase):
             self.assertFalse(injector.type_text("blocked", expected))
         finally:
             FakeWorkspace.pid = 42
+
+
+class MacBLEDiscoveryTests(unittest.TestCase):
+    def test_cache_lookup_timeout_falls_back_to_name_scan(self):
+        class FakeScanner:
+            @staticmethod
+            async def find_device_by_address(identifier, timeout):
+                return None
+
+            @staticmethod
+            async def find_device_by_name(name, timeout):
+                return types.SimpleNamespace(address="fresh-device", name=name)
+
+        async def never_returns(identifier):
+            await asyncio.Event().wait()
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = UserConfig(Path(directory) / "config.json")
+            adapter = MacOSPlatform(config)
+            with patch.dict(sys.modules, {"bleak": types.SimpleNamespace(BleakScanner=FakeScanner)}):
+                with patch.object(adapter, "_retrieve_system_device", side_effect=never_returns):
+                    with patch("ble_stt.platforms.macos.CORE_BLUETOOTH_CACHE_TIMEOUT_SECONDS", 0.01):
+                        device = asyncio.run(adapter.find_device(None))
+
+        self.assertEqual(device.address, "fresh-device")
+        self.assertEqual(config.get("device_id"), "fresh-device")
+
+    def test_address_scan_timeout_falls_back_to_name_scan(self):
+        class FakeScanner:
+            @staticmethod
+            async def find_device_by_address(identifier, timeout):
+                await asyncio.Event().wait()
+
+            @staticmethod
+            async def find_device_by_name(name, timeout):
+                return types.SimpleNamespace(address="fresh-device", name=name)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = UserConfig(Path(directory) / "config.json")
+            config.set("device_id", "stale-device")
+            adapter = MacOSPlatform(config)
+            with patch.dict(sys.modules, {"bleak": types.SimpleNamespace(BleakScanner=FakeScanner)}):
+                with patch.object(adapter, "_retrieve_system_device", return_value=None):
+                    with patch("ble_stt.platforms.macos.BLE_ADDRESS_SCAN_TIMEOUT_SECONDS", 0.01):
+                        device = asyncio.run(adapter.find_device(None))
+
+        self.assertEqual(device.address, "fresh-device")
+        self.assertEqual(config.get("device_id"), "fresh-device")
 
 
 class FakeWindowsAPI:
@@ -247,11 +389,85 @@ class ServiceRenderingTests(unittest.TestCase):
                     ["/tmp/venv/python", "-m", "ble_stt", "run", "--model", "small"],
                 )
 
-    def test_frozen_service_uses_stable_app_executable(self):
+    def test_frozen_macos_service_launches_through_app_bundle(self):
         app = "/Users/test/Applications/M5StopWatch.app/Contents/MacOS/M5StopWatch"
         with patch.object(sys, "frozen", True, create=True):
             with patch("ble_stt.service.sys.executable", app):
-                self.assertEqual(service_arguments([]), [app, "run"])
+                self.assertEqual(
+                    service_arguments([], "darwin"),
+                    [app, "run"],
+                )
+
+    def test_frozen_macos_service_prefers_fixed_helper_entrypoint(self):
+        app = (
+            "/Applications/M5StopWatch.app/Contents/Resources/resources/ble-stt-helper/"
+            "M5StopWatch"
+        )
+        with patch.object(sys, "frozen", True, create=True):
+            with patch("ble_stt.service.sys.executable", app):
+                with patch.dict(
+                    "ble_stt.service.os.environ",
+                    {
+                        "BLE_STT_SERVICE_HELPER": app,
+                        "BLE_STT_SERVICE_APP_BUNDLE": "/Applications/M5StopWatch.app",
+                    },
+                ):
+                    self.assertEqual(
+                        service_arguments(["--model", "small"], "darwin"),
+                        [app, "run", "--model", "small"],
+                    )
+
+    def test_frozen_macos_service_prefers_product_runner(self):
+        runner = "/Applications/M5StopWatch.app/Contents/MacOS/m5stopwatch"
+        helper = (
+            "/Applications/M5StopWatch.app/Contents/Resources/resources/ble-stt-helper/"
+            "M5StopWatch.app/Contents/MacOS/M5StopWatch"
+        )
+        with patch.object(sys, "frozen", True, create=True):
+            with patch.dict(
+                "ble_stt.service.os.environ",
+                {
+                    "BLE_STT_SERVICE_RUNNER": runner,
+                    "BLE_STT_SERVICE_HELPER": helper,
+                },
+                clear=True,
+            ):
+                self.assertEqual(
+                    service_arguments(["--model", "small"], "darwin"),
+                    [runner, "service-run", "--model", "small"],
+                )
+
+    def test_frozen_macos_service_can_still_use_product_app_bundle(self):
+        app = "/Applications/M5StopWatch.app/Contents/MacOS/m5stopwatch"
+        with patch.object(sys, "frozen", True, create=True):
+            with patch("ble_stt.service.sys.executable", app):
+                with patch.dict(
+                    "ble_stt.service.os.environ",
+                    {"BLE_STT_SERVICE_APP_BUNDLE": "/Applications/M5StopWatch.app"},
+                    clear=True,
+                ):
+                    self.assertEqual(
+                        service_arguments([], "darwin"),
+                        [app, "run"],
+                    )
+
+    def test_frozen_inner_helper_without_product_bundle_uses_executable(self):
+        app = (
+            "/Applications/M5StopWatch.app/Contents/Resources/resources/ble-stt-helper/"
+            "M5StopWatch"
+        )
+        with patch.object(sys, "frozen", True, create=True):
+            with patch("ble_stt.service.sys.executable", app):
+                self.assertEqual(
+                    service_arguments(["--model", "small"], "darwin"),
+                    [app, "run", "--model", "small"],
+                )
+
+    def test_frozen_non_app_service_uses_executable(self):
+        app = "/tmp/M5StopWatch"
+        with patch.object(sys, "frozen", True, create=True):
+            with patch("ble_stt.service.sys.executable", app):
+                self.assertEqual(service_arguments([], "darwin"), [app, "run"])
 
     def test_systemd_unit_uses_explicit_interpreter(self):
         value = render_systemd_unit(
@@ -271,6 +487,31 @@ class ServiceRenderingTests(unittest.TestCase):
         self.assertEqual(value["Label"], SERVICE_LABEL)
         self.assertTrue(value["RunAtLoad"])
         self.assertEqual(value["LimitLoadToSessionType"], "Aqua")
+
+    def test_launch_agent_redirects_open_launched_helper_output(self):
+        value = plistlib.loads(
+            render_launch_agent(
+                ["/usr/bin/open", "-W", "-g", "-j", "/tmp/M5StopWatch.app", "--args", "run"],
+                Path("/tmp/out"),
+                Path("/tmp/err"),
+            )
+        )
+        self.assertEqual(
+            value["ProgramArguments"],
+            [
+                "/usr/bin/open",
+                "-W",
+                "-g",
+                "-j",
+                "--stdout",
+                "/tmp/out",
+                "--stderr",
+                "/tmp/err",
+                "/tmp/M5StopWatch.app",
+                "--args",
+                "run",
+            ],
+        )
 
     @patch("ble_stt.service.subprocess.run")
     def test_macos_loaded_but_stopped_service_is_not_active(self, run: Mock):

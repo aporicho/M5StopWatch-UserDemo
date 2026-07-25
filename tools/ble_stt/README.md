@@ -84,6 +84,7 @@ macOS 维护命令：
 ~/.local/bin/ble-stt doctor --request-permissions
 ~/.local/bin/ble-stt doctor --ble
 ~/.local/bin/ble-stt test
+~/.local/bin/ble-stt journey-test --rounds 25 --duration 1800
 ~/.local/bin/ble-stt logs -n 100
 ~/.local/bin/ble-stt logs --follow
 ~/.local/bin/ble-stt restart
@@ -104,6 +105,8 @@ macOS 的 `upgrade` 会先下载并验证新 App 和维护安装器，再停止�
 ~/.local/bin/ble-stt run --engine auto --model medium
 ```
 
+完整实体旅程回归使用 `journey-test`。运行前先聚焦一个空白文本窗口，再按提示在手表 BLE Remote 中完成多轮按住说话；命令会从 `ble-stt-events.log` 自动统计会话、文字输入和异常，并把报告与日志复制到 `test-artifacts/<时间戳>/`。
+
 旧版命令（例如 `ble-stt --model small`）仍会自动转发到 `run`，以保持兼容。设备标识会在首次发现后自动缓存；`--device-id` 和旧的 `--address` 别名只用于排障。
 
 ## 日志位置
@@ -111,6 +114,12 @@ macOS 的 `upgrade` 会先下载并验证新 App 和维护安装器，再停止�
 - Linux：`~/.local/state/m5stopwatch`
 - macOS：`~/Library/Logs/M5StopWatch`
 - Windows：`%LOCALAPPDATA%\M5StopWatch\Logs`
+
+主要文件：
+
+- `ble-stt-events.log`：带时间戳的结构化运行日志，包含启动环境、BLE 连接、模型准备、语音会话、文本注入和异常栈；会自动轮转。
+- `ble-stt.log`：后台服务 stdout 兼容日志。
+- `ble-stt-error.log`：后台服务 stderr 兼容日志。
 
 如果另一台电脑持续自动重连，请在 BLE Remote 屏幕连续轻点三次打开控制页，再选择 **Pair new computer**。手表会记住并暂时拒绝最后连接的电脑以及已有绑定，新电脑加密配对成功后才删除旧绑定。固件无法命令另一台电脑停止主动重试；若要停止 Linux 自己的重连通知，还需在那台 Linux 的蓝牙设置中“忘记”`M5StopWatch HID`。若 macOS 系统里存在失败连接留下的旧条目，也可先移除后重试。
 

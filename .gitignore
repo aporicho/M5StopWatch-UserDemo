@@ -36,9 +36,11 @@
 
 # Build files
 build/
+build-idf*/
 cmake-build-*/
 /components/
 managed_components/
+test-artifacts/
 
 # PlatformIO
 .pio/

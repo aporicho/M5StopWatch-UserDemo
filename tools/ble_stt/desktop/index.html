@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="stylesheet" href="/src/styles.css" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>M5StopWatch</title>
+    <script type="module" src="/src/main.ts" defer></script>
+  </head>
+
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">M5StopWatch</p>
+          <h1>Control</h1>
+        </div>
+        <div class="state-pill" id="overall-state">Loading</div>
+      </header>
+
+      <section class="actions" aria-label="Service actions">
+        <button id="install-service" type="button">Install</button>
+        <button id="start-service" type="button">Start</button>
+        <button id="stop-service" type="button">Stop</button>
+        <button id="restart-service" type="button">Restart</button>
+        <button id="refresh" type="button">Refresh</button>
+        <button id="open-logs" type="button">Logs</button>
+        <button id="copy-diagnostics" type="button">Copy Diagnostics</button>
+      </section>
+
+      <section class="message" id="message" hidden></section>
+
+      <section class="grid" aria-label="Current state">
+        <article class="panel primary-panel">
+          <div class="panel-title">
+            <span>Status</span>
+            <time id="last-updated">Never</time>
+          </div>
+          <dl class="status-list" id="status-list"></dl>
+        </article>
+
+        <article class="panel">
+          <div class="panel-title">
+            <span>Permissions</span>
+          </div>
+          <div class="permission-stack">
+            <div class="permission-row">
+              <div>
+                <span class="label">Bluetooth</span>
+                <p id="bluetooth-detail">Unknown</p>
+              </div>
+              <button id="open-bluetooth" type="button">Request</button>
+            </div>
+            <div class="permission-row">
+              <div>
+                <span class="label">Text Input</span>
+                <p id="input-detail">Unknown</p>
+              </div>
+              <button id="open-input" type="button">Request</button>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      <section class="log-panel" aria-label="Recent logs">
+        <div class="panel-title">
+          <span>Latest Log</span>
+          <span id="log-directory"></span>
+        </div>
+        <pre id="logs">Loading logs...</pre>
+      </section>
+    </main>
+  </body>
+</html>

@@ -26,7 +26,7 @@ constexpr uint32_t TapMaxDurationMs   = 280;
 constexpr uint32_t MultiTapTimeoutMs  = 600;
 constexpr int TapMaxMovement          = 14;
 
-constexpr uint32_t BackgroundColor       = 0x171A21;
+constexpr uint32_t BackgroundColor       = 0x000000;
 constexpr uint32_t SurfaceColor          = 0x292E39;
 constexpr uint32_t SurfaceActiveColor    = 0x3467D7;
 constexpr uint32_t PrimaryTextColor      = 0xFFFFFF;
@@ -221,17 +221,17 @@ void BleHidRemoteView::init(lv_obj_t* parent)
 
     _displayed_state = model::BleHidRemote::State::Stopped;
     _displayed_error = 0;
-    updateStatus(model::BleHidRemote::State::Starting, 0, false, false, model::BleHidRemote::HostStatus::Waiting, 0);
+    updateStatus(model::BleHidRemote::State::Starting, 0,
+                 model::BleHidRemote::SpeechServiceState::Disconnected, 0);
     setControlsVisible(false);
 }
 
-void BleHidRemoteView::update(model::BleHidRemote::State state, int lastError, bool speechReady, bool speechActive,
-                              model::BleHidRemote::HostStatus hostStatus, uint16_t hostError)
+void BleHidRemoteView::update(model::BleHidRemote::State state, int lastError,
+                              model::BleHidRemote::SpeechServiceState serviceState, uint16_t hostError)
 {
     if (state != _displayed_state || (state == model::BleHidRemote::State::Error && lastError != _displayed_error) ||
-        speechReady != _displayed_speech_ready || speechActive != _displayed_speech_active ||
-        hostStatus != _displayed_host_status || hostError != _displayed_host_error) {
-        updateStatus(state, lastError, speechReady, speechActive, hostStatus, hostError);
+        serviceState != _displayed_service_state || hostError != _displayed_host_error) {
+        updateStatus(state, lastError, serviceState, hostError);
     }
 
     const uint32_t now = GetHAL().millis();
@@ -288,8 +288,8 @@ bool BleHidRemoteView::consumePairRequested()
     return requested;
 }
 
-void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastError, bool speechReady,
-                                    bool speechActive, model::BleHidRemote::HostStatus hostStatus, uint16_t hostError)
+void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastError,
+                                    model::BleHidRemote::SpeechServiceState serviceState, uint16_t hostError)
 {
     const char* text = "Stopped";
     uint32_t color   = SecondaryTextColor;
@@ -297,58 +297,69 @@ void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastEr
 
     switch (state) {
         case model::BleHidRemote::State::Starting:
-            text  = "Starting Bluetooth...";
+            text  = "Starting";
             color = StartingColor;
             break;
         case model::BleHidRemote::State::Advertising:
-            text  = "Pair on your computer";
+            text  = "Waiting for PC";
+            color = AdvertisingColor;
+            break;
+        case model::BleHidRemote::State::Pairing:
+            text  = "Connecting";
             color = AdvertisingColor;
             break;
         case model::BleHidRemote::State::Connected:
-            if (speechActive) {
-                text  = "Listening...";
-                color = ErrorColor;
-            } else {
-                switch (hostStatus) {
-                    case model::BleHidRemote::HostStatus::Preparing:
-                        text  = "Preparing speech model...";
-                        color = AdvertisingColor;
-                        break;
-                    case model::BleHidRemote::HostStatus::Ready:
-                        text  = speechReady ? "Speech input ready" : "Connecting speech input...";
-                        color = speechReady ? ConnectedColor : AdvertisingColor;
-                        break;
-                    case model::BleHidRemote::HostStatus::Recognizing:
-                        text  = "Recognizing...";
-                        color = AdvertisingColor;
-                        break;
-                    case model::BleHidRemote::HostStatus::PermissionError:
-                        text  = "Computer permission needed";
-                        color = ErrorColor;
-                        break;
-                    case model::BleHidRemote::HostStatus::ModelError:
-                        text  = "Speech model error";
-                        color = ErrorColor;
-                        break;
-                    case model::BleHidRemote::HostStatus::HostError:
-                        if (hostError != 0) {
-                            std::snprintf(errorText, sizeof(errorText), "STT helper error (%u)", hostError);
-                            text = errorText;
-                        } else {
-                            text = "STT helper error";
-                        }
-                        color = ErrorColor;
-                        break;
-                    case model::BleHidRemote::HostStatus::Waiting:
-                    default:
-                        text  = speechReady ? "Speech input ready" : "HID connected - run STT helper";
-                        color = speechReady ? ConnectedColor : AdvertisingColor;
-                        break;
-                }
+            switch (serviceState) {
+                case model::BleHidRemote::SpeechServiceState::BluetoothConnected:
+                case model::BleHidRemote::SpeechServiceState::Disconnected:
+                    text  = "HID connected";
+                    color = ConnectedColor;
+                    break;
+                case model::BleHidRemote::SpeechServiceState::Connecting:
+                    text  = "Voice not ready";
+                    color = AdvertisingColor;
+                    break;
+                case model::BleHidRemote::SpeechServiceState::Preparing:
+                    text  = "Model loading";
+                    color = AdvertisingColor;
+                    break;
+                case model::BleHidRemote::SpeechServiceState::Ready:
+                    text  = "Voice ready";
+                    color = ConnectedColor;
+                    break;
+                case model::BleHidRemote::SpeechServiceState::Listening:
+                    text  = "Listening";
+                    color = ConnectedColor;
+                    break;
+                case model::BleHidRemote::SpeechServiceState::Recognizing:
+                    text  = "Recognizing";
+                    color = AdvertisingColor;
+                    break;
+                case model::BleHidRemote::SpeechServiceState::PermissionError:
+                    text  = "Need permission";
+                    color = ErrorColor;
+                    break;
+                case model::BleHidRemote::SpeechServiceState::ModelError:
+                    text  = "Model error";
+                    color = ErrorColor;
+                    break;
+                case model::BleHidRemote::SpeechServiceState::HostError:
+                    if (hostError != 0) {
+                        std::snprintf(errorText, sizeof(errorText), "Helper error %u", hostError);
+                        text = errorText;
+                    } else {
+                        text = "Helper error";
+                    }
+                    color = ErrorColor;
+                    break;
+                case model::BleHidRemote::SpeechServiceState::MtuTooSmall:
+                    text  = "MTU too small";
+                    color = ErrorColor;
+                    break;
             }
             break;
         case model::BleHidRemote::State::Error:
-            std::snprintf(errorText, sizeof(errorText), "Bluetooth error (%d)", lastError);
+            std::snprintf(errorText, sizeof(errorText), "BLE error %d", lastError);
             text  = errorText;
             color = ErrorColor;
             break;
@@ -361,9 +372,7 @@ void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastEr
     _status_dot->setBgColor(lv_color_hex(color));
     _displayed_state         = state;
     _displayed_error         = lastError;
-    _displayed_speech_ready  = speechReady;
-    _displayed_speech_active = speechActive;
-    _displayed_host_status   = hostStatus;
+    _displayed_service_state = serviceState;
     _displayed_host_error    = hostError;
 }
 

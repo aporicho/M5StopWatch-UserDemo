@@ -14,6 +14,9 @@ from PyInstaller.utils.hooks import (
 SOURCE_ROOT = Path(SPECPATH).parent
 VERSION = os.environ.get("BLE_STT_APP_VERSION", "0.0.0")
 SIGNING_IDENTITY = os.environ.get("BLE_STT_CODESIGN_IDENTITY") or None
+HELPER_BUNDLE_ID = os.environ.get(
+    "BLE_STT_HELPER_BUNDLE_ID", "com.aporicho.m5stopwatch-ble-stt-helper"
+)
 
 datas = []
 for package in (
@@ -110,7 +113,7 @@ coll = COLLECT(
 app = BUNDLE(
     coll,
     name="M5StopWatch.app",
-    bundle_identifier="com.aporicho.m5stopwatch-ble-stt",
+    bundle_identifier=HELPER_BUNDLE_ID,
     version=VERSION,
     target_arch="arm64",
     codesign_identity=SIGNING_IDENTITY,
@@ -120,6 +123,7 @@ app = BUNDLE(
         "CFBundleShortVersionString": VERSION,
         "CFBundleVersion": VERSION,
         "LSMinimumSystemVersion": "15.0",
+        "LSBackgroundOnly": False,
         "LSUIElement": True,
         "NSBluetoothAlwaysUsageDescription": "用于连接 M5StopWatch 并接收手表上的语音数据。",
         "NSHighResolutionCapable": True,

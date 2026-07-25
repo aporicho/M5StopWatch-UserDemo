@@ -22,6 +22,12 @@ class PlatformAdapter:
     def check_input_permission(self, prompt: bool = False) -> tuple[bool, str]:
         return True, "input permission is available"
 
+    def check_bluetooth_permission(self, prompt: bool = False) -> tuple[bool, str]:
+        return True, "Bluetooth permission is available"
+
+    def open_bluetooth_permission_settings(self) -> None:
+        pass
+
     async def paired_identifier(self) -> str | None:
         value = self.config.get("device_id")
         return str(value) if value else None

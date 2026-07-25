@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import platform
 import subprocess
 import sys
@@ -13,6 +14,11 @@ from .base import PlatformAdapter
 ACCESSIBILITY_SETTINGS_URL = (
     "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
 )
+BLUETOOTH_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth"
+CORE_BLUETOOTH_CACHE_TIMEOUT_SECONDS = 5.0
+BLE_ADDRESS_SCAN_TIMEOUT_SECONDS = 5.0
+BLE_NAME_SCAN_TIMEOUT_SECONDS = 12.0
+_BLUETOOTH_PERMISSION_MANAGER: Any | None = None
 
 
 def _accessibility_principal() -> str:
@@ -28,6 +34,31 @@ def _accessibility_instructions() -> str:
         "in System Settings > Privacy & Security > Accessibility, click +, press Shift-Command-G, "
         f"then add and enable {sys.executable}"
     )
+
+
+def _bluetooth_instructions() -> str:
+    if getattr(sys, "frozen", False):
+        return "enable M5StopWatch in System Settings > Privacy & Security > Bluetooth"
+    return (
+        "enable the current terminal/Python process in System Settings > Privacy & Security > "
+        "Bluetooth, then rerun the command"
+    )
+
+
+def _request_bluetooth_authorization(central_manager_type: Any) -> None:
+    global _BLUETOOTH_PERMISSION_MANAGER
+    try:
+        _BLUETOOTH_PERMISSION_MANAGER = central_manager_type.alloc().initWithDelegate_queue_options_(
+            None, None, None
+        )
+    except Exception:
+        return
+    try:
+        from Foundation import NSDate, NSRunLoop
+
+        NSRunLoop.currentRunLoop().runUntilDate_(NSDate.dateWithTimeIntervalSinceNow_(0.2))
+    except Exception:
+        pass
 
 
 @dataclass(frozen=True)
@@ -113,8 +144,12 @@ class MacOSPlatform(PlatformAdapter):
             raise RuntimeError("the macOS MLX backend requires Apple Silicon")
         injector = self.create_text_injector()
         if not injector.check_accessibility(False):
+            if not getattr(self, "_input_permission_prompted", False):
+                self._input_permission_prompted = True
+                injector.check_accessibility(True)
             raise RuntimeError(
-                "Accessibility permission is required; run 'ble-stt doctor --request-permissions' first"
+                "Accessibility permission is required; enable M5StopWatch in System Settings > "
+                "Privacy & Security > Accessibility"
             )
 
     def check_input_permission(self, prompt: bool = False) -> tuple[bool, str]:
@@ -126,9 +161,43 @@ class MacOSPlatform(PlatformAdapter):
             return True, "macOS Accessibility permission is granted"
         return False, _accessibility_instructions()
 
+    def check_bluetooth_permission(self, prompt: bool = False) -> tuple[bool, str]:
+        try:
+            from CoreBluetooth import (
+                CBCentralManager,
+                CBManagerAuthorizationAllowedAlways,
+                CBManagerAuthorizationDenied,
+                CBManagerAuthorizationNotDetermined,
+                CBManagerAuthorizationRestricted,
+            )
+        except ImportError as exc:
+            return False, f"PyObjC CoreBluetooth is unavailable: {exc}"
+
+        authorization = int(CBCentralManager.authorization())
+        if prompt and authorization == int(CBManagerAuthorizationNotDetermined):
+            _request_bluetooth_authorization(CBCentralManager)
+            authorization = int(CBCentralManager.authorization())
+        if authorization == int(CBManagerAuthorizationAllowedAlways):
+            return True, "macOS Bluetooth permission is granted"
+        if authorization == int(CBManagerAuthorizationNotDetermined):
+            return False, f"macOS Bluetooth permission has not been granted yet; {_bluetooth_instructions()}"
+        if authorization == int(CBManagerAuthorizationDenied):
+            return False, f"macOS Bluetooth permission is denied; {_bluetooth_instructions()}"
+        if authorization == int(CBManagerAuthorizationRestricted):
+            return False, "macOS Bluetooth permission is restricted by system policy"
+        return False, f"macOS Bluetooth permission is unavailable (authorization={authorization})"
+
     def open_input_permission_settings(self) -> None:
         subprocess.run(
             ["open", ACCESSIBILITY_SETTINGS_URL],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def open_bluetooth_permission_settings(self) -> None:
+        subprocess.run(
+            ["open", BLUETOOTH_SETTINGS_URL],
             check=False,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -164,7 +233,13 @@ class MacOSPlatform(PlatformAdapter):
 
         identifier = explicit_identifier or await self.paired_identifier()
         try:
-            device = await self._retrieve_system_device(identifier)
+            device = await asyncio.wait_for(
+                self._retrieve_system_device(identifier),
+                timeout=CORE_BLUETOOTH_CACHE_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            print("[ble] CoreBluetooth cache lookup timed out")
+            device = None
         except Exception as exc:
             print(f"[ble] CoreBluetooth cache lookup failed: {exc}")
             device = None
@@ -172,11 +247,25 @@ class MacOSPlatform(PlatformAdapter):
             print(f"[ble] using CoreBluetooth cached device {device.address}")
             return device
         if identifier:
-            device = await BleakScanner.find_device_by_address(identifier, timeout=3)
+            try:
+                device = await asyncio.wait_for(
+                    BleakScanner.find_device_by_address(identifier, timeout=3),
+                    timeout=BLE_ADDRESS_SCAN_TIMEOUT_SECONDS,
+                )
+            except TimeoutError:
+                print("[ble] cached address scan timed out")
+                device = None
             if device is not None:
                 return device
         print(f"[ble] scanning for {DEVICE_NAME}")
-        device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=10)
+        try:
+            device = await asyncio.wait_for(
+                BleakScanner.find_device_by_name(DEVICE_NAME, timeout=10),
+                timeout=BLE_NAME_SCAN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            print("[ble] device name scan timed out")
+            device = None
         if device is None:
             raise RuntimeError(
                 f"{DEVICE_NAME} was not found; reopen BLE Remote or forget the stale pairing and try again"

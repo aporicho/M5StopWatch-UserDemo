@@ -39,11 +39,13 @@ constexpr char DeviceName[] = "M5StopWatch HID";
 
 constexpr uint8_t KeyboardReportId = 1;
 constexpr uint8_t MouseReportId    = 2;
+constexpr size_t MaxBondedComputers = 2;
 
 constexpr uint8_t SpeechProtocolVersion = 1;
 constexpr uint8_t SpeechCodecImaAdpcm   = 1;
 constexpr uint16_t SpeechSampleRate     = 16000;
 constexpr uint16_t MinimumSpeechMtu     = 185;
+constexpr uint32_t SpeechWorkerStackBytes = 12 * 1024;
 
 enum SpeechEvent : uint8_t {
     SpeechReady = 0,
@@ -211,6 +213,20 @@ bool sameAddress(const ble_addr_t& left, const ble_addr_t& right)
     return ble_addr_cmp(&left, &right) == 0;
 }
 
+ble_addr_t lastPeerAddress(uint8_t type, const std::array<uint8_t, 6>& value)
+{
+    ble_addr_t peer{};
+    peer.type = type;
+    std::copy(value.begin(), value.end(), std::begin(peer.val));
+    return peer;
+}
+
+void logPeerAddress(const char* message, const ble_addr_t& address)
+{
+    ESP_LOGI(Tag, "%s type=%u addr=%02x:%02x:%02x:%02x:%02x:%02x", message, address.type, address.val[5],
+             address.val[4], address.val[3], address.val[2], address.val[1], address.val[0]);
+}
+
 BleHidRemote* ActiveInstance = nullptr;
 
 }  // namespace
@@ -233,8 +249,8 @@ bool BleHidRemote::start()
     _speech_abort_requested   = false;
     _speech_subscribed        = false;
     _speech_status_subscribed = false;
-    _pairing_replacement      = false;
-    _replacement_peer_count   = 0;
+    _pairing_open             = false;
+    _pairing_blocked_peer_valid = false;
     _last_peer_valid          = false;
     _host_status              = HostStatus::Waiting;
     _host_error               = 0;
@@ -326,11 +342,48 @@ bool BleHidRemote::sendWheel(int8_t delta)
 
 bool BleHidRemote::isSpeechReady() const
 {
-    const uint16_t handle       = _connection_handle.load();
+    return speechServiceState() == SpeechServiceState::Ready;
+}
+
+BleHidRemote::SpeechServiceState BleHidRemote::speechServiceState() const
+{
+    if (!isConnected()) {
+        return SpeechServiceState::Disconnected;
+    }
+    if (_speech_active.load()) {
+        return SpeechServiceState::Listening;
+    }
+
     const HostStatus hostStatus = _host_status.load();
-    const bool hostReady        = hostStatus == HostStatus::Waiting || hostStatus == HostStatus::Ready;
-    return isConnected() && handle != InvalidConnectionHandle && _speech_subscribed.load() &&
-           _speech_status_subscribed.load() && hostReady && ble_att_mtu(handle) >= MinimumSpeechMtu;
+    switch (hostStatus) {
+        case HostStatus::Preparing:
+            return SpeechServiceState::Preparing;
+        case HostStatus::Recognizing:
+            return SpeechServiceState::Recognizing;
+        case HostStatus::PermissionError:
+            return SpeechServiceState::PermissionError;
+        case HostStatus::ModelError:
+            return SpeechServiceState::ModelError;
+        case HostStatus::HostError:
+            return SpeechServiceState::HostError;
+        case HostStatus::Ready:
+            break;
+        case HostStatus::Waiting:
+        default:
+            if (_speech_status_subscribed.load() || _speech_subscribed.load()) {
+                return SpeechServiceState::Connecting;
+            }
+            return SpeechServiceState::BluetoothConnected;
+    }
+
+    const uint16_t handle = _connection_handle.load();
+    if (handle == InvalidConnectionHandle || !_speech_status_subscribed.load() || !_speech_subscribed.load()) {
+        return SpeechServiceState::Connecting;
+    }
+    if (ble_att_mtu(handle) < MinimumSpeechMtu) {
+        return SpeechServiceState::MtuTooSmall;
+    }
+    return SpeechServiceState::Ready;
 }
 
 bool BleHidRemote::startSpeech()
@@ -353,14 +406,15 @@ bool BleHidRemote::startSpeech()
     }
 
     _speech_worker_running = true;
-    if (xTaskCreate(speechWorkerTask, "ble_speech", 5 * 1024, this, 4, &_speech_worker_task) != pdPASS) {
+    if (xTaskCreate(speechWorkerTask, "ble_speech", SpeechWorkerStackBytes, this, 4, &_speech_worker_task) != pdPASS) {
         _speech_worker_running = false;
         _speech_active         = false;
         sendSpeechStatus(SpeechError, ESP_ERR_NO_MEM);
         return false;
     }
 
-    ESP_LOGI(Tag, "speech session %u started", _speech_session);
+    ESP_LOGI(Tag, "speech session %u started, stack=%u bytes", _speech_session,
+             static_cast<unsigned>(SpeechWorkerStackBytes));
     return true;
 }
 
@@ -378,44 +432,11 @@ bool BleHidRemote::pairNewComputer()
         return false;
     }
 
-    std::array<ble_addr_t, 2> bondedPeers{};
-    int bondedCount = 0;
-    const int storeResult =
-        ble_store_util_bonded_peers(bondedPeers.data(), &bondedCount, static_cast<int>(bondedPeers.size()));
-    if (storeResult != 0) {
-        ESP_LOGE(Tag, "failed to read BLE bonds: %d", storeResult);
-        setError(storeResult);
+    stopSpeech(true);
+    if (!preparePairingWindow()) {
         return false;
     }
-
-    _replacement_peer_count = static_cast<uint8_t>(std::min(bondedCount, static_cast<int>(bondedPeers.size())));
-    for (uint8_t index = 0; index < _replacement_peer_count; ++index) {
-        _replacement_peer_types[index] = bondedPeers[index].type;
-        std::copy(std::begin(bondedPeers[index].val), std::end(bondedPeers[index].val),
-                  _replacement_peer_addresses[index].begin());
-    }
-
-    // A computer can keep reconnecting before it has completed bonding.  Keep
-    // the most recently connected address as well as stored bonds so Pair new
-    // computer can reject that race on the next advertising cycle.
-    if (_last_peer_valid && _replacement_peer_count < _replacement_peer_addresses.size()) {
-        ble_addr_t lastPeer{};
-        lastPeer.type = _last_peer_type;
-        std::copy(_last_peer_address.begin(), _last_peer_address.end(), std::begin(lastPeer.val));
-        bool alreadyStored = false;
-        for (uint8_t index = 0; index < _replacement_peer_count; ++index) {
-            if (sameAddress(lastPeer, bondedPeers[index])) {
-                alreadyStored = true;
-                break;
-            }
-        }
-        if (!alreadyStored) {
-            _replacement_peer_types[_replacement_peer_count]     = lastPeer.type;
-            _replacement_peer_addresses[_replacement_peer_count] = _last_peer_address;
-            ++_replacement_peer_count;
-        }
-    }
-    _pairing_replacement = _replacement_peer_count != 0;
+    _pairing_open = true;
 
     const uint16_t handle     = _connection_handle.load();
     bool waitingForDisconnect = false;
@@ -430,7 +451,7 @@ bool BleHidRemote::pairNewComputer()
         }
     }
 
-    ESP_LOGI(Tag, "pair-new-computer mode started; blocking %u previous peer(s)", _replacement_peer_count);
+    ESP_LOGI(Tag, "pair-new-computer mode started; accepting an unbonded computer");
     _state = State::Advertising;
     if (waitingForDisconnect) {
         return true;
@@ -661,6 +682,18 @@ bool BleHidRemote::startAdvertising()
         return false;
     }
 
+    ble_hs_adv_fields response{};
+    response.uuids128             = &SpeechServiceUuid;
+    response.num_uuids128         = 1;
+    response.uuids128_is_complete = 1;
+
+    result = ble_gap_adv_rsp_set_fields(&response);
+    if (result != 0) {
+        ESP_LOGE(Tag, "failed to set scan response fields: %d", result);
+        setError(result);
+        return false;
+    }
+
     ble_gap_adv_params parameters{};
     parameters.conn_mode = BLE_GAP_CONN_MODE_UND;
     parameters.disc_mode = BLE_GAP_DISC_MODE_GEN;
@@ -675,15 +708,67 @@ bool BleHidRemote::startAdvertising()
     }
 
     _state = State::Advertising;
+    ESP_LOGI(Tag, "advertising as %s with HID 0x1812 and speech service in scan response", DeviceName);
+    return true;
+}
+
+bool BleHidRemote::preparePairingWindow()
+{
+    std::array<ble_addr_t, MaxBondedComputers> bondedPeers{};
+    int bondedCount = 0;
+    const int storeResult =
+        ble_store_util_bonded_peers(bondedPeers.data(), &bondedCount, static_cast<int>(bondedPeers.size()));
+    if (storeResult != 0) {
+        ESP_LOGE(Tag, "failed to read BLE bonds: %d", storeResult);
+        setError(storeResult);
+        return false;
+    }
+
+    _pairing_blocked_peer_valid = false;
+    if (_last_peer_valid) {
+        _pairing_blocked_peer_type    = _last_peer_type;
+        _pairing_blocked_peer_address = _last_peer_address;
+        _pairing_blocked_peer_valid   = true;
+    }
+
+    ESP_LOGI(Tag, "pairing window requested; stored bonds=%d max=%u", bondedCount,
+             static_cast<unsigned>(MaxBondedComputers));
+    if (bondedCount < static_cast<int>(MaxBondedComputers)) {
+        ESP_LOGI(Tag, "bond slot available; keeping existing bonds");
+        return true;
+    }
+
+    int deleteIndex = 0;
+    if (_last_peer_valid) {
+        const ble_addr_t lastPeer = lastPeerAddress(_last_peer_type, _last_peer_address);
+        for (int index = 0; index < bondedCount; ++index) {
+            if (sameAddress(lastPeer, bondedPeers[index])) {
+                deleteIndex = index;
+                break;
+            }
+        }
+    }
+
+    _pairing_blocked_peer_type = bondedPeers[deleteIndex].type;
+    std::copy(std::begin(bondedPeers[deleteIndex].val), std::end(bondedPeers[deleteIndex].val),
+              _pairing_blocked_peer_address.begin());
+    _pairing_blocked_peer_valid = true;
+    logPeerAddress("deleting one bond to make room", bondedPeers[deleteIndex]);
+    const int result = ble_store_util_delete_peer(&bondedPeers[deleteIndex]);
+    if (result != 0 && result != BLE_HS_ENOENT) {
+        ESP_LOGE(Tag, "failed to delete BLE bond: %d", result);
+        setError(result);
+        return false;
+    }
     return true;
 }
 
 bool BleHidRemote::isAllowedPeer(uint16_t connectionHandle)
 {
-    std::array<ble_addr_t, 2> bonded_peers{};
-    int bonded_count = 0;
+    std::array<ble_addr_t, MaxBondedComputers> bondedPeers{};
+    int bondedCount = 0;
     const int storeResult =
-        ble_store_util_bonded_peers(bonded_peers.data(), &bonded_count, static_cast<int>(bonded_peers.size()));
+        ble_store_util_bonded_peers(bondedPeers.data(), &bondedCount, static_cast<int>(bondedPeers.size()));
     if (storeResult != 0) {
         ESP_LOGW(Tag, "failed to inspect BLE bonds: %d", storeResult);
         return false;
@@ -694,30 +779,50 @@ bool BleHidRemote::isAllowedPeer(uint16_t connectionHandle)
         return false;
     }
 
-    if (_pairing_replacement.load()) {
-        for (uint8_t index = 0; index < _replacement_peer_count; ++index) {
-            ble_addr_t previousPeer{};
-            previousPeer.type = _replacement_peer_types[index];
-            std::copy(_replacement_peer_addresses[index].begin(), _replacement_peer_addresses[index].end(),
-                      std::begin(previousPeer.val));
-            if (sameAddress(description.peer_id_addr, previousPeer) ||
-                sameAddress(description.peer_ota_addr, previousPeer)) {
-                ESP_LOGI(Tag, "ignoring automatic reconnect from the previous computer");
-                return false;
-            }
+    logPeerAddress("incoming peer", description.peer_id_addr);
+    bool knownPeer = false;
+    for (int index = 0; index < bondedCount; ++index) {
+        if (sameAddress(description.peer_id_addr, bondedPeers[index]) ||
+            sameAddress(description.peer_ota_addr, bondedPeers[index])) {
+            knownPeer = true;
+            break;
         }
+    }
+
+    bool blockedPeer = false;
+    if (_pairing_blocked_peer_valid) {
+        const ble_addr_t blockedPeerAddress =
+            lastPeerAddress(_pairing_blocked_peer_type, _pairing_blocked_peer_address);
+        blockedPeer = sameAddress(description.peer_id_addr, blockedPeerAddress) ||
+                      sameAddress(description.peer_ota_addr, blockedPeerAddress);
+    }
+
+    if (_pairing_open.load()) {
+        if (blockedPeer) {
+            ESP_LOGW(Tag, "recent peer rejected while pairing window is open");
+            return false;
+        }
+        if (knownPeer) {
+            ESP_LOGW(Tag, "known bonded peer rejected while pairing window is open");
+            return false;
+        }
+        if (bondedCount >= static_cast<int>(MaxBondedComputers)) {
+            ESP_LOGW(Tag, "new peer rejected; no free bond slot");
+            return false;
+        }
+        ESP_LOGI(Tag, "pairing window is open; allowing unbonded peer");
         return true;
     }
 
-    if (bonded_count == 0) {
+    if (bondedCount == 0) {
+        ESP_LOGI(Tag, "no stored bond; allowing first peer to pair");
         return true;
     }
-    for (int index = 0; index < bonded_count; ++index) {
-        if (sameAddress(description.peer_id_addr, bonded_peers[index]) ||
-            sameAddress(description.peer_ota_addr, bonded_peers[index])) {
-            return true;
-        }
+    if (knownPeer) {
+        ESP_LOGI(Tag, "known bonded peer accepted");
+        return true;
     }
+    ESP_LOGW(Tag, "peer rejected; %d stored bond(s) do not match", bondedCount);
     return false;
 }
 
@@ -761,10 +866,11 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
                 break;
             }
 
-            ESP_LOGI(Tag, "computer connected; waiting for the central to request pairing");
+            ESP_LOGI(Tag, "computer connected; checking peer before encrypted HID session");
             _connection_handle = event->connect.conn_handle;
             ble_gap_conn_desc connectedPeer{};
-            if (ble_gap_conn_find(event->connect.conn_handle, &connectedPeer) == 0) {
+            const bool hasDescription = ble_gap_conn_find(event->connect.conn_handle, &connectedPeer) == 0;
+            if (hasDescription) {
                 _last_peer_type = connectedPeer.peer_id_addr.type;
                 std::copy(std::begin(connectedPeer.peer_id_addr.val), std::end(connectedPeer.peer_id_addr.val),
                           _last_peer_address.begin());
@@ -775,28 +881,26 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
                 ble_gap_terminate(event->connect.conn_handle, BLE_ERR_AUTH_FAIL);
                 break;
             }
+            if (_state.load() == State::Connected ||
+                (hasDescription && connectedPeer.sec_state.encrypted != 0)) {
+                ESP_LOGI(Tag, "computer connected with encrypted bond");
+                _pairing_open = false;
+                _pairing_blocked_peer_valid = false;
+                _state = State::Connected;
+                configureConnection(event->connect.conn_handle);
+            } else {
+                ESP_LOGI(Tag, "computer connected; waiting for the central to request pairing");
+                _state = State::Pairing;
+            }
             break;
         }
         case BLE_GAP_EVENT_ENC_CHANGE:
             if (event->enc_change.status == 0 && _active.load()) {
                 ESP_LOGI(Tag, "pairing complete; encrypted connection ready");
-                if (_pairing_replacement.exchange(false)) {
-                    for (uint8_t index = 0; index < _replacement_peer_count; ++index) {
-                        ble_addr_t previousPeer{};
-                        previousPeer.type = _replacement_peer_types[index];
-                        std::copy(_replacement_peer_addresses[index].begin(), _replacement_peer_addresses[index].end(),
-                                  std::begin(previousPeer.val));
-                        const int result = ble_store_util_delete_peer(&previousPeer);
-                        if (result != 0 && result != BLE_HS_ENOENT) {
-                            ESP_LOGW(Tag, "failed to remove previous computer bond: %d", result);
-                        }
-                    }
-                    ESP_LOGI(Tag, "previous computer bond replaced successfully");
-                    _replacement_peer_count = 0;
-                }
+                _pairing_open = false;
+                _pairing_blocked_peer_valid = false;
                 _state = State::Connected;
                 configureConnection(event->enc_change.conn_handle);
-                ble_svc_gatt_changed(0x0001, 0xFFFF);
             } else {
                 ESP_LOGW(Tag, "pairing/encryption failed: %d", event->enc_change.status);
                 const int result = ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_AUTH_FAIL);
@@ -837,6 +941,7 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
             }
             break;
         case BLE_GAP_EVENT_ADV_COMPLETE:
+            ESP_LOGI(Tag, "advertising complete: reason=%d", event->adv_complete.reason);
             if (_active.load()) {
                 startAdvertising();
             }
@@ -845,6 +950,7 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
             ESP_LOGI(Tag, "replacing stale bond for repeat pairing");
             ble_gap_conn_desc description{};
             if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &description) == 0) {
+                logPeerAddress("repeat pairing peer", description.peer_id_addr);
                 ble_store_util_delete_peer(&description.peer_id_addr);
                 return BLE_GAP_REPEAT_PAIRING_RETRY;
             }
@@ -1018,8 +1124,9 @@ void BleHidRemote::runSpeechWorker()
     } else {
         sendSpeechStatus(aborted ? SpeechAbort : SpeechEnd);
     }
-    ESP_LOGI(Tag, "speech session %u %s after %u frames", _speech_session, aborted ? "aborted" : "ended",
-             _speech_sequence);
+    const UBaseType_t stackFree = uxTaskGetStackHighWaterMark(nullptr);
+    ESP_LOGI(Tag, "speech session %u %s after %u frames, min free stack=%u bytes", _speech_session,
+             aborted ? "aborted" : "ended", _speech_sequence, static_cast<unsigned>(stackFree));
     _speech_worker_running = false;
     _speech_worker_task    = nullptr;
 }
@@ -1147,10 +1254,42 @@ const char* bleHidStateToString(BleHidRemote::State state)
             return "Starting Bluetooth...";
         case BleHidRemote::State::Advertising:
             return "Waiting for computer";
+        case BleHidRemote::State::Pairing:
+            return "Pairing...";
         case BleHidRemote::State::Connected:
             return "Connected";
         case BleHidRemote::State::Error:
             return "Bluetooth error";
+        default:
+            return "Unknown";
+    }
+}
+
+const char* speechServiceStateToString(BleHidRemote::SpeechServiceState state)
+{
+    switch (state) {
+        case BleHidRemote::SpeechServiceState::Disconnected:
+            return "Disconnected";
+        case BleHidRemote::SpeechServiceState::BluetoothConnected:
+            return "Bluetooth connected";
+        case BleHidRemote::SpeechServiceState::Connecting:
+            return "Speech service connecting";
+        case BleHidRemote::SpeechServiceState::Preparing:
+            return "Speech service preparing";
+        case BleHidRemote::SpeechServiceState::Ready:
+            return "Speech service ready";
+        case BleHidRemote::SpeechServiceState::Listening:
+            return "Listening";
+        case BleHidRemote::SpeechServiceState::Recognizing:
+            return "Recognizing";
+        case BleHidRemote::SpeechServiceState::PermissionError:
+            return "Permission error";
+        case BleHidRemote::SpeechServiceState::ModelError:
+            return "Model error";
+        case BleHidRemote::SpeechServiceState::HostError:
+            return "Host error";
+        case BleHidRemote::SpeechServiceState::MtuTooSmall:
+            return "MTU too small";
         default:
             return "Unknown";
     }

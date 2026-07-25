@@ -27,6 +27,7 @@ public:
         Stopped,
         Starting,
         Advertising,
+        Pairing,
         Connected,
         Error,
     };
@@ -46,6 +47,20 @@ public:
         HostError,
     };
 
+    enum class SpeechServiceState : uint8_t {
+        Disconnected,
+        BluetoothConnected,
+        Connecting,
+        Preparing,
+        Ready,
+        Listening,
+        Recognizing,
+        PermissionError,
+        ModelError,
+        HostError,
+        MtuTooSmall,
+    };
+
     BleHidRemote() = default;
     ~BleHidRemote();
 
@@ -57,6 +72,7 @@ public:
     bool startSpeech();
     void stopSpeech(bool abort = false);
     bool isSpeechReady() const;
+    SpeechServiceState speechServiceState() const;
 
     HostStatus hostStatus() const
     {
@@ -112,7 +128,7 @@ private:
     std::atomic<bool> _speech_abort_requested{false};
     std::atomic<bool> _speech_status_subscribed{false};
     std::atomic<bool> _speech_subscribed{false};
-    std::atomic<bool> _pairing_replacement{false};
+    std::atomic<bool> _pairing_open{false};
     std::atomic<HostStatus> _host_status{HostStatus::Waiting};
     std::atomic<uint16_t> _host_error{0};
     std::atomic<uint16_t> _connection_handle{InvalidConnectionHandle};
@@ -126,9 +142,9 @@ private:
     uint16_t _host_status_handle     = 0;
     uint16_t _speech_session         = 0;
     uint16_t _speech_sequence        = 0;
-    std::array<std::array<uint8_t, 6>, 3> _replacement_peer_addresses{};
-    std::array<uint8_t, 3> _replacement_peer_types{};
-    uint8_t _replacement_peer_count = 0;
+    std::array<uint8_t, 6> _pairing_blocked_peer_address{};
+    uint8_t _pairing_blocked_peer_type = 0;
+    bool _pairing_blocked_peer_valid   = false;
     std::array<uint8_t, 6> _last_peer_address{};
     uint8_t _last_peer_type      = 0;
     bool _last_peer_valid        = false;
@@ -140,6 +156,7 @@ private:
     bool registerSpeechService();
     void cleanupBluetooth();
     bool startAdvertising();
+    bool preparePairingWindow();
     bool isAllowedPeer(uint16_t connectionHandle);
     void handleHidEvent(int32_t eventId, void* eventData);
     int handleGapEvent(struct ble_gap_event* event);
@@ -163,5 +180,6 @@ private:
 };
 
 const char* bleHidStateToString(BleHidRemote::State state);
+const char* speechServiceStateToString(BleHidRemote::SpeechServiceState state);
 
 }  // namespace model

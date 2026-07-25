@@ -7,10 +7,13 @@ from ble_stt import doctor
 
 
 class FakePermissionAdapter:
-    def __init__(self, results):
+    def __init__(self, results, bluetooth_results=None):
         self.results = iter(results)
+        self.bluetooth_results = iter(bluetooth_results or [(True, "Bluetooth granted")])
         self.calls = []
+        self.bluetooth_calls = []
         self.opened = 0
+        self.bluetooth_opened = 0
 
     def check_input_permission(self, prompt=False):
         self.calls.append(prompt)
@@ -18,6 +21,13 @@ class FakePermissionAdapter:
 
     def open_input_permission_settings(self):
         self.opened += 1
+
+    def check_bluetooth_permission(self, prompt=False):
+        self.bluetooth_calls.append(prompt)
+        return next(self.bluetooth_results)
+
+    def open_bluetooth_permission_settings(self):
+        self.bluetooth_opened += 1
 
 
 class PermissionWaitTests(unittest.TestCase):
@@ -64,6 +74,24 @@ class PermissionWaitTests(unittest.TestCase):
         self.assertEqual(code, 1)
         run_async.assert_called_once()
 
+    def test_ble_diagnostic_reports_blank_exception_type(self):
+        adapter = FakePermissionAdapter([(True, "granted")])
+
+        def fail_run(coroutine):
+            coroutine.close()
+            raise TimeoutError()
+
+        with patch.object(doctor.sys, "frozen", True, create=True):
+            with patch("ble_stt.doctor.create_platform", return_value=adapter):
+                with patch("ble_stt.doctor.UserConfig") as user_config:
+                    with patch("ble_stt.doctor.asyncio.run", side_effect=fail_run):
+                        user_config.return_value.get.return_value = None
+                        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+                            code = doctor.run(["--ble", "--wait", "0"])
+
+        self.assertEqual(code, 1)
+        self.assertIn("[fail] BLE check failed: TimeoutError", stdout.getvalue())
+
     def test_prompts_once_then_polls_without_prompt(self):
         adapter = FakePermissionAdapter(
             [
@@ -80,6 +108,23 @@ class PermissionWaitTests(unittest.TestCase):
         self.assertEqual(adapter.calls, [True, False, False])
         self.assertEqual(adapter.opened, 1)
         self.assertEqual(sleep.call_count, 2)
+
+    def test_bluetooth_permission_uses_bluetooth_settings(self):
+        adapter = FakePermissionAdapter(
+            [(True, "input granted")],
+            bluetooth_results=[
+                (False, "Bluetooth not granted"),
+                (True, "Bluetooth granted"),
+            ],
+        )
+        with patch("ble_stt.doctor.time.sleep") as sleep:
+            passed, message = doctor._wait_for_bluetooth_permission(adapter, True, 2.0)
+
+        self.assertTrue(passed)
+        self.assertEqual(message, "Bluetooth granted")
+        self.assertEqual(adapter.bluetooth_calls, [True, False])
+        self.assertEqual(adapter.bluetooth_opened, 1)
+        self.assertEqual(sleep.call_count, 1)
 
     def test_zero_wait_only_checks_once(self):
         adapter = FakePermissionAdapter([(False, "not granted")])
@@ -141,6 +186,7 @@ class PermissionWaitTests(unittest.TestCase):
         user_config,
     ):
         user_config.return_value.get.return_value = None
+        create_platform.return_value.check_bluetooth_permission.return_value = (True, "Bluetooth granted")
         with contextlib.redirect_stdout(io.StringIO()):
             code = doctor.run(["--request-permissions"])
 
@@ -160,6 +206,7 @@ class PermissionWaitTests(unittest.TestCase):
         user_config,
     ):
         user_config.return_value.get.return_value = None
+        create_platform.return_value.check_bluetooth_permission.return_value = (True, "Bluetooth granted")
         with contextlib.redirect_stdout(io.StringIO()):
             code = doctor.run(["--request-permissions", "--wait-forever"])
 

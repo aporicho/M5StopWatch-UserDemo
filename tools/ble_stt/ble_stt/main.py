@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Sequence
 
 from .agreement import common_prefix
+from .diagnostics import runtime_logging
 from .platforms import PlatformAdapter, create_platform
 from .protocol import (
     AUDIO_UUID,
@@ -26,6 +28,7 @@ from .types import Recognizer, TextInjector, TranscriptSegment
 
 # Compatibility name for code that imported the old recognizer directly.
 LocalRecognizer = FasterWhisperRecognizer
+LOGGER = logging.getLogger("ble_stt.runtime")
 
 
 @dataclass
@@ -107,19 +110,27 @@ class SpeechController:
         try:
             status = StatusPacket.parse(raw)
         except ProtocolError as exc:
+            LOGGER.warning("invalid status packet: %s", exc)
             print(f"[protocol] {exc}")
             return
         if status.event == StatusEvent.READY:
+            LOGGER.info("watch status ready session=%s error=%s", status.session_id, status.error)
             print("[device] speech input ready; hold the right button to talk")
         elif status.event == StatusEvent.START:
             if self.session is not None:
                 self.abort("new speech session started")
             self.session = SpeechSession(status.session_id, self.injector.active_window())
+            LOGGER.info("speech session started session=%s", status.session_id)
             print(f"[speech {status.session_id}] listening")
         elif status.event == StatusEvent.END:
             session = self.session
             if session and session.session_id == status.session_id:
                 self.session = None
+                LOGGER.info(
+                    "speech session ended by watch session=%s samples=%s",
+                    session.session_id,
+                    len(session.audio),
+                )
                 self.report_host_status(HostStatus.RECOGNIZING)
                 asyncio.create_task(self._finalize(session))
         elif status.event == StatusEvent.ABORT:
@@ -139,6 +150,12 @@ class SpeechController:
             if missing:
                 if missing <= 2:
                     session.audio.extend([0] * (missing * frame.sample_count))
+                    LOGGER.warning(
+                        "filled missing audio frames session=%s missing=%s sequence=%s",
+                        session.session_id,
+                        missing,
+                        frame.sequence,
+                    )
                     print(f"[speech {session.session_id}] filled {missing} missing frame(s) with silence")
                 else:
                     self.abort(f"lost {missing} consecutive audio frames")
@@ -146,10 +163,12 @@ class SpeechController:
             session.audio.extend(frame.decode())
             session.expected_sequence = (frame.sequence + 1) & 0xFFFF
         except ProtocolError as exc:
+            LOGGER.warning("audio protocol error session=%s error=%s", session.session_id, exc)
             self.abort(str(exc))
 
     def abort(self, reason: str) -> None:
         if self.session is not None:
+            LOGGER.warning("speech session aborted session=%s reason=%s", self.session.session_id, reason)
             print(f"[speech {self.session.session_id}] aborted: {reason}")
             self.session = None
 
@@ -211,6 +230,11 @@ class SpeechController:
             session.previous_segments = []
             session.last_inference_size = session.audio_cursor
         except Exception as exc:
+            LOGGER.exception(
+                "rolling recognition failed session=%s samples=%s",
+                session.session_id,
+                len(session.audio),
+            )
             if self.session is session:
                 self.abort(f"recognition failed: {exc}")
                 self.report_host_status(HostStatus.MODEL_ERROR, 1)
@@ -225,6 +249,11 @@ class SpeechController:
         try:
             segments = await self._recognize(snapshot)
         except Exception as exc:
+            LOGGER.exception(
+                "final recognition failed session=%s samples=%s",
+                session.session_id,
+                len(snapshot),
+            )
             print(f"[speech {session.session_id}] final recognition failed: {exc}")
             self.report_host_status(HostStatus.MODEL_ERROR, 1)
             if not self.once:
@@ -238,13 +267,25 @@ class SpeechController:
                         print(f"[text final] {text}")
                         succeeded = True
                 except Exception as exc:
+                    LOGGER.exception("text insertion failed session=%s", session.session_id)
                     print(f"[text] insertion failed: {exc}")
                     session.injection_enabled = False
-                    status = HostStatus.PERMISSION_ERROR if "permission" in str(exc).lower() else HostStatus.HOST_ERROR
+                    status = (
+                        HostStatus.PERMISSION_ERROR
+                        if "permission" in str(exc).lower()
+                        else HostStatus.HOST_ERROR
+                    )
                     self.report_host_status(status, 1)
                     if not self.once:
                         asyncio.create_task(self._restore_ready(10.0))
             elapsed = len(session.audio) / 16000.0
+            LOGGER.info(
+                "speech session finalized session=%s elapsed=%.1fs text_inserted=%s injection_enabled=%s",
+                session.session_id,
+                elapsed,
+                succeeded,
+                session.injection_enabled,
+            )
             print(f"[speech {session.session_id}] finished ({elapsed:.1f}s)")
             if succeeded or not self.once:
                 self.report_host_status(HostStatus.READY)
@@ -272,6 +313,42 @@ async def use_cached_bluez_device(
     await (adapter or create_platform()).prepare_client(client, device)
 
 
+def _clear_cached_device_after_timeout(adapter: PlatformAdapter, explicit_identifier: str | None) -> str | None:
+    if explicit_identifier is not None:
+        return None
+    cached = adapter.config.get("device_id")
+    if not cached:
+        return None
+    adapter.config.set("device_id", "")
+    return str(cached)
+
+
+def _is_device_unavailable(exc: Exception) -> bool:
+    return " was not found" in str(exc)
+
+
+def _ensure_bluetooth_permission(adapter: PlatformAdapter) -> None:
+    check_permission = getattr(adapter, "check_bluetooth_permission", None)
+    if not callable(check_permission):
+        return
+    passed, message = check_permission(False)
+    if not passed and not getattr(adapter, "_bluetooth_permission_prompted", False):
+        setattr(adapter, "_bluetooth_permission_prompted", True)
+        passed, message = check_permission(True)
+    if not passed:
+        raise RuntimeError(str(message))
+
+
+def _is_bluetooth_permission_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "bluetooth permission" in message or "bluetooth access" in message
+
+
+def _is_pairing_removed_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "peer removed pairing information" in message or "cberrordomain code=14" in message
+
+
 async def run_ble(
     controller: SpeechController,
     identifier: str | None,
@@ -285,13 +362,16 @@ async def run_ble(
     while True:
         disconnect_event = asyncio.Event()
         try:
+            _ensure_bluetooth_permission(adapter)
             device = await adapter.find_device(identifier)
+            LOGGER.info("connecting to device=%r", device)
             print(f"[ble] connecting to {device}")
             client = BleakClient(device, disconnected_callback=lambda _: disconnect_event.set(), timeout=60)
             await adapter.prepare_client(client, device)
             async with client:
                 service_uuids = {str(service.uuid).lower() for service in client.services}
                 if SERVICE_UUID not in service_uuids:
+                    LOGGER.warning("speech service missing services=%s", sorted(service_uuids))
                     raise RuntimeError(
                         "Speech GATT service is missing. Forget the device on both sides, reopen BLE Remote, "
                         "and pair again."
@@ -301,6 +381,7 @@ async def run_ble(
                 mtu = await adapter.acquire_mtu(client)
                 if mtu < 185:
                     raise RuntimeError(f"negotiated MTU {mtu} is too small for speech audio (need 185)")
+                LOGGER.info("connected mtu=%s services=%s", mtu, sorted(service_uuids))
                 print(f"[ble] connected, MTU {mtu}")
                 await client.start_notify(STATUS_UUID, lambda _, data: controller.receive_status(bytes(data)))
                 await client.start_notify(AUDIO_UUID, lambda _, data: controller.receive_audio(bytes(data)))
@@ -312,7 +393,13 @@ async def run_ble(
                     try:
                         packet = HostStatusPacket(status, error).build()
                         await client.write_gatt_char(host_characteristic, packet, response=True)
+                        LOGGER.debug("host status sent status=%s error=%s", status.name, error)
                     except Exception as exc:
+                        LOGGER.exception(
+                            "could not update watch status status=%s error=%s",
+                            status.name,
+                            error,
+                        )
                         print(f"[ble] could not update watch status: {exc}")
 
                 controller.set_host_status_writer(write_host_status)
@@ -322,6 +409,7 @@ async def run_ble(
                             runtime_validator()
                             break
                         except Exception as exc:
+                            LOGGER.warning("runtime requirement not ready: %s", exc)
                             print(f"[host] runtime requirement is not ready: {exc}")
                             message = str(exc).lower()
                             status = (
@@ -332,7 +420,9 @@ async def run_ble(
                             await write_host_status(status, 1)
                             await asyncio.sleep(10)
                             if not client.is_connected:
-                                raise RuntimeError("Bluetooth disconnected while waiting for host requirements")
+                                raise RuntimeError(
+                                    "Bluetooth disconnected while waiting for host requirements"
+                                )
                 if controller.recognizer is None:
                     while controller.recognizer is None:
                         await write_host_status(HostStatus.PREPARING)
@@ -341,6 +431,7 @@ async def run_ble(
                                 raise RuntimeError("speech recognizer factory is missing")
                             controller.recognizer = await asyncio.to_thread(recognizer_factory)
                         except Exception as exc:
+                            LOGGER.exception("model preparation failed")
                             print(f"[model] preparation failed: {exc}; retrying in 10s")
                             await write_host_status(HostStatus.MODEL_ERROR, 1)
                             await asyncio.sleep(10)
@@ -365,7 +456,26 @@ async def run_ble(
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f"[ble] {exc}; retrying in {delay:.0f}s")
+            detail = str(exc) or exc.__class__.__name__
+            if isinstance(exc, TimeoutError):
+                LOGGER.warning("BLE connect timed out; retrying in %.0fs", delay)
+                cleared = _clear_cached_device_after_timeout(adapter, identifier)
+                if cleared:
+                    LOGGER.info("cleared cached BLE device after connect timeout device_id=%s", cleared)
+                    print("[ble] cleared cached device; next retry will scan by name")
+            elif _is_device_unavailable(exc):
+                LOGGER.warning("BLE device unavailable: %s; retrying in %.0fs", detail, delay)
+            elif _is_bluetooth_permission_error(exc):
+                LOGGER.warning("Bluetooth permission not ready: %s; retrying in %.0fs", detail, delay)
+            elif _is_pairing_removed_error(exc):
+                LOGGER.warning("BLE pairing is stale: %s; retrying in %.0fs", detail, delay)
+                cleared = _clear_cached_device_after_timeout(adapter, identifier)
+                if cleared:
+                    LOGGER.info("cleared cached BLE device after stale pairing device_id=%s", cleared)
+                    print("[ble] cleared cached device; next retry will scan by name")
+            else:
+                LOGGER.exception("BLE loop failed; retrying in %.0fs", delay)
+            print(f"[ble] {detail}; retrying in {delay:.0f}s")
             controller.abort("Bluetooth disconnected")
             controller.set_host_status_writer(None)
             if controller.once and controller.completed.is_set():
@@ -383,7 +493,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="cached platform device identifier (Bluetooth address, or CoreBluetooth UUID on macOS)",
     )
     parser.add_argument("--engine", choices=("auto", "faster-whisper", "mlx"), default="auto")
-    parser.add_argument("--model", default="medium", help="Whisper model name or repository/path (default: medium)")
+    parser.add_argument(
+        "--model",
+        default="medium",
+        help="Whisper model name or repository/path (default: medium)",
+    )
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--cpu-threads", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     parser.add_argument("--interval", type=float, default=1.0, help="minimum seconds of new audio per pass")
@@ -393,27 +507,36 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 
 async def async_main(args: argparse.Namespace) -> None:
-    adapter = create_platform()
-    controller = SpeechController(
-        None,
-        adapter.create_text_injector(),
-        args.interval,
-        args.stable_lag,
-        once=args.once,
-    )
-    controller.start()
-    try:
-        await run_ble(
-            controller,
-            args.device_id,
-            adapter,
-            lambda: create_recognizer(args.engine, args.model, args.device, args.cpu_threads),
-            adapter.validate_runtime,
+    with runtime_logging("run", vars(args)):
+        LOGGER.info(
+            "runtime options engine=%s model=%s device=%s cpu_threads=%s once=%s",
+            args.engine,
+            args.model,
+            args.device,
+            args.cpu_threads,
+            args.once,
         )
-        if args.once and not controller.test_succeeded:
-            raise RuntimeError("test speech was not recognized or could not be inserted")
-    finally:
-        await controller.close()
+        adapter = create_platform()
+        controller = SpeechController(
+            None,
+            adapter.create_text_injector(),
+            args.interval,
+            args.stable_lag,
+            once=args.once,
+        )
+        controller.start()
+        try:
+            await run_ble(
+                controller,
+                args.device_id,
+                adapter,
+                lambda: create_recognizer(args.engine, args.model, args.device, args.cpu_threads),
+                adapter.validate_runtime,
+            )
+            if args.once and not controller.test_succeeded:
+                raise RuntimeError("test speech was not recognized or could not be inserted")
+        finally:
+            await controller.close()
 
 
 def main(argv: Sequence[str] | None = None) -> None:

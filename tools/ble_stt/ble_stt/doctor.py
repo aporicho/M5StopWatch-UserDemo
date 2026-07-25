@@ -9,7 +9,7 @@ import sys
 import time
 from typing import Sequence
 
-from .check import check
+from .check import check, error_detail
 from .config import UserConfig
 from .platforms import create_platform
 from .recognizers import resolve_engine
@@ -46,28 +46,47 @@ def _wait_for_input_permission(
     prompt: bool,
     wait_seconds: float | None,
 ) -> tuple[bool, str]:
-    check_permission = getattr(adapter, "check_input_permission")
+    return _wait_for_permission(
+        adapter,
+        prompt,
+        wait_seconds,
+        check_method="check_input_permission",
+        open_method="open_input_permission_settings",
+        settings_name="Accessibility",
+    )
+
+
+def _wait_for_permission(
+    adapter: object,
+    prompt: bool,
+    wait_seconds: float | None,
+    check_method: str,
+    open_method: str,
+    settings_name: str,
+) -> tuple[bool, str]:
+    check_permission = getattr(adapter, check_method)
     passed, message = check_permission(prompt)
     if passed or wait_seconds == 0:
         return bool(passed), str(message)
 
-    open_settings = getattr(adapter, "open_input_permission_settings", None)
+    open_settings = getattr(adapter, open_method, None)
     if prompt and callable(open_settings):
         try:
             open_settings()
         except Exception as exc:
-            print(f"[warn] could not open Accessibility settings: {exc}")
+            print(f"[warn] could not open {settings_name} settings: {exc}")
 
+    setting_path = f"Privacy & Security > {settings_name}"
     if wait_seconds is None:
         print(
-            "[wait] Enable M5StopWatch under Privacy & Security > Accessibility "
+            f"[wait] Enable M5StopWatch under {setting_path} "
             "(press Ctrl-C to cancel)",
             flush=True,
         )
     else:
         formatted_wait = _format_seconds(wait_seconds)
         print(
-            f"[wait] Enable M5StopWatch under Privacy & Security > Accessibility "
+            f"[wait] Enable M5StopWatch under {setting_path} "
             f"(waiting up to {formatted_wait}s; press Ctrl-C to cancel)",
             flush=True,
         )
@@ -89,16 +108,31 @@ def _wait_for_input_permission(
     return False, f"{message}; timed out after {formatted_wait}s"
 
 
+def _wait_for_bluetooth_permission(
+    adapter: object,
+    prompt: bool,
+    wait_seconds: float | None,
+) -> tuple[bool, str]:
+    return _wait_for_permission(
+        adapter,
+        prompt,
+        wait_seconds,
+        check_method="check_bluetooth_permission",
+        open_method="open_bluetooth_permission_settings",
+        settings_name="Bluetooth",
+    )
+
+
 def run(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Check M5StopWatch STT platform requirements")
-    parser.add_argument("--request-permissions", action="store_true", help="show the macOS Accessibility prompt")
+    parser.add_argument("--request-permissions", action="store_true", help="show macOS privacy prompts/settings")
     wait_group = parser.add_mutually_exclusive_group()
     wait_group.add_argument(
         "--wait",
         type=_nonnegative_seconds,
         metavar="SECONDS",
         help=(
-            "wait for Accessibility approval (defaults to 120 seconds with "
+            "wait for privacy approval (defaults to 120 seconds with "
             "--request-permissions)"
         ),
     )
@@ -142,6 +176,15 @@ def run(argv: Sequence[str] | None = None) -> int:
                 wait_seconds=wait_seconds,
             )
         )
+        check_bluetooth = getattr(adapter, "check_bluetooth_permission", None)
+        if callable(check_bluetooth):
+            checks.append(
+                _wait_for_bluetooth_permission(
+                    adapter,
+                    prompt=args.request_permissions,
+                    wait_seconds=wait_seconds,
+                )
+            )
     except Exception as exc:
         adapter = None
         checks.append((False, f"platform adapter failed: {exc}"))
@@ -157,7 +200,7 @@ def run(argv: Sequence[str] | None = None) -> int:
         try:
             asyncio.run(check(args.device_id, adapter))
         except Exception as exc:
-            print(f"[fail] BLE check failed: {exc}")
+            print(f"[fail] BLE check failed: {error_detail(exc)}")
             failed = True
 
     return 1 if failed else 0

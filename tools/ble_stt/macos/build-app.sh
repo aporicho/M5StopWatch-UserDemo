@@ -7,6 +7,7 @@ PYTHON="${PYTHON:-python3.12}"
 BUILD_ROOT="${BLE_STT_BUILD_ROOT:-$SOURCE_ROOT/.macos-build}"
 DIST_ROOT="${BLE_STT_DIST_ROOT:-$SOURCE_ROOT/dist-macos}"
 VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$SOURCE_ROOT/pyproject.toml" | head -n 1)"
+HELPER_BUNDLE_ID="com.aporicho.m5stopwatch-ble-stt-helper"
 
 [ -n "$VERSION" ] || { printf 'Could not determine package version.\n' >&2; exit 1; }
 "$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)' \
@@ -26,6 +27,7 @@ VENV_PYTHON="$BUILD_ROOT/venv/bin/python"
 "$VENV_PYTHON" -m pip install --no-deps "$SOURCE_ROOT"
 
 export BLE_STT_APP_VERSION="$VERSION"
+export BLE_STT_HELPER_BUNDLE_ID="$HELPER_BUNDLE_ID"
 # PyInstaller applies hardened-runtime signing with a trusted timestamp while
 # assembling the intermediate executable. A private self-signed identity has
 # no public timestamp chain, so intermediate files stay ad-hoc signed and the
@@ -57,14 +59,41 @@ while IFS= read -r link; do
     /usr/bin/xattr -c -s "$link" 2>/dev/null || true
 done < <(find "$SIGNING_APP" -type l)
 FINAL_SIGNING_IDENTITY="${CODESIGN_IDENTITY:--}"
-/usr/bin/codesign \
-    --force \
-    --deep \
-    --timestamp=none \
-    --sign "$FINAL_SIGNING_IDENTITY" \
-    "$SIGNING_APP"
+if [ "$FINAL_SIGNING_IDENTITY" = "-" ]; then
+    /usr/bin/codesign \
+        --force \
+        --deep \
+        --timestamp=none \
+        --sign - \
+        "$SIGNING_APP"
+    /usr/bin/codesign \
+        --force \
+        --timestamp=none \
+        --sign - \
+        --identifier "$HELPER_BUNDLE_ID" \
+        --requirements "=designated => identifier \"$HELPER_BUNDLE_ID\"" \
+        "$SIGNING_APP"
+else
+    /usr/bin/codesign \
+        --force \
+        --deep \
+        --timestamp=none \
+        --sign "$FINAL_SIGNING_IDENTITY" \
+        "$SIGNING_APP"
+fi
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$SIGNING_APP"
 rm -rf "$APP"
-/usr/bin/ditto "$SIGNING_APP" "$APP"
+/usr/bin/ditto --noextattr --noqtn "$SIGNING_APP" "$APP"
+#
+# Desktop/iCloud-backed directories can immediately attach Finder/FileProvider
+# metadata to the copied app. Verify an extattr-free copy of the delivered
+# tree so the build check stays stable in those directories.
+FINAL_VERIFY_APP="$SIGNING_ROOT/M5StopWatch.final-verify.app"
+/usr/bin/ditto --noextattr --noqtn "$APP" "$FINAL_VERIFY_APP"
+/usr/bin/xattr -cr "$FINAL_VERIFY_APP" || true
+while IFS= read -r link; do
+    /usr/bin/xattr -c -s "$link" 2>/dev/null || true
+done < <(find "$FINAL_VERIFY_APP" -type l)
+/usr/bin/codesign --verify --deep --strict --verbose=2 "$FINAL_VERIFY_APP"
 "$SIGNING_APP/Contents/MacOS/M5StopWatch" --version
 printf 'Built %s\n' "$APP"

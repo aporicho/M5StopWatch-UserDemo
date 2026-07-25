@@ -1,0 +1,25 @@
+{
+  "name": "m5stopwatch",
+  "private": true,
+  "version": "0.3.3",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "prepare-sidecar": "node scripts/prepare-sidecar.mjs",
+    "build:mac": "tauri build",
+    "build:mac:app": "tauri build --bundles app",
+    "install:mac": "bash scripts/install-macos.sh",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-opener": "^2"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "vite": "^6.0.3",
+    "typescript": "~5.6.2"
+  }
+}

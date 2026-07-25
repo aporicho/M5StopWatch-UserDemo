@@ -6,6 +6,6 @@ if __name__ == "__main__":
     # Python flags. Handle those before importing or parsing the product CLI.
     multiprocessing.freeze_support()
 
-    from ble_stt.cli import main
+    from ble_stt.app_entry import main
 
     main()
