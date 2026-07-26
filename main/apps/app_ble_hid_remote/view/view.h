@@ -53,10 +53,10 @@ public:
 private:
     void updateStatus(model::BleHidRemote::State state, int lastError,
                       model::BleHidRemote::SpeechServiceState serviceState, uint16_t hostError);
-    bool updateUiToggleGesture();
+    bool updateTapGesture();
     void setControlsVisible(bool visible);
-    void updateGesture(model::BleHidRemote::State state);
-    void resetGesture();
+    void updateScrollGesture(model::BleHidRemote::State state);
+    void resetScrollGesture();
     void showPairDialog();
 
     std::unique_ptr<uitk::lvgl_cpp::Container> _panel;
@@ -64,7 +64,6 @@ private:
     std::unique_ptr<uitk::lvgl_cpp::Container> _status_panel;
     std::unique_ptr<uitk::lvgl_cpp::Container> _status_dot;
     std::unique_ptr<uitk::lvgl_cpp::Label> _status_label;
-    std::unique_ptr<uitk::lvgl_cpp::Label> _device_label;
     std::unique_ptr<uitk::lvgl_cpp::Container> _left_key_panel;
     std::unique_ptr<uitk::lvgl_cpp::Container> _right_key_panel;
     std::unique_ptr<uitk::lvgl_cpp::Label> _left_key_label;
@@ -72,7 +71,6 @@ private:
     std::unique_ptr<uitk::lvgl_cpp::Label> _left_hint_label;
     std::unique_ptr<uitk::lvgl_cpp::Label> _right_hint_label;
     std::unique_ptr<uitk::lvgl_cpp::Label> _gesture_label;
-    std::unique_ptr<uitk::lvgl_cpp::Label> _gesture_hint_label;
     std::unique_ptr<uitk::lvgl_cpp::Button> _pair_button;
     std::unique_ptr<PairComputerDialog> _pair_dialog;
 

@@ -122,12 +122,6 @@ bool UserEventMapper::save() const
     return true;
 }
 
-void UserEventMapper::resetToDefaults()
-{
-    applyDefaultRecords();
-    save();
-}
-
 bool UserEventMapper::updateFromWire(const uint8_t* data, std::size_t length)
 {
     if (data == nullptr || length < WireHeaderSize || data[0] != WireMagic0 || data[1] != WireMagic1 ||

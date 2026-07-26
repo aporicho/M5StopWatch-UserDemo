@@ -272,8 +272,8 @@ bool AppBleHidRemote::executeMappedAction(const model::UserActionMapping& mappin
             }
             return false;
         case model::UserActionType::DeviceGoHome:
-            _close_requested_by_home = true;
-            _speech_start_pending    = false;
+            logEvent("close requested by mapped event");
+            _speech_start_pending = false;
             if (_remote) {
                 _remote->stopSpeech(true);
             }
@@ -328,18 +328,14 @@ void AppBleHidRemote::onOpen()
     _speech_start_pending    = false;
     _speech_end_feedback     = false;
     _home_latched            = false;
-    _close_requested_by_home = false;
     _remote_snapshot_valid   = false;
     _last_wheel_log_at       = 0;
     logRemoteSnapshot("after start");
 }
 
-void AppBleHidRemote::onRunning()
+bool AppBleHidRemote::handleHomeCombo()
 {
     auto& hal = GetHAL();
-    hal.updateButtonStates(false);
-    const uint32_t now = hal.millis();
-
     if (hal.btnA.isHolding() && hal.btnB.isHolding()) {
         if (!_home_latched) {
             _home_latched = true;
@@ -347,73 +343,82 @@ void AppBleHidRemote::onRunning()
             logRemoteSnapshot("before home close");
             executeMappedEvent(model::UserEvent::ButtonBothHold);
         }
-        return;
+        return true;
     }
     if (hal.btnA.isReleased() && hal.btnB.isReleased()) {
         _home_latched = false;
     }
+    return false;
+}
 
-    if (hal.btnA.wasPressed()) {
-        _left_long_latched    = false;
+void AppBleHidRemote::handleButtonPressAndHold(bool leftButton)
+{
+    auto& hal   = GetHAL();
+    auto& button = leftButton ? hal.btnA : hal.btnB;
+    bool& latch = leftButton ? _left_long_latched : _right_long_latched;
+    const auto holdEvent =
+        leftButton ? model::UserEvent::ButtonLeftHold : model::UserEvent::ButtonRightHold;
+
+    if (button.wasPressed()) {
+        latch = false;
         _speech_start_pending = false;
-        logEvent("left button pressed");
     }
-    if (_remote && hal.btnA.isPressed() && !_left_long_latched && hal.btnA.pressedFor(SpeechHoldMs)) {
-        _left_long_latched = true;
-        executeMappedEvent(model::UserEvent::ButtonLeftHold);
+    if (_remote && button.isPressed() && !latch && button.pressedFor(SpeechHoldMs)) {
+        latch = true;
+        executeMappedEvent(holdEvent);
     }
-    if (_remote && hal.btnA.wasReleased()) {
-        _speech_start_pending = false;
-        if (_left_long_latched) {
-            executeMappedEvent(model::UserEvent::ButtonLeftReleaseAfterHold);
-        } else {
-            const bool handled = executeMappedEvent(model::UserEvent::ButtonLeftTap);
-            if (handled && _view) {
-                LvglLockGuard lock;
-                _view->flashKey(true);
-            }
+}
+
+void AppBleHidRemote::handleButtonRelease(bool leftButton)
+{
+    auto& hal   = GetHAL();
+    auto& button = leftButton ? hal.btnA : hal.btnB;
+    bool& latch = leftButton ? _left_long_latched : _right_long_latched;
+    const auto releaseAfterHoldEvent = leftButton ? model::UserEvent::ButtonLeftReleaseAfterHold
+                                                  : model::UserEvent::ButtonRightReleaseAfterHold;
+    const auto tapEvent = leftButton ? model::UserEvent::ButtonLeftTap : model::UserEvent::ButtonRightTap;
+
+    if (!_remote || !button.wasReleased()) {
+        return;
+    }
+    _speech_start_pending = false;
+    if (latch) {
+        executeMappedEvent(releaseAfterHoldEvent);
+    } else {
+        const bool handled = executeMappedEvent(tapEvent);
+        if (handled && _view) {
+            LvglLockGuard lock;
+            _view->flashKey(leftButton);
         }
-        hal.vibrate(20, 60);
     }
+    hal.vibrate(20, 60);
+}
 
-    if (hal.btnB.wasPressed()) {
-        _right_long_latched   = false;
-        _speech_start_pending = false;
-        logEvent("right button pressed");
-    }
-    if (_remote && hal.btnB.isPressed() && !_right_long_latched && hal.btnB.pressedFor(SpeechHoldMs)) {
-        _right_long_latched = true;
-        executeMappedEvent(model::UserEvent::ButtonRightHold);
-    }
+void AppBleHidRemote::tickPendingSpeechStart(uint32_t now)
+{
     if (_remote && _speech_start_pending && static_cast<int32_t>(now - _speech_start_at) >= 0) {
         _speech_start_pending = false;
         if (!_remote->startSpeech()) {
             logEvent("speech start failed");
             logRemoteSnapshot("speech start failed");
-            hal.vibrate(160, 100);
+            GetHAL().vibrate(160, 100);
         } else {
             logEvent("speech start ok");
         }
     }
-    if (_remote && hal.btnB.wasReleased()) {
-        _speech_start_pending = false;
-        if (_right_long_latched) {
-            executeMappedEvent(model::UserEvent::ButtonRightReleaseAfterHold);
-        } else {
-            const bool handled = executeMappedEvent(model::UserEvent::ButtonRightTap);
-            if (handled && _view) {
-                LvglLockGuard lock;
-                _view->flashKey(false);
-            }
-        }
-        hal.vibrate(20, 60);
-    }
+}
+
+void AppBleHidRemote::handleSpeechEndFeedback()
+{
     if (_remote && _speech_end_feedback && !_remote->isSpeechActive()) {
         _speech_end_feedback = false;
-        hal.vibrate(20, 70);
+        GetHAL().vibrate(20, 70);
         logEvent("speech end feedback");
     }
+}
 
+void AppBleHidRemote::handleViewEvents(uint32_t now)
+{
     if (!_remote) {
         logEvent("running without remote instance");
         return;
@@ -448,10 +453,29 @@ void AppBleHidRemote::onRunning()
     }
 }
 
+void AppBleHidRemote::onRunning()
+{
+    auto& hal = GetHAL();
+    hal.updateButtonStates(false);
+    const uint32_t now = hal.millis();
+
+    if (handleHomeCombo()) {
+        return;
+    }
+
+    handleButtonPressAndHold(true);
+    handleButtonRelease(true);
+    handleButtonPressAndHold(false);
+    tickPendingSpeechStart(now);
+    handleButtonRelease(false);
+    handleSpeechEndFeedback();
+    handleViewEvents(now);
+}
+
 void AppBleHidRemote::onClose()
 {
     mclog::tagInfo(getAppInfo().name, "on close");
-    logEvent("on close reason=%s", _close_requested_by_home ? "home-combo" : "external-or-state");
+    logEvent("on close");
     logRemoteSnapshot("before stop");
 
     if (_remote) {

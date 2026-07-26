@@ -350,11 +350,6 @@ void BleHidRemote::stop()
     ESP_LOGI(Tag, "BLE HID stopped");
 }
 
-bool BleHidRemote::sendKeyTap(Key key)
-{
-    return sendKeyboardShortcut(static_cast<uint8_t>(key), 0);
-}
-
 bool BleHidRemote::sendKeyboardShortcut(uint8_t keyCode, uint8_t modifiers)
 {
     if (!isConnected() || _command_queue == nullptr) {
@@ -1183,16 +1178,8 @@ void BleHidRemote::configureConnection(uint16_t connectionHandle)
     }
 }
 
-bool BleHidRemote::sendSpeechStatus(uint8_t event, uint16_t error)
+std::array<uint8_t, 12> BleHidRemote::buildSpeechStatusPacket(uint8_t event, uint16_t error) const
 {
-    if (!_speech_status_subscribed.load()) {
-        return false;
-    }
-    const uint16_t connectionHandle = _connection_handle.load();
-    if (connectionHandle == InvalidConnectionHandle || _speech_status_handle == 0) {
-        return false;
-    }
-
     std::array<uint8_t, 12> packet{};
     packet[0]  = SpeechProtocolVersion;
     packet[1]  = event;
@@ -1206,6 +1193,20 @@ bool BleHidRemote::sendSpeechStatus(uint8_t event, uint16_t error)
     packet[9]  = _speech_active.load() ? 1 : 0;
     packet[10] = static_cast<uint8_t>(error & 0xFF);
     packet[11] = static_cast<uint8_t>(error >> 8);
+    return packet;
+}
+
+bool BleHidRemote::sendSpeechStatus(uint8_t event, uint16_t error)
+{
+    if (!_speech_status_subscribed.load()) {
+        return false;
+    }
+    const uint16_t connectionHandle = _connection_handle.load();
+    if (connectionHandle == InvalidConnectionHandle || _speech_status_handle == 0) {
+        return false;
+    }
+
+    const auto packet = buildSpeechStatusPacket(event, error);
 
     os_mbuf* buffer = ble_hs_mbuf_from_flat(packet.data(), packet.size());
     if (buffer == nullptr) {
@@ -1296,6 +1297,78 @@ void BleHidRemote::waitForSpeechWorker()
     }
 }
 
+int BleHidRemote::readSpeechStatus(ble_gatt_access_ctxt* context)
+{
+    const uint8_t event = _speech_active.load() ? SpeechStart : SpeechReady;
+    const auto packet   = buildSpeechStatusPacket(event);
+    return os_mbuf_append(context->om, packet.data(), packet.size()) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+int BleHidRemote::readMappingConfig(ble_gatt_access_ctxt* context)
+{
+    std::array<uint8_t, UserEventMapper::WireHeaderSize + UserEventMapper::MaxRecords * UserEventMapper::WireRecordSize>
+        packet{};
+    const std::size_t length = _mapping.writeWire(packet.data(), packet.size());
+    if (length == 0) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    return os_mbuf_append(context->om, packet.data(), length) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+int BleHidRemote::writeMappingConfig(ble_gatt_access_ctxt* context)
+{
+    const uint16_t length = OS_MBUF_PKTLEN(context->om);
+    if (length < UserEventMapper::WireHeaderSize ||
+        length > UserEventMapper::WireHeaderSize + UserEventMapper::MaxRecords * UserEventMapper::WireRecordSize) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+
+    std::array<uint8_t, UserEventMapper::WireHeaderSize + UserEventMapper::MaxRecords * UserEventMapper::WireRecordSize>
+        packet{};
+    if (os_mbuf_copydata(context->om, 0, length, packet.data()) != 0) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (!_mapping.updateFromWire(packet.data(), length)) {
+        ESP_LOGW(Tag, "invalid mapping config write length=%u", length);
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (!_mapping.save()) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    ESP_LOGI(Tag, "mapping config updated over BLE");
+    return 0;
+}
+
+int BleHidRemote::readUserEvent(ble_gatt_access_ctxt* context)
+{
+    std::array<uint8_t, 8> packet{};
+    packet[0] = UserEventMapper::MappingVersion;
+    packet[5] = static_cast<uint8_t>(_user_event_sequence & 0xFF);
+    packet[6] = static_cast<uint8_t>(_user_event_sequence >> 8);
+    return os_mbuf_append(context->om, packet.data(), packet.size()) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+int BleHidRemote::writeHostStatus(ble_gatt_access_ctxt* context)
+{
+    if (OS_MBUF_PKTLEN(context->om) != 4) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    std::array<uint8_t, 4> packet{};
+    if (os_mbuf_copydata(context->om, 0, packet.size(), packet.data()) != 0) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (packet[0] != SpeechProtocolVersion || packet[1] > static_cast<uint8_t>(HostStatus::HostError)) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    _host_status = static_cast<HostStatus>(packet[1]);
+    _host_error  = static_cast<uint16_t>(packet[2] | (packet[3] << 8));
+    ESP_LOGI(Tag, "desktop helper status: %u, error: %u", packet[1], _host_error.load());
+    if (isSpeechReady()) {
+        sendSpeechStatus(SpeechReady);
+    }
+    return 0;
+}
+
 int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attributeHandle, ble_gatt_access_ctxt* context,
                                    void* argument)
 {
@@ -1305,78 +1378,26 @@ int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attribute
         return BLE_ATT_ERR_UNLIKELY;
     }
 
-    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == ActiveInstance->_speech_status_handle) {
-        std::array<uint8_t, 12> packet{};
-        packet[0] = SpeechProtocolVersion;
-        packet[1] = ActiveInstance->_speech_active.load() ? SpeechStart : SpeechReady;
-        packet[2] = static_cast<uint8_t>(ActiveInstance->_speech_session & 0xFF);
-        packet[3] = static_cast<uint8_t>(ActiveInstance->_speech_session >> 8);
-        packet[4] = static_cast<uint8_t>(SpeechSampleRate & 0xFF);
-        packet[5] = static_cast<uint8_t>(SpeechSampleRate >> 8);
-        packet[6] = static_cast<uint8_t>(speech::OutputSamplesPerFrame & 0xFF);
-        packet[7] = static_cast<uint8_t>(speech::OutputSamplesPerFrame >> 8);
-        packet[8] = SpeechCodecImaAdpcm;
-        packet[9] = ActiveInstance->_speech_active.load() ? 1 : 0;
-        return os_mbuf_append(context->om, packet.data(), packet.size()) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    auto* instance = ActiveInstance;
+    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == instance->_speech_status_handle) {
+        return instance->readSpeechStatus(context);
     }
-    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == ActiveInstance->_speech_audio_handle) {
+    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == instance->_speech_audio_handle) {
         return 0;
     }
-    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == ActiveInstance->_mapping_config_handle) {
-        std::array<uint8_t, UserEventMapper::WireHeaderSize + UserEventMapper::MaxRecords * UserEventMapper::WireRecordSize>
-            packet{};
-        const std::size_t length = ActiveInstance->_mapping.writeWire(packet.data(), packet.size());
-        if (length == 0) {
-            return BLE_ATT_ERR_UNLIKELY;
+    if (attributeHandle == instance->_mapping_config_handle) {
+        if (context->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+            return instance->readMappingConfig(context);
         }
-        return os_mbuf_append(context->om, packet.data(), length) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+        if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+            return instance->writeMappingConfig(context);
+        }
     }
-    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == ActiveInstance->_mapping_config_handle) {
-        const uint16_t length = OS_MBUF_PKTLEN(context->om);
-        if (length < UserEventMapper::WireHeaderSize ||
-            length > UserEventMapper::WireHeaderSize + UserEventMapper::MaxRecords * UserEventMapper::WireRecordSize) {
-            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-        }
-        std::array<uint8_t, UserEventMapper::WireHeaderSize + UserEventMapper::MaxRecords * UserEventMapper::WireRecordSize>
-            packet{};
-        if (os_mbuf_copydata(context->om, 0, length, packet.data()) != 0) {
-            return BLE_ATT_ERR_UNLIKELY;
-        }
-        if (!ActiveInstance->_mapping.updateFromWire(packet.data(), length)) {
-            ESP_LOGW(Tag, "invalid mapping config write length=%u", length);
-            return BLE_ATT_ERR_UNLIKELY;
-        }
-        if (!ActiveInstance->_mapping.save()) {
-            return BLE_ATT_ERR_UNLIKELY;
-        }
-        ESP_LOGI(Tag, "mapping config updated over BLE");
-        return 0;
+    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == instance->_user_event_handle) {
+        return instance->readUserEvent(context);
     }
-    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == ActiveInstance->_user_event_handle) {
-        std::array<uint8_t, 8> packet{};
-        packet[0] = UserEventMapper::MappingVersion;
-        packet[5] = static_cast<uint8_t>(ActiveInstance->_user_event_sequence & 0xFF);
-        packet[6] = static_cast<uint8_t>(ActiveInstance->_user_event_sequence >> 8);
-        return os_mbuf_append(context->om, packet.data(), packet.size()) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
-    }
-    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == ActiveInstance->_host_status_handle) {
-        if (OS_MBUF_PKTLEN(context->om) != 4) {
-            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-        }
-        std::array<uint8_t, 4> packet{};
-        if (os_mbuf_copydata(context->om, 0, packet.size(), packet.data()) != 0) {
-            return BLE_ATT_ERR_UNLIKELY;
-        }
-        if (packet[0] != SpeechProtocolVersion || packet[1] > static_cast<uint8_t>(HostStatus::HostError)) {
-            return BLE_ATT_ERR_UNLIKELY;
-        }
-        ActiveInstance->_host_status = static_cast<HostStatus>(packet[1]);
-        ActiveInstance->_host_error  = static_cast<uint16_t>(packet[2] | (packet[3] << 8));
-        ESP_LOGI(Tag, "desktop helper status: %u, error: %u", packet[1], ActiveInstance->_host_error.load());
-        if (ActiveInstance->isSpeechReady()) {
-            ActiveInstance->sendSpeechStatus(SpeechReady);
-        }
-        return 0;
+    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == instance->_host_status_handle) {
+        return instance->writeHostStatus(context);
     }
     return BLE_ATT_ERR_UNLIKELY;
 }

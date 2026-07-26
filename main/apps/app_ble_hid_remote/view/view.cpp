@@ -116,7 +116,7 @@ void BleHidRemoteView::init(lv_obj_t* parent)
     _pair_requested = false;
     _wheel_pending  = 0;
     _pending_touch_event = model::UserEvent::None;
-    resetGesture();
+    resetScrollGesture();
 
     _panel = std::make_unique<Container>(parent);
     _panel->align(LV_ALIGN_CENTER, 0, 0);
@@ -164,12 +164,6 @@ void BleHidRemoteView::init(lv_obj_t* parent)
     _status_label->setTextColor(lv_color_hex(PrimaryTextColor));
     _status_label->align(LV_ALIGN_LEFT_MID, 51, 0);
 
-    _device_label = std::make_unique<Label>(_controls_layer->get());
-    _device_label->setText("M5StopWatch HID + STT  |  Secure auto pairing");
-    _device_label->setTextFont(&lv_font_montserrat_16);
-    _device_label->setTextColor(lv_color_hex(SecondaryTextColor));
-    _device_label->align(LV_ALIGN_TOP_MID, 0, 88);
-
     _left_key_panel = std::make_unique<Container>(_controls_layer->get());
     configureKeyPanel(*_left_key_panel, -96);
     _right_key_panel = std::make_unique<Container>(_controls_layer->get());
@@ -198,16 +192,10 @@ void BleHidRemoteView::init(lv_obj_t* parent)
     _right_hint_label->align(LV_ALIGN_CENTER, 0, 30);
 
     _gesture_label = std::make_unique<Label>(_controls_layer->get());
-    _gesture_label->setText(LV_SYMBOL_UP "  SWIPE  " LV_SYMBOL_DOWN);
+    _gesture_label->setText("GESTURE FIELD");
     _gesture_label->setTextFont(&lv_font_montserrat_22);
     _gesture_label->setTextColor(lv_color_hex(PrimaryTextColor));
-    _gesture_label->align(LV_ALIGN_CENTER, 0, 65);
-
-    _gesture_hint_label = std::make_unique<Label>(_controls_layer->get());
-    _gesture_hint_label->setText("Touch screen controls the mouse wheel");
-    _gesture_hint_label->setTextFont(&lv_font_montserrat_16);
-    _gesture_hint_label->setTextColor(lv_color_hex(SecondaryTextColor));
-    _gesture_hint_label->align(LV_ALIGN_CENTER, 0, 96);
+    _gesture_label->align(LV_ALIGN_CENTER, 0, 82);
 
     _pair_button = std::make_unique<Button>(_controls_layer->get());
     _pair_button->setSize(210, 54);
@@ -247,12 +235,12 @@ void BleHidRemoteView::update(model::BleHidRemote::State state, int lastError,
         _right_key_panel->setBgColor(lv_color_hex(SurfaceColor));
     }
 
-    if (updateUiToggleGesture()) {
+    if (updateTapGesture()) {
         return;
     }
 
     if (_pair_dialog) {
-        resetGesture();
+        resetScrollGesture();
         if (_pair_dialog->isConfirmed()) {
             _pair_requested = true;
             _pair_dialog.reset();
@@ -262,7 +250,7 @@ void BleHidRemoteView::update(model::BleHidRemote::State state, int lastError,
         return;
     }
 
-    updateGesture(state);
+    updateScrollGesture(state);
 }
 
 void BleHidRemoteView::flashKey(bool leftKey)
@@ -401,7 +389,7 @@ void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastEr
     _displayed_host_error    = hostError;
 }
 
-bool BleHidRemoteView::updateUiToggleGesture()
+bool BleHidRemoteView::updateTapGesture()
 {
     if (GetHAL().lvTouchpad == nullptr) {
         return false;
@@ -426,7 +414,7 @@ bool BleHidRemoteView::updateUiToggleGesture()
                 if (_tap_count >= 3) {
                     _tap_count = 0;
                     _pending_touch_event = model::UserEvent::TouchTripleTap;
-                    resetGesture();
+                    resetScrollGesture();
                     return true;
                 }
             } else {
@@ -474,10 +462,10 @@ void BleHidRemoteView::setControlsVisible(bool visible)
     }
 }
 
-void BleHidRemoteView::updateGesture(model::BleHidRemote::State state)
+void BleHidRemoteView::updateScrollGesture(model::BleHidRemote::State state)
 {
     if (state != model::BleHidRemote::State::Connected || GetHAL().lvTouchpad == nullptr) {
-        resetGesture();
+        resetScrollGesture();
         return;
     }
 
@@ -500,7 +488,7 @@ void BleHidRemoteView::updateGesture(model::BleHidRemote::State state)
                 }
             }
         }
-        resetGesture();
+        resetScrollGesture();
         return;
     }
 
@@ -551,7 +539,7 @@ void BleHidRemoteView::updateGesture(model::BleHidRemote::State state)
     _wheel_pending = std::clamp(_wheel_pending, -127, 127);
 }
 
-void BleHidRemoteView::resetGesture()
+void BleHidRemoteView::resetScrollGesture()
 {
     _gesture_pressing  = false;
     _gesture_locked    = false;
@@ -561,7 +549,7 @@ void BleHidRemoteView::resetGesture()
 
 void BleHidRemoteView::showPairDialog()
 {
-    resetGesture();
+    resetScrollGesture();
     _pair_dialog = std::make_unique<PairComputerDialog>();
     _pair_dialog->init(_controls_layer->get());
 }

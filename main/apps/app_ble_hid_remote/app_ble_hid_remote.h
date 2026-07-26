@@ -45,6 +45,12 @@ private:
     bool executeMappedAction(const model::UserActionMapping& mapping, int8_t value);
     bool scheduleSpeechStart();
     bool stopSpeechFromMapping(bool abort = false);
+    bool handleHomeCombo();
+    void handleButtonPressAndHold(bool leftButton);
+    void handleButtonRelease(bool leftButton);
+    void tickPendingSpeechStart(uint32_t now);
+    void handleSpeechEndFeedback();
+    void handleViewEvents(uint32_t now);
 
     std::unique_ptr<model::BleHidRemote> _remote;
     std::unique_ptr<view::BleHidRemoteView> _view;
@@ -55,7 +61,6 @@ private:
     bool _speech_start_pending     = false;
     bool _speech_end_feedback      = false;
     bool _home_latched             = false;
-    bool _close_requested_by_home  = false;
     bool _remote_snapshot_valid    = false;
     model::BleHidRemote::State _logged_state = model::BleHidRemote::State::Stopped;
     model::BleHidRemote::SpeechServiceState _logged_service_state =

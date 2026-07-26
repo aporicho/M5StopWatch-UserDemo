@@ -69,18 +69,9 @@ public:
 
     void load();
     bool save() const;
-    void resetToDefaults();
     bool updateFromWire(const uint8_t* data, std::size_t length);
     std::size_t writeWire(uint8_t* data, std::size_t capacity) const;
     UserActionMapping actionFor(UserEvent event) const;
-    const std::array<UserActionMapping, MaxRecords>& records() const
-    {
-        return _records;
-    }
-    std::size_t count() const
-    {
-        return _count;
-    }
 
 private:
     void applyDefaultRecords();

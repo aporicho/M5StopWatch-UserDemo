@@ -34,11 +34,6 @@ public:
         Error,
     };
 
-    enum class Key : uint8_t {
-        Escape = 0x29,
-        Enter  = 0x28,
-    };
-
     enum class HostStatus : uint8_t {
         Waiting = 0,
         Preparing,
@@ -68,7 +63,6 @@ public:
 
     bool start();
     void stop();
-    bool sendKeyTap(Key key);
     bool sendKeyboardShortcut(uint8_t keyCode, uint8_t modifiers);
     bool sendWheel(int8_t delta);
     bool sendMouseClick(uint8_t buttons);
@@ -187,9 +181,15 @@ private:
     void sendConsumerControlReport(uint16_t usage);
     void configureConnection(uint16_t connectionHandle);
     void runSpeechWorker();
+    std::array<uint8_t, 12> buildSpeechStatusPacket(uint8_t event, uint16_t error = 0) const;
     bool sendSpeechStatus(uint8_t event, uint16_t error = 0);
     bool sendSpeechAudio(const uint8_t* adpcm, std::size_t length);
     void waitForSpeechWorker();
+    int readSpeechStatus(struct ble_gatt_access_ctxt* context);
+    int readMappingConfig(struct ble_gatt_access_ctxt* context);
+    int writeMappingConfig(struct ble_gatt_access_ctxt* context);
+    int readUserEvent(struct ble_gatt_access_ctxt* context);
+    int writeHostStatus(struct ble_gatt_access_ctxt* context);
     void setError(int error, const char* stage);
 
     UserEventMapper _mapping;
