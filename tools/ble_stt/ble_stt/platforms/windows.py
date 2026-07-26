@@ -5,6 +5,26 @@ from typing import Any
 from ..protocol import DEVICE_NAME
 from .base import PlatformAdapter
 
+HID_TO_WINDOWS_VK = {
+    **{0x04 + index: 0x41 + index for index in range(26)},
+    0x28: 0x0D,
+    0x29: 0x1B,
+    0x2A: 0x08,
+    0x2B: 0x09,
+    0x2C: 0x20,
+    0x4A: 0x24,
+    0x4B: 0x21,
+    0x4C: 0x2E,
+    0x4D: 0x23,
+    0x4E: 0x22,
+    0x4F: 0x27,
+    0x50: 0x25,
+    0x51: 0x28,
+    0x52: 0x26,
+    **{0x3A + index: 0x70 + index for index in range(12)},
+}
+MODIFIER_TO_WINDOWS_VK = ((0x01, 0x11), (0x02, 0x10), (0x04, 0x12), (0x08, 0x5B))
+
 
 class _WindowsAPI:
     KEYEVENTF_KEYUP = 0x0002
@@ -91,6 +111,15 @@ class _WindowsAPI:
                 "Windows SendInput was blocked; elevated applications cannot receive input from a normal user process"
             )
 
+    def tap_virtual_key(self, vk: int, modifiers: int) -> None:
+        active_modifiers = [modifier_vk for bit, modifier_vk in MODIFIER_TO_WINDOWS_VK if modifiers & bit]
+        for modifier_vk in active_modifiers:
+            self.user32.keybd_event(modifier_vk, 0, 0, 0)
+        self.user32.keybd_event(vk, 0, 0, 0)
+        self.user32.keybd_event(vk, 0, self.KEYEVENTF_KEYUP, 0)
+        for modifier_vk in reversed(active_modifiers):
+            self.user32.keybd_event(modifier_vk, 0, self.KEYEVENTF_KEYUP, 0)
+
 
 class WindowsTextInjector:
     def __init__(self, api: Any | None = None) -> None:
@@ -108,6 +137,17 @@ class WindowsTextInjector:
             return False
         for offset in range(0, len(text), 64):
             self.api.send_unicode(text[offset : offset + 64])
+        return True
+
+    def tap_key(self, key_code: int, modifiers: int, expected_window: object | None) -> bool:
+        current = self.active_window()
+        if expected_window is not None and current != expected_window:
+            print("[focus] active window changed; suppressing key action")
+            return False
+        vk = HID_TO_WINDOWS_VK.get(key_code)
+        if vk is None:
+            raise RuntimeError(f"unsupported HID key code for Windows fallback: 0x{key_code:02x}")
+        self.api.tap_virtual_key(vk, modifiers)
         return True
 
 

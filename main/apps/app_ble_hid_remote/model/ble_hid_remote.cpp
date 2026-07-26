@@ -39,7 +39,6 @@ constexpr char DeviceName[] = "M5StopWatch HID";
 
 constexpr uint8_t KeyboardReportId = 1;
 constexpr uint8_t MouseReportId    = 2;
-constexpr uint8_t ConsumerReportId = 3;
 constexpr size_t MaxBondedComputers = 2;
 
 constexpr uint8_t SpeechProtocolVersion = 1;
@@ -59,6 +58,8 @@ enum SpeechEvent : uint8_t {
 // NimBLE stores 128-bit UUIDs least-significant byte first.
 const ble_uuid128_t SpeechServiceUuid =
     BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x00, 0x10, 0x3a, 0x7f);
+const ble_uuid128_t ControlServiceUuid =
+    BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x00, 0x11, 0x3a, 0x7f);
 const ble_uuid128_t SpeechStatusUuid =
     BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x01, 0x10, 0x3a, 0x7f);
 const ble_uuid128_t SpeechAudioUuid =
@@ -195,33 +196,6 @@ constexpr uint8_t HidReportMap[] = {
     0x06,  // Input (Data, Variable, Relative)
     0xC0,
     0xC0,
-
-    // Consumer control, report ID 3.
-    0x05,
-    0x0C,  // Usage Page (Consumer)
-    0x09,
-    0x01,  // Usage (Consumer Control)
-    0xA1,
-    0x01,  // Collection (Application)
-    0x85,
-    ConsumerReportId,
-    0x15,
-    0x00,  // Logical Minimum (0)
-    0x26,
-    0xFF,
-    0x03,  // Logical Maximum (1023)
-    0x19,
-    0x00,  // Usage Minimum (0)
-    0x2A,
-    0xFF,
-    0x03,  // Usage Maximum (1023)
-    0x75,
-    0x10,  // Report Size (16)
-    0x95,
-    0x01,  // Report Count (1)
-    0x81,
-    0x00,  // Input (Data, Array, Absolute)
-    0xC0,
 };
 
 esp_hid_raw_report_map_t ReportMaps[] = {
@@ -259,6 +233,15 @@ void logPeerAddress(const char* message, const ble_addr_t& address)
 {
     ESP_LOGI(Tag, "%s type=%u addr=%02x:%02x:%02x:%02x:%02x:%02x", message, address.type, address.val[5],
              address.val[4], address.val[3], address.val[2], address.val[1], address.val[0]);
+}
+
+void deleteStoredPeerBond(const ble_addr_t& address, const char* reason)
+{
+    logPeerAddress(reason, address);
+    const int result = ble_store_util_delete_peer(&address);
+    if (result != 0 && result != BLE_HS_ENOENT) {
+        ESP_LOGW(Tag, "failed to delete stored bond for %s: %d", reason, result);
+    }
 }
 
 BleHidRemote* ActiveInstance = nullptr;
@@ -396,16 +379,8 @@ bool BleHidRemote::sendMouseClick(uint8_t buttons)
 
 bool BleHidRemote::sendMediaControl(uint16_t usage)
 {
-    if (!isConnected() || usage == 0 || _command_queue == nullptr) {
-        return false;
-    }
-
-    const Command command{
-        .type  = CommandType::MediaControl,
-        .value = static_cast<int16_t>(usage),
-        .modifier = 0,
-    };
-    return xQueueSend(_command_queue, &command, 0) == pdTRUE;
+    (void)usage;
+    return false;
 }
 
 UserActionMapping BleHidRemote::mappingFor(UserEvent event) const
@@ -611,14 +586,18 @@ bool BleHidRemote::initializeBluetooth()
     ble_store_config_init();
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
-    if (!registerSpeechService()) {
-        return false;
-    }
-
     result = esp_hidd_dev_init(&HidConfig, ESP_HID_TRANSPORT_BLE,
                                reinterpret_cast<esp_event_handler_t>(hidEventCallback), &_hid_device);
     if (result != ESP_OK) {
         setError(result, "hid_init");
+        return false;
+    }
+
+    if (!registerSpeechService()) {
+        return false;
+    }
+
+    if (!registerControlService()) {
         return false;
     }
 
@@ -641,7 +620,7 @@ bool BleHidRemote::initializeBluetooth()
 
 bool BleHidRemote::registerSpeechService()
 {
-    static ble_gatt_chr_def characteristics[7]{};
+    static ble_gatt_chr_def characteristics[4]{};
     static ble_gatt_svc_def services[2]{};
     static bool initialized = false;
 
@@ -661,22 +640,6 @@ bool BleHidRemote::registerSpeechService()
         characteristics[2].flags      = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC;
         characteristics[2].val_handle = &_host_status_handle;
 
-        characteristics[3].uuid       = &MappingConfigUuid.u;
-        characteristics[3].access_cb  = speechGattAccess;
-        characteristics[3].flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE |
-                                   BLE_GATT_CHR_F_WRITE_ENC;
-        characteristics[3].val_handle = &_mapping_config_handle;
-
-        characteristics[4].uuid       = &UserEventUuid.u;
-        characteristics[4].access_cb  = speechGattAccess;
-        characteristics[4].flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_NOTIFY;
-        characteristics[4].val_handle = &_user_event_handle;
-
-        characteristics[5].uuid       = &ActionExecUuid.u;
-        characteristics[5].access_cb  = speechGattAccess;
-        characteristics[5].flags      = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC;
-        characteristics[5].val_handle = &_action_exec_handle;
-
         services[0].type            = BLE_GATT_SVC_TYPE_PRIMARY;
         services[0].uuid            = &SpeechServiceUuid.u;
         services[0].characteristics = characteristics;
@@ -687,9 +650,6 @@ bool BleHidRemote::registerSpeechService()
         characteristics[0].val_handle = &_speech_status_handle;
         characteristics[1].val_handle = &_speech_audio_handle;
         characteristics[2].val_handle = &_host_status_handle;
-        characteristics[3].val_handle = &_mapping_config_handle;
-        characteristics[4].val_handle = &_user_event_handle;
-        characteristics[5].val_handle = &_action_exec_handle;
     }
 
     int result = ble_gatts_count_cfg(services);
@@ -699,6 +659,51 @@ bool BleHidRemote::registerSpeechService()
     if (result != 0) {
         ESP_LOGE(Tag, "failed to register speech GATT service: %d", result);
         setError(result, result == BLE_HS_EBUSY ? "speech_gatt_busy" : "speech_gatt_register");
+        return false;
+    }
+    return true;
+}
+
+bool BleHidRemote::registerControlService()
+{
+    static ble_gatt_chr_def characteristics[4]{};
+    static ble_gatt_svc_def services[2]{};
+    static bool initialized = false;
+
+    if (!initialized) {
+        characteristics[0].uuid       = &MappingConfigUuid.u;
+        characteristics[0].access_cb  = controlGattAccess;
+        characteristics[0].flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE |
+                                   BLE_GATT_CHR_F_WRITE_ENC;
+        characteristics[0].val_handle = &_mapping_config_handle;
+
+        characteristics[1].uuid       = &UserEventUuid.u;
+        characteristics[1].access_cb  = controlGattAccess;
+        characteristics[1].flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_NOTIFY;
+        characteristics[1].val_handle = &_user_event_handle;
+
+        characteristics[2].uuid       = &ActionExecUuid.u;
+        characteristics[2].access_cb  = controlGattAccess;
+        characteristics[2].flags      = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC;
+        characteristics[2].val_handle = &_action_exec_handle;
+
+        services[0].type            = BLE_GATT_SVC_TYPE_PRIMARY;
+        services[0].uuid            = &ControlServiceUuid.u;
+        services[0].characteristics = characteristics;
+        initialized                 = true;
+    } else {
+        characteristics[0].val_handle = &_mapping_config_handle;
+        characteristics[1].val_handle = &_user_event_handle;
+        characteristics[2].val_handle = &_action_exec_handle;
+    }
+
+    int result = ble_gatts_count_cfg(services);
+    if (result == 0) {
+        result = ble_gatts_add_svcs(services);
+    }
+    if (result != 0) {
+        ESP_LOGE(Tag, "failed to register control GATT service: %d", result);
+        setError(result, result == BLE_HS_EBUSY ? "control_gatt_busy" : "control_gatt_register");
         return false;
     }
     return true;
@@ -854,6 +859,16 @@ bool BleHidRemote::preparePairingWindow()
 
     ESP_LOGI(Tag, "pairing window requested; stored bonds=%d max=%u", bondedCount,
              static_cast<unsigned>(MaxBondedComputers));
+    if (_last_peer_valid) {
+        const ble_addr_t lastPeer = lastPeerAddress(_last_peer_type, _last_peer_address);
+        for (int index = 0; index < bondedCount; ++index) {
+            if (sameAddress(lastPeer, bondedPeers[index])) {
+                deleteStoredPeerBond(bondedPeers[index], "deleting last peer bond for pairing repair");
+                _pairing_blocked_peer_valid = false;
+                return true;
+            }
+        }
+    }
     if (bondedCount < static_cast<int>(MaxBondedComputers)) {
         ESP_LOGI(Tag, "bond slot available; keeping existing bonds");
         return true;
@@ -996,6 +1011,10 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
                 std::copy(std::begin(connectedPeer.peer_id_addr.val), std::end(connectedPeer.peer_id_addr.val),
                           _last_peer_address.begin());
                 _last_peer_valid = true;
+                logPeerAddress("connected peer id", connectedPeer.peer_id_addr);
+                ESP_LOGI(Tag, "connected peer security encrypted=%u authenticated=%u bonded=%u key_size=%u",
+                         connectedPeer.sec_state.encrypted, connectedPeer.sec_state.authenticated,
+                         connectedPeer.sec_state.bonded, connectedPeer.sec_state.key_size);
             }
             if (!isAllowedPeer(event->connect.conn_handle)) {
                 ESP_LOGW(Tag, "rejecting connection from an unpaired computer");
@@ -1024,6 +1043,19 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
                 configureConnection(event->enc_change.conn_handle);
             } else {
                 ESP_LOGW(Tag, "pairing/encryption failed: %d", event->enc_change.status);
+                ble_gap_conn_desc description{};
+                if (ble_gap_conn_find(event->enc_change.conn_handle, &description) == 0) {
+                    deleteStoredPeerBond(description.peer_id_addr, "deleting stale bond after encryption failure");
+                    if (!sameAddress(description.peer_id_addr, description.peer_ota_addr)) {
+                        deleteStoredPeerBond(description.peer_ota_addr, "deleting stale OTA bond after encryption failure");
+                    }
+                    _last_peer_type = description.peer_id_addr.type;
+                    std::copy(std::begin(description.peer_id_addr.val), std::end(description.peer_id_addr.val),
+                              _last_peer_address.begin());
+                    _last_peer_valid = true;
+                }
+                _pairing_open = true;
+                _pairing_blocked_peer_valid = false;
                 const int result = ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_AUTH_FAIL);
                 if (result != 0 && result != BLE_HS_ENOTCONN) {
                     ESP_LOGW(Tag, "failed to disconnect after pairing error: %d", result);
@@ -1075,8 +1107,12 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
             ESP_LOGI(Tag, "replacing stale bond for repeat pairing");
             ble_gap_conn_desc description{};
             if (ble_gap_conn_find(event->repeat_pairing.conn_handle, &description) == 0) {
-                logPeerAddress("repeat pairing peer", description.peer_id_addr);
-                ble_store_util_delete_peer(&description.peer_id_addr);
+                deleteStoredPeerBond(description.peer_id_addr, "repeat pairing peer");
+                if (!sameAddress(description.peer_id_addr, description.peer_ota_addr)) {
+                    deleteStoredPeerBond(description.peer_ota_addr, "repeat pairing OTA peer");
+                }
+                _pairing_open = true;
+                _pairing_blocked_peer_valid = false;
                 return BLE_GAP_REPEAT_PAIRING_RETRY;
             }
             break;
@@ -1108,8 +1144,6 @@ void BleHidRemote::runReportWorker()
             sendMouseWheelReport(static_cast<int8_t>(command.value));
         } else if (command.type == CommandType::MouseClick) {
             sendMouseClickReport(static_cast<uint8_t>(command.value));
-        } else if (command.type == CommandType::MediaControl) {
-            sendConsumerControlReport(static_cast<uint16_t>(command.value));
         }
     }
 
@@ -1145,19 +1179,6 @@ void BleHidRemote::sendMouseClickReport(uint8_t buttons)
     report.fill(0);
     if (_hid_device != nullptr) {
         esp_hidd_dev_input_set(_hid_device, 0, MouseReportId, report.data(), report.size());
-    }
-}
-
-void BleHidRemote::sendConsumerControlReport(uint16_t usage)
-{
-    std::array<uint8_t, 2> report{};
-    report[0] = static_cast<uint8_t>(usage & 0xFF);
-    report[1] = static_cast<uint8_t>(usage >> 8);
-    esp_hidd_dev_input_set(_hid_device, 0, ConsumerReportId, report.data(), report.size());
-    vTaskDelay(pdMS_TO_TICKS(20));
-    report.fill(0);
-    if (_hid_device != nullptr) {
-        esp_hidd_dev_input_set(_hid_device, 0, ConsumerReportId, report.data(), report.size());
     }
 }
 
@@ -1447,6 +1468,22 @@ int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attribute
     if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == instance->_speech_audio_handle) {
         return 0;
     }
+    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == instance->_host_status_handle) {
+        return instance->writeHostStatus(context);
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+int BleHidRemote::controlGattAccess(uint16_t connectionHandle, uint16_t attributeHandle, ble_gatt_access_ctxt* context,
+                                    void* argument)
+{
+    (void)connectionHandle;
+    (void)argument;
+    if (ActiveInstance == nullptr || context == nullptr) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    auto* instance = ActiveInstance;
     if (attributeHandle == instance->_mapping_config_handle) {
         if (context->op == BLE_GATT_ACCESS_OP_READ_CHR) {
             return instance->readMappingConfig(context);
@@ -1457,9 +1494,6 @@ int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attribute
     }
     if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == instance->_user_event_handle) {
         return instance->readUserEvent(context);
-    }
-    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == instance->_host_status_handle) {
-        return instance->writeHostStatus(context);
     }
     if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == instance->_action_exec_handle) {
         return instance->writeActionExecute(context);

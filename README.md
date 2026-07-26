@@ -28,21 +28,35 @@ idf.py flash
 
 ### 固件自动化测试
 
-开发回归可以构建带测试入口的固件。这个入口只注入按钮和触摸输入，不直接打开应用或修改 BLE 状态，因此测试走的是实际用户路径。
-测试固件会把主 console 切到 USB Serial/JTAG，方便电脑通过同一个 USB 口发送用户输入事件。
+开发回归可以构建带测试入口的固件。这个入口只注入按钮和触摸输入，不直接打开应用、不直接改 BLE 状态、不绕过配对，因此测试走的是实际用户路径：从 Launcher 选择应用、打开 **BLE Remote**、等待广播或连接，再按键触发语音链路。
+
+测试固件会把主 console 切到 USB Serial/JTAG，电脑通过同一个 USB 口发送用户输入事件。这个入口只在 `sdkconfig.defaults.test` 里启用，正式固件不启用 `CONFIG_M5_TEST_CONTROL`。
 
 ```bash
-idf.py -B build-test -D SDKCONFIG=build-test/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.test" build flash
-~/.espressif/python_env/idf5.5_py3.14_env/bin/python tools/firmware_hil.py smoke --port /dev/cu.usbmodem101
+. /Users/aporicho/.espressif/v5.5.4/esp-idf/export.sh
+idf.py -B build-test -D SDKCONFIG=build-test/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.test" -p /dev/cu.usbmodem101 build flash
+python tools/firmware_hil.py smoke --port /dev/cu.usbmodem101
 ```
+
+`tools/firmware_hil.py` 抽象的是用户操作：
+
+- `left` / `right` 按键的 tap、hold、release。
+- 屏幕 touch、tap、swipe。
+- 通过 Launcher 导航并点按图标打开应用。
+- 读取测试状态、应用列表和 BLE Remote 状态，用于等待“广播中 / 配对中 / 已连接”。
 
 常用旅程：
 
 ```bash
+python tools/firmware_hil.py smoke --port /dev/cu.usbmodem101
 python tools/firmware_hil.py smoke --port /dev/cu.usbmodem101 --skip-ble-check
-python tools/firmware_hil.py diagnose-not-found --port /dev/cu.usbmodem101
 python tools/firmware_hil.py voice-link --port /dev/cu.usbmodem101
+python tools/firmware_hil.py diagnose-not-found --port /dev/cu.usbmodem101
 ```
+
+`smoke` 会从 Launcher 打开 **BLE Remote**，等待手表进入广播、配对或已连接状态，并可继续运行桌面 BLE 服务检查。`voice-link` 会通过右键长按和松开模拟一次听写入口。`diagnose-not-found` 用于蓝牙扫不到时输出应用状态和 BLE Remote 状态。
+
+注意：BLE 只在手表切到 **BLE Remote** 应用后广播。自动化测试会通过 Launcher 用户路径打开它；如果跑普通固件或手表停留在别的应用，电脑端扫描不到是正常现象。
 
 ## BLE 语音输入服务
 

@@ -20,6 +20,7 @@ from .platforms import PlatformAdapter, create_platform
 from .protocol import (
     AUDIO_UUID,
     ACTION_EXEC_UUID,
+    CONTROL_SERVICE_UUID,
     HOST_STATUS_UUID,
     MAPPING_CONFIG_UUID,
     SERVICE_UUID,
@@ -111,6 +112,17 @@ class SpeechController:
 
     def set_action_writer(self, writer: Callable[[dict[str, Any]], Awaitable[None]] | None) -> None:
         self._action_writer = writer
+
+    def _execute_local_action(self, command: dict[str, Any], session: SpeechSession) -> bool:
+        action = str(command.get("action", ""))
+        if action != "hid.keyboard.tap":
+            LOGGER.info("local command fallback does not support action=%s", action)
+            return False
+        tap_key = getattr(self.injector, "tap_key", None)
+        if not callable(tap_key):
+            LOGGER.info("local command fallback is unavailable for this platform")
+            return False
+        return bool(tap_key(int(command.get("param0", 0)), int(command.get("param1", 0)), session.focus_window))
 
     def report_host_status(self, status: HostStatus, error: int = 0) -> None:
         if self._host_status_writer is not None:
@@ -498,10 +510,31 @@ class SpeechController:
                         LOGGER.exception("command action failed session=%s", session.session_id)
                         print(f"[command] action failed: {exc}")
                         self._last_command = {**self._last_command, "error": str(exc)}
-                elif result.matched and self._action_writer is None:
-                    LOGGER.warning("command matched but watch action writer is unavailable")
-                    print("[command] action execution is unavailable on this watch firmware")
-                    self._last_command = {**self._last_command, "error": "action writer unavailable"}
+                elif result.matched and result.command is not None:
+                    try:
+                        succeeded = self._execute_local_action(result.command, session)
+                    except Exception as exc:
+                        LOGGER.exception("local command action failed session=%s", session.session_id)
+                        print(f"[command] local action failed: {exc}")
+                        self._last_command = {**self._last_command, "error": str(exc)}
+                    else:
+                        if succeeded:
+                            LOGGER.info(
+                                "command executed locally session=%s phrase=%s action=%s score=%.3f transcript=%s",
+                                session.session_id,
+                                result.command.get("phrase"),
+                                result.command.get("action"),
+                                result.score,
+                                text,
+                            )
+                            print(
+                                f"[command] {text} -> {result.command.get('phrase')} "
+                                f"({result.command.get('action')}, local)"
+                            )
+                        else:
+                            LOGGER.warning("command matched but no action executor is available")
+                            print("[command] action execution is unavailable")
+                            self._last_command = {**self._last_command, "error": "action executor unavailable"}
                 else:
                     LOGGER.info(
                         "command not matched session=%s score=%.3f reason=%s transcript=%s",
@@ -684,12 +717,18 @@ async def run_ble(
                         "Speech GATT service is missing. Forget the device on both sides, reopen BLE Remote, "
                         "and pair again."
                     )
+                control_service_present = CONTROL_SERVICE_UUID in service_uuids
                 # Reading the encrypted status characteristic restores or initiates pairing.
                 await client.read_gatt_char(STATUS_UUID)
                 mtu = await adapter.acquire_mtu(client)
                 if mtu < 185:
                     raise RuntimeError(f"negotiated MTU {mtu} is too small for speech audio (need 185)")
-                LOGGER.info("connected mtu=%s services=%s", mtu, sorted(service_uuids))
+                LOGGER.info(
+                    "connected mtu=%s control_service=%s services=%s",
+                    mtu,
+                    control_service_present,
+                    sorted(service_uuids),
+                )
                 print(f"[ble] connected, MTU {mtu}")
                 await client.start_notify(STATUS_UUID, lambda _, data: controller.receive_status(bytes(data)))
                 await client.start_notify(AUDIO_UUID, lambda _, data: controller.receive_audio(bytes(data)))
@@ -708,7 +747,10 @@ async def run_ble(
                 if mapping_characteristic is not None:
                     mapping_task = asyncio.create_task(_mapping_sync_loop(client, mapping_characteristic))
                 else:
-                    LOGGER.info("watch firmware does not expose mapping config characteristic")
+                    LOGGER.info(
+                        "watch firmware does not expose mapping config characteristic control_service=%s",
+                        control_service_present,
+                    )
 
                 async def write_host_status(status: HostStatus, error: int = 0) -> None:
                     if host_characteristic is None or not client.is_connected:
@@ -734,6 +776,8 @@ async def run_ble(
 
                 controller.set_host_status_writer(write_host_status)
                 controller.set_action_writer(write_action if action_characteristic is not None else None)
+                if action_characteristic is None:
+                    LOGGER.info("watch command action characteristic is unavailable; local fallback will be used")
                 try:
                     if runtime_validator is not None:
                         while True:

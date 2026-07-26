@@ -19,6 +19,38 @@ CORE_BLUETOOTH_CACHE_TIMEOUT_SECONDS = 5.0
 BLE_ADDRESS_SCAN_TIMEOUT_SECONDS = 5.0
 BLE_NAME_SCAN_TIMEOUT_SECONDS = 12.0
 _BLUETOOTH_PERMISSION_MANAGER: Any | None = None
+HID_TO_MAC_KEY = {
+    **{0x04 + index: value for index, value in enumerate((0x00, 0x0B, 0x08, 0x02, 0x0E, 0x03, 0x05, 0x04,
+                                                           0x22, 0x26, 0x28, 0x25, 0x2E, 0x2D, 0x1F, 0x23,
+                                                           0x0C, 0x0F, 0x01, 0x11, 0x20, 0x09, 0x0D, 0x07,
+                                                           0x10, 0x06))},
+    0x28: 0x24,
+    0x29: 0x35,
+    0x2A: 0x33,
+    0x2B: 0x30,
+    0x2C: 0x31,
+    0x3A: 0x7A,
+    0x3B: 0x78,
+    0x3C: 0x63,
+    0x3D: 0x76,
+    0x3E: 0x60,
+    0x3F: 0x61,
+    0x40: 0x62,
+    0x41: 0x64,
+    0x42: 0x65,
+    0x43: 0x6D,
+    0x44: 0x67,
+    0x45: 0x6F,
+    0x4A: 0x73,
+    0x4B: 0x74,
+    0x4C: 0x75,
+    0x4D: 0x77,
+    0x4E: 0x79,
+    0x4F: 0x7C,
+    0x50: 0x7B,
+    0x51: 0x7D,
+    0x52: 0x7E,
+}
 
 
 def _accessibility_principal() -> str:
@@ -116,6 +148,33 @@ class MacOSTextInjector:
             self.quartz.CGEventPost(self.quartz.kCGHIDEventTap, key_down)
             self.quartz.CGEventPost(self.quartz.kCGHIDEventTap, key_up)
 
+    def _modifier_flags(self, modifiers: int) -> int:
+        flags = 0
+        if modifiers & 0x01:
+            flags |= int(self.quartz.kCGEventFlagMaskControl)
+        if modifiers & 0x02:
+            flags |= int(self.quartz.kCGEventFlagMaskShift)
+        if modifiers & 0x04:
+            flags |= int(self.quartz.kCGEventFlagMaskAlternate)
+        if modifiers & 0x08:
+            flags |= int(self.quartz.kCGEventFlagMaskCommand)
+        return flags
+
+    def _post_key(self, key_code: int, modifiers: int) -> None:
+        mac_key = HID_TO_MAC_KEY.get(key_code)
+        if mac_key is None:
+            raise RuntimeError(f"unsupported HID key code for macOS fallback: 0x{key_code:02x}")
+        source = self.quartz.CGEventSourceCreate(self.quartz.kCGEventSourceStateCombinedSessionState)
+        flags = self._modifier_flags(modifiers)
+        key_down = self.quartz.CGEventCreateKeyboardEvent(source, mac_key, True)
+        key_up = self.quartz.CGEventCreateKeyboardEvent(source, mac_key, False)
+        if key_down is None or key_up is None:
+            raise RuntimeError("failed to create macOS keyboard event")
+        self.quartz.CGEventSetFlags(key_down, flags)
+        self.quartz.CGEventSetFlags(key_up, flags)
+        self.quartz.CGEventPost(self.quartz.kCGHIDEventTap, key_down)
+        self.quartz.CGEventPost(self.quartz.kCGHIDEventTap, key_up)
+
     def type_text(self, text: str, expected_window: object | None) -> bool:
         if not text:
             return True
@@ -130,6 +189,20 @@ class MacOSTextInjector:
                 print("[focus] frontmost application changed; suppressing text injection")
                 return False
         self._post_unicode(text)
+        return True
+
+    def tap_key(self, key_code: int, modifiers: int, expected_window: object | None) -> bool:
+        if not self.check_accessibility(False):
+            raise RuntimeError(
+                "Accessibility permission is required; run 'ble-stt doctor --request-permissions' "
+                f"and allow {_accessibility_principal()}"
+            )
+        current = self.active_window()
+        if isinstance(expected_window, MacWindowToken):
+            if current is None or not self._same_window(expected_window, current):
+                print("[focus] frontmost application changed; suppressing key action")
+                return False
+        self._post_key(key_code, modifiers)
         return True
 
 

@@ -9,6 +9,26 @@ from typing import Any
 from ..protocol import AUDIO_UUID, DEVICE_NAME
 from .base import PlatformAdapter
 
+HID_TO_WTYPE_KEY = {
+    **{0x04 + index: chr(ord("a") + index) for index in range(26)},
+    0x28: "Return",
+    0x29: "Escape",
+    0x2A: "BackSpace",
+    0x2B: "Tab",
+    0x2C: "space",
+    0x4A: "Home",
+    0x4B: "Prior",
+    0x4C: "Delete",
+    0x4D: "End",
+    0x4E: "Next",
+    0x4F: "Right",
+    0x50: "Left",
+    0x51: "Down",
+    0x52: "Up",
+    **{0x3A + index: f"F{index + 1}" for index in range(12)},
+}
+MODIFIER_TO_WTYPE = ((0x01, "ctrl"), (0x02, "shift"), (0x04, "alt"), (0x08, "logo"))
+
 
 class LinuxTextInjector:
     def __init__(self) -> None:
@@ -40,6 +60,29 @@ class LinuxTextInjector:
             self._warned_no_focus = True
         try:
             subprocess.run(["wtype", "--", text], check=True, env=os.environ.copy())
+        except FileNotFoundError:
+            raise RuntimeError("wtype is not installed") from None
+        except subprocess.CalledProcessError as exc:
+            raise RuntimeError(f"wtype failed with exit code {exc.returncode}") from exc
+        return True
+
+    def tap_key(self, key_code: int, modifiers: int, expected_window: object | None) -> bool:
+        current = self.active_window()
+        if expected_window and current != expected_window:
+            print("[focus] active window changed; suppressing key action")
+            return False
+        key_name = HID_TO_WTYPE_KEY.get(key_code)
+        if key_name is None:
+            raise RuntimeError(f"unsupported HID key code for Linux fallback: 0x{key_code:02x}")
+        command = ["wtype"]
+        active_modifiers = [name for bit, name in MODIFIER_TO_WTYPE if modifiers & bit]
+        for name in active_modifiers:
+            command.extend(["-M", name])
+        command.extend(["-k", key_name])
+        for name in reversed(active_modifiers):
+            command.extend(["-m", name])
+        try:
+            subprocess.run(command, check=True, env=os.environ.copy())
         except FileNotFoundError:
             raise RuntimeError("wtype is not installed") from None
         except subprocess.CalledProcessError as exc:

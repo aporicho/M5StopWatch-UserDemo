@@ -115,7 +115,6 @@ private:
         KeyTap,
         Wheel,
         MouseClick,
-        MediaControl,
         Stop,
     };
 
@@ -169,6 +168,7 @@ private:
 
     bool initializeBluetooth();
     bool registerSpeechService();
+    bool registerControlService();
     void cleanupBluetooth();
     bool startAdvertising();
     bool preparePairingWindow();
@@ -179,7 +179,6 @@ private:
     void sendKeyboardReport(uint8_t keyCode, uint8_t modifiers = 0);
     void sendMouseWheelReport(int8_t delta);
     void sendMouseClickReport(uint8_t buttons);
-    void sendConsumerControlReport(uint16_t usage);
     void configureConnection(uint16_t connectionHandle);
     void runSpeechWorker();
     std::array<uint8_t, 12> buildSpeechStatusPacket(uint8_t event, uint16_t error = 0) const;
@@ -203,6 +202,8 @@ private:
     static int gapEventCallback(struct ble_gap_event* event, void* argument);
     static int speechGattAccess(uint16_t connectionHandle, uint16_t attributeHandle,
                                 struct ble_gatt_access_ctxt* context, void* argument);
+    static int controlGattAccess(uint16_t connectionHandle, uint16_t attributeHandle,
+                                 struct ble_gatt_access_ctxt* context, void* argument);
 };
 
 const char* bleHidStateToString(BleHidRemote::State state);
