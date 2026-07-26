@@ -136,6 +136,14 @@ import {
   type StructuredLogEntry,
   type TelemetryEnvelope,
 } from "@/lib/helper-api"
+import {
+  LANGUAGE_OPTIONS,
+  createTranslator,
+  detectInitialLanguage,
+  persistLanguage,
+  type LanguageCode,
+  type Translator,
+} from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
 type BadgeVariant = "default" | "secondary" | "destructive" | "outline"
@@ -209,6 +217,16 @@ const WHEEL_DIRECTION_OPTIONS: MappingOption[] = [
   { label: "Inverted", value: 1 },
 ]
 
+const COMMON_MAPPING_EVENT_IDS = new Set([
+  "button.left.tap",
+  "button.right.tap",
+  "button.right.hold",
+  "button.right.release_after_hold",
+  "touch.scroll_delta",
+  "touch.triple_tap",
+  "button.both.hold",
+])
+
 const DEFAULT_DAILY_STATE: DailyState = {
   key: "loading",
   label: "Checking",
@@ -241,6 +259,62 @@ function modelLabel(value: string | null | undefined) {
     return "Unknown"
   }
   return MODEL_OPTIONS.find((model) => model.value === value)?.label ?? value
+}
+
+function modelDisplayLabel(value: string | null | undefined, t: Translator) {
+  if (!value) {
+    return t("common.unknown", "Unknown")
+  }
+  return t(`model.${value}.label`, modelLabel(value))
+}
+
+function modelDetail(value: string, t: Translator) {
+  return (
+    MODEL_OPTIONS.find((model) => model.value === value)
+      ? t(`model.${value}.detail`)
+      : t("settings.custom_model_detail", "Custom model selected by the helper.")
+  )
+}
+
+function localizedDailyState(state: DailyState, t: Translator): DailyState {
+  if (state.key === "needs_attention") {
+    switch (state.action) {
+      case "request-bluetooth":
+        return {
+          ...state,
+          label: t("state.bluetooth_blocked.label"),
+          title: t("state.bluetooth_blocked.title"),
+          description: t("state.bluetooth_blocked.description"),
+        }
+      case "request-input":
+        return {
+          ...state,
+          label: t("state.input_blocked.label"),
+          title: t("state.input_blocked.title"),
+          description: t("state.input_blocked.description"),
+        }
+      case "install-model":
+        return {
+          ...state,
+          label: t("state.model_missing.label"),
+          title: t("state.model_missing.title"),
+          description: t("state.model_missing.description"),
+        }
+      case "diagnostics":
+        return {
+          ...state,
+          label: t("state.service_error.label"),
+          title: t("state.service_error.title"),
+        }
+    }
+  }
+
+  return {
+    ...state,
+    label: t(`state.${state.key}.label`, state.label),
+    title: t(`state.${state.key}.title`, state.title),
+    description: t(`state.${state.key}.description`, state.description),
+  }
 }
 
 function logLevelVariant(level: string): BadgeVariant {
@@ -317,6 +391,70 @@ function withMappingAction(entry: MappingEntry, action: string): MappingEntry {
 
 function mappingOptionValue(value: number | null | undefined) {
   return String(value ?? 0)
+}
+
+function mappingEventLabel(eventId: string, fallback: string, t: Translator) {
+  return t(`map.event.${eventId}`, fallback)
+}
+
+function mappingActionLabel(actionId: string, fallback: string | undefined, t: Translator) {
+  return t(`map.action.${actionId}`, fallback ?? actionId)
+}
+
+function localizedMappingOptionLabel(label: string, t: Translator) {
+  const normalized = label.toLowerCase()
+  if (normalized === "none") {
+    return t("map.option.none", label)
+  }
+  if (normalized === "normal") {
+    return t("map.option.normal", label)
+  }
+  if (normalized === "inverted") {
+    return t("map.option.inverted", label)
+  }
+  return label
+}
+
+function findMappingOption(options: MappingOption[], value: number) {
+  return options.find((option) => option.value === value)
+}
+
+function mappingOptionLabel(options: MappingOption[], value: number, t: Translator) {
+  const option = findMappingOption(options, value)
+  return localizedMappingOptionLabel(option?.label ?? String(value), t)
+}
+
+function mappingActionSummary(entry: MappingEntry, envelope: MappingEnvelope, t: Translator) {
+  if (entry.locked) {
+    return t("mapping.locked_summary", "Fixed safety action")
+  }
+
+  const action = envelope.actions.find((item) => item.id === entry.action)
+
+  switch (entry.action) {
+    case "none":
+      return t("mapping.none_summary", "No action")
+    case "hid.keyboard.tap": {
+      const key = mappingOptionLabel(envelope.keyOptions, entry.param0, t)
+      const modifier = mappingOptionLabel(envelope.modifierOptions, entry.param1, t)
+      return modifier === t("map.option.none", "None") ? key : `${modifier} + ${key}`
+    }
+    case "hid.mouse.wheel": {
+      const speed = mappingOptionLabel(WHEEL_MULTIPLIER_OPTIONS, entry.param0, t)
+      const direction = mappingOptionLabel(WHEEL_DIRECTION_OPTIONS, entry.param1, t)
+      return `${speed} / ${direction}`
+    }
+    case "hid.mouse.click":
+      return mappingOptionLabel(envelope.mouseButtons, entry.param0, t)
+    case "hid.media.control":
+      return mappingOptionLabel(envelope.mediaControls, entry.param2, t)
+    default:
+      return mappingActionLabel(entry.action, action?.label, t)
+  }
+}
+
+function mappingIsCommon(eventId: string, entry: MappingEntry) {
+  return COMMON_MAPPING_EVENT_IDS.has(eventId) || entry.locked || entry.action !== "none"
 }
 
 function progressValue(value: number | null | undefined) {
@@ -784,7 +922,7 @@ function StatusBadge({ state }: { state: DailyState }) {
   return <Badge variant={state.badgeVariant}>{state.label}</Badge>
 }
 
-function ReadinessTable({ status }: { status: StatusPayload | null }) {
+function ReadinessTable({ status, t }: { status: StatusPayload | null; t: Translator }) {
   if (!status) {
     return (
       <div className="flex flex-col gap-2">
@@ -797,24 +935,24 @@ function ReadinessTable({ status }: { status: StatusPayload | null }) {
 
   const rows = [
     {
-      label: "Service",
+      label: t("home.service", "Service"),
       ok: status.service.running && !status.service.error,
-      detail: status.service.running ? "running" : status.service.error || "stopped",
+      detail: status.service.running ? t("settings.running", "running") : status.service.error || t("settings.stopped", "stopped"),
     },
     {
-      label: "Watch",
+      label: t("home.watch", "Watch"),
       ok: status.watch.paired,
-      detail: status.watch.paired ? "connected" : status.watch.label,
+      detail: status.watch.paired ? t("status.connected", "connected") : status.watch.label,
     },
     {
-      label: "Voice",
+      label: t("home.voice", "Voice"),
       ok: status.voice.ready,
       detail: status.voice.message,
     },
     {
-      label: "Model",
+      label: t("home.model", "Model"),
       ok: status.model.installed,
-      detail: `${modelLabel(status.model.selected)} / ${status.model.state}`,
+      detail: `${modelDisplayLabel(status.model.selected, t)} / ${status.model.state}`,
     },
   ]
 
@@ -825,7 +963,9 @@ function ReadinessTable({ status }: { status: StatusPayload | null }) {
           <TableRow key={row.label}>
             <TableCell className="w-28 font-medium">{row.label}</TableCell>
             <TableCell className="w-24">
-              <Badge variant={readinessVariant(row.ok)}>{row.ok ? "OK" : "Check"}</Badge>
+              <Badge variant={readinessVariant(row.ok)}>
+                {row.ok ? t("common.ok", "OK") : t("common.check", "Check")}
+              </Badge>
             </TableCell>
             <TableCell className="whitespace-normal text-muted-foreground">{row.detail}</TableCell>
           </TableRow>
@@ -842,6 +982,7 @@ function StatusCard({
   busyAction,
   onAction,
   primaryActionLabel,
+  t,
 }: {
   state: DailyState
   status: StatusPayload | null
@@ -849,6 +990,7 @@ function StatusCard({
   busyAction: string | null
   onAction: () => void
   primaryActionLabel: Record<NonNullable<DailyState["action"]>, string>
+  t: Translator
 }) {
   return (
     <Card size="sm" className="shrink-0">
@@ -875,10 +1017,10 @@ function StatusCard({
             </AlertDescription>
           </Alert>
         )}
-        <ReadinessTable status={status} />
+        <ReadinessTable status={status} t={t} />
       </CardContent>
       <CardFooter className="text-sm text-muted-foreground">
-        Updated {lastUpdated ? lastUpdated.toLocaleTimeString() : "never"}
+        {t("home.updated", "Updated")} {lastUpdated ? lastUpdated.toLocaleTimeString() : t("common.never", "never")}
       </CardFooter>
     </Card>
   )
@@ -887,19 +1029,21 @@ function StatusCard({
 function TranscriptCard({
   dictation,
   className,
+  t,
 }: {
   dictation: ReturnType<typeof latestDictation>
   className?: string
+  t: Translator
 }) {
   return (
     <Card size="sm" className={cn("min-h-0", className)}>
       <CardHeader>
         <div>
-          <CardTitle>Transcript</CardTitle>
+          <CardTitle>{t("home.transcript", "Transcript")}</CardTitle>
         </div>
         <CardAction>
           <Badge variant={dictation?.final ? "default" : "outline"}>
-            {dictation?.final ? "Final" : "Live"}
+            {dictation?.final ? t("home.final", "Final") : t("home.live", "Live")}
           </Badge>
         </CardAction>
       </CardHeader>
@@ -917,8 +1061,8 @@ function TranscriptCard({
               <EmptyMedia variant="icon">
                 <FileTextIcon />
               </EmptyMedia>
-              <EmptyTitle>No text yet</EmptyTitle>
-              <EmptyDescription>Hold the watch button and speak.</EmptyDescription>
+              <EmptyTitle>{t("home.no_text", "No text yet")}</EmptyTitle>
+              <EmptyDescription>{t("home.no_text_description", "Hold the watch button and speak.")}</EmptyDescription>
             </EmptyHeader>
           </Empty>
         )}
@@ -931,10 +1075,12 @@ function RuntimeCard({
   state,
   telemetry,
   className,
+  t,
 }: {
   state: DailyState
   telemetry: RuntimeTelemetry | null
   className?: string
+  t: Translator
 }) {
   const fresh = telemetryFresh(telemetry)
   const level = fresh ? telemetry?.audio.level : 0
@@ -945,31 +1091,33 @@ function RuntimeCard({
     <Card size="sm" className={className}>
       <CardHeader>
         <div>
-          <CardTitle>Runtime</CardTitle>
+          <CardTitle>{t("home.runtime", "Runtime")}</CardTitle>
         </div>
         <CardAction>
           {state.key === "listening" || state.key === "recognizing" ? (
             <Spinner />
           ) : (
-            <Badge variant={fresh ? "outline" : "secondary"}>{fresh ? "Live" : "Idle"}</Badge>
+            <Badge variant={fresh ? "outline" : "secondary"}>
+              {fresh ? t("home.live", "Live") : t("home.idle", "Idle")}
+            </Badge>
           )}
         </CardAction>
       </CardHeader>
       <CardContent className="flex flex-col gap-4">
         <Progress value={progressValue(level)}>
-          <ProgressLabel>Audio level</ProgressLabel>
+          <ProgressLabel>{t("home.audio_level", "Audio level")}</ProgressLabel>
           <ProgressValue>{() => percent(level)}</ProgressValue>
         </Progress>
         <Progress value={progressValue(peak)}>
-          <ProgressLabel>Peak</ProgressLabel>
+          <ProgressLabel>{t("home.peak", "Peak")}</ProgressLabel>
           <ProgressValue>{() => percent(peak)}</ProgressValue>
         </Progress>
       </CardContent>
       <CardFooter>
         <p className="text-sm text-muted-foreground">
-          Stage {telemetry?.stage ?? "unknown"} · Audio {seconds.toFixed(1)}s · Age{" "}
-          {telemetry?.age_seconds == null ? "unknown" : `${telemetry.age_seconds.toFixed(1)}s`}
-          {telemetry?.stale ? " / stale" : ""}
+          {t("home.stage", "Stage")} {telemetry?.stage ?? t("common.unknown", "unknown")} · {t("home.audio", "Audio")} {seconds.toFixed(1)}s · {t("home.age", "Age")}{" "}
+          {telemetry?.age_seconds == null ? t("common.unknown", "unknown") : `${telemetry.age_seconds.toFixed(1)}s`}
+          {telemetry?.stale ? ` / ${t("home.stale", "stale")}` : ""}
         </p>
       </CardFooter>
     </Card>
@@ -979,19 +1127,21 @@ function RuntimeCard({
 function ModelCard({
   model,
   onOpenSettings,
+  t,
 }: {
   model: StatusPayload["model"] | null
   onOpenSettings: () => void
+  t: Translator
 }) {
   return (
     <Card size="sm" className="shrink-0">
       <CardHeader>
         <div>
-          <CardTitle>Model</CardTitle>
-          <CardDescription>{model?.message ?? "Model status is loading."}</CardDescription>
+          <CardTitle>{t("home.model", "Model")}</CardTitle>
+          <CardDescription>{model?.message ?? t("home.model_loading", "Model status is loading.")}</CardDescription>
         </div>
         <CardAction>
-          <Badge variant={modelVariant(model)}>{model?.state ?? "Unknown"}</Badge>
+          <Badge variant={modelVariant(model)}>{model?.state ?? t("common.unknown", "Unknown")}</Badge>
         </CardAction>
       </CardHeader>
       <CardContent>
@@ -999,15 +1149,15 @@ function ModelCard({
           <Table>
             <TableBody>
               <TableRow>
-                <TableCell className="font-medium">Selected</TableCell>
-                <TableCell className="text-muted-foreground">{modelLabel(model.selected)}</TableCell>
+                <TableCell className="font-medium">{t("home.selected", "Selected")}</TableCell>
+                <TableCell className="text-muted-foreground">{modelDisplayLabel(model.selected, t)}</TableCell>
               </TableRow>
               <TableRow>
-                <TableCell className="font-medium">Engine</TableCell>
+                <TableCell className="font-medium">{t("home.engine", "Engine")}</TableCell>
                 <TableCell className="text-muted-foreground">{model.engine}</TableCell>
               </TableRow>
               <TableRow>
-                <TableCell className="font-medium">Storage</TableCell>
+                <TableCell className="font-medium">{t("home.storage", "Storage")}</TableCell>
                 <TableCell className="text-muted-foreground">{formatBytes(model.disk_bytes)}</TableCell>
               </TableRow>
             </TableBody>
@@ -1022,7 +1172,7 @@ function ModelCard({
       <CardFooter>
         <Button variant="outline" onClick={onOpenSettings}>
           <SettingsIcon data-icon="inline-start" />
-          Manage model
+          {t("home.manage_model", "Manage model")}
         </Button>
       </CardFooter>
     </Card>
@@ -1033,23 +1183,25 @@ function PermissionPanel({
   status,
   busyAction,
   requestPermission,
+  t,
 }: {
   status: StatusPayload | null
   busyAction: string | null
   requestPermission: (kind: PermissionKind) => void
+  t: Translator
 }) {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Permissions</CardTitle>
-        <CardDescription>Required for Bluetooth audio and text insertion.</CardDescription>
+        <CardTitle>{t("settings.permissions", "Permissions")}</CardTitle>
+        <CardDescription>{t("settings.permissions_description", "Required for Bluetooth audio and text insertion.")}</CardDescription>
       </CardHeader>
       <CardContent>
         <FieldGroup>
           <Field orientation="horizontal">
             <FieldContent>
-              <FieldTitle>Bluetooth</FieldTitle>
-              <FieldDescription>{status?.permissions.bluetooth.message ?? "Unknown"}</FieldDescription>
+              <FieldTitle>{t("settings.bluetooth", "Bluetooth")}</FieldTitle>
+              <FieldDescription>{status?.permissions.bluetooth.message ?? t("common.unknown", "Unknown")}</FieldDescription>
             </FieldContent>
             <Button
               variant="outline"
@@ -1057,13 +1209,13 @@ function PermissionPanel({
               disabled={busyAction !== null}
             >
               <SpinnerOrIcon busy={busyAction === "permission:bluetooth"} icon={BluetoothIcon} />
-              Request
+              {t("settings.request", "Request")}
             </Button>
           </Field>
           <Field orientation="horizontal">
             <FieldContent>
-              <FieldTitle>Text input</FieldTitle>
-              <FieldDescription>{status?.permissions.input.message ?? "Unknown"}</FieldDescription>
+              <FieldTitle>{t("settings.text_input", "Text input")}</FieldTitle>
+              <FieldDescription>{status?.permissions.input.message ?? t("common.unknown", "Unknown")}</FieldDescription>
             </FieldContent>
             <Button
               variant="outline"
@@ -1071,7 +1223,7 @@ function PermissionPanel({
               disabled={busyAction !== null}
             >
               <SpinnerOrIcon busy={busyAction === "permission:input"} icon={KeyboardIcon} />
-              Request
+              {t("settings.request", "Request")}
             </Button>
           </Field>
         </FieldGroup>
@@ -1093,10 +1245,16 @@ function MappingSelectField({
   disabled: boolean
   onChange: (value: number) => void
 }) {
+  const items = useMemo(
+    () => options.map((option) => ({ label: option.label, value: String(option.value) })),
+    [options]
+  )
+
   return (
     <Field>
       <FieldLabel>{label}</FieldLabel>
       <Select
+        items={items}
         value={mappingOptionValue(value)}
         onValueChange={(nextValue) => {
           if (nextValue == null) {
@@ -1128,28 +1286,30 @@ function MappingParameterEditor({
   envelope,
   disabled,
   onChange,
+  t,
 }: {
   entry: MappingEntry
   envelope: MappingEnvelope
   disabled: boolean
   onChange: (entry: MappingEntry) => void
+  t: Translator
 }) {
   if (entry.locked) {
-    return <p className="text-sm text-muted-foreground">Fixed safety shortcut.</p>
+    return <p className="text-sm text-muted-foreground">{t("mapping.fixed_safety", "Fixed safety shortcut.")}</p>
   }
 
   if (entry.action === "hid.keyboard.tap") {
     return (
       <FieldGroup className="grid gap-2 sm:grid-cols-2">
         <MappingSelectField
-          label="Key"
+          label={t("mapping.key", "Key")}
           value={entry.param0}
           options={envelope.keyOptions}
           disabled={disabled}
           onChange={(value) => onChange({ ...entry, param0: value })}
         />
         <MappingSelectField
-          label="Modifier"
+          label={t("mapping.modifier", "Modifier")}
           value={entry.param1}
           options={envelope.modifierOptions}
           disabled={disabled}
@@ -1163,14 +1323,14 @@ function MappingParameterEditor({
     return (
       <FieldGroup className="grid gap-2 sm:grid-cols-2">
         <MappingSelectField
-          label="Speed"
+          label={t("mapping.speed", "Speed")}
           value={entry.param0}
           options={WHEEL_MULTIPLIER_OPTIONS}
           disabled={disabled}
           onChange={(value) => onChange({ ...entry, param0: value })}
         />
         <MappingSelectField
-          label="Direction"
+          label={t("mapping.direction", "Direction")}
           value={entry.param1}
           options={WHEEL_DIRECTION_OPTIONS}
           disabled={disabled}
@@ -1183,7 +1343,7 @@ function MappingParameterEditor({
   if (entry.action === "hid.mouse.click") {
     return (
       <MappingSelectField
-        label="Button"
+        label={t("mapping.button", "Button")}
         value={entry.param0}
         options={envelope.mouseButtons}
         disabled={disabled}
@@ -1195,7 +1355,7 @@ function MappingParameterEditor({
   if (entry.action === "hid.media.control") {
     return (
       <MappingSelectField
-        label="Media key"
+        label={t("mapping.media_key", "Media key")}
         value={entry.param2}
         options={envelope.mediaControls}
         disabled={disabled}
@@ -1204,7 +1364,7 @@ function MappingParameterEditor({
     )
   }
 
-  return <p className="text-sm text-muted-foreground">No parameters.</p>
+  return <p className="text-sm text-muted-foreground">{t("mapping.no_parameters", "No parameters.")}</p>
 }
 
 function MappingPage({
@@ -1217,6 +1377,7 @@ function MappingPage({
   onSave,
   onReset,
   onChange,
+  t,
 }: {
   envelope: MappingEnvelope | null
   entries: MappingEntry[]
@@ -1227,20 +1388,58 @@ function MappingPage({
   onSave: () => void
   onReset: () => void
   onChange: (entry: MappingEntry) => void
+  t: Translator
 }) {
+  const [mapView, setMapView] = useState<"common" | "all">("common")
+  const [editingEventId, setEditingEventId] = useState<string | null>(null)
   const entriesByEvent = useMemo(
     () => new Map(entries.map((entry) => [entry.event, entry])),
     [entries]
   )
   const disabled = busyAction !== null || refreshing
+  const actionItems = useMemo(
+    () =>
+      envelope?.actions.map((action) => ({
+        label: mappingActionLabel(action.id, action.label, t),
+        value: action.id,
+      })) ?? [],
+    [envelope, t]
+  )
+  const rows = useMemo(() => {
+    if (!envelope) {
+      return []
+    }
+    return envelope.events.map((event) => {
+      const entry = entriesByEvent.get(event.id) ?? blankMappingEntry(event.id, Boolean(event.locked))
+      const locked = Boolean(event.locked || entry.locked)
+      const normalizedEntry = { ...entry, locked }
+      const action = envelope.actions.find((item) => item.id === normalizedEntry.action)
+      return {
+        event,
+        entry: normalizedEntry,
+        locked,
+        eventLabel: mappingEventLabel(event.id, event.label, t),
+        actionLabel: mappingActionLabel(normalizedEntry.action, action?.label, t),
+        summary: mappingActionSummary(normalizedEntry, envelope, t),
+      }
+    })
+  }, [entriesByEvent, envelope, t])
+  const visibleRows = useMemo(
+    () => (mapView === "common" ? rows.filter((row) => mappingIsCommon(row.event.id, row.entry)) : rows),
+    [mapView, rows]
+  )
+  const selectedRow = useMemo(
+    () => rows.find((row) => row.event.id === editingEventId) ?? null,
+    [editingEventId, rows]
+  )
 
   if (!envelope) {
     return (
       <section className="min-h-0 flex-1">
         <Card className="min-h-0">
           <CardHeader>
-            <CardTitle>Event map</CardTitle>
-            <CardDescription>Loading watch event configuration.</CardDescription>
+            <CardTitle>{t("mapping.title", "Event map")}</CardTitle>
+            <CardDescription>{t("mapping.loading_description", "Loading watch event configuration.")}</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             <Skeleton className="h-10 w-full" />
@@ -1254,107 +1453,176 @@ function MappingPage({
 
   const updatedAt = envelope.mapping.updated_at
     ? formatUnixTime(envelope.mapping.updated_at)
-    : "defaults"
+    : t("mapping.defaults", "defaults")
 
   return (
     <section className="min-h-0 flex-1">
       <Card className="min-h-0 md:flex md:h-full md:flex-col">
         <CardHeader className="shrink-0">
           <div>
-            <CardTitle>Event map</CardTitle>
-            <CardDescription>Map watch gestures to keyboard, mouse, voice, and device actions.</CardDescription>
+            <CardTitle>{t("mapping.title", "Event map")}</CardTitle>
+            <CardDescription>{t("mapping.description", "Choose common watch gestures first. Open an event for details.")}</CardDescription>
           </div>
           <CardAction>
             <ButtonGroup className="flex-wrap">
               <Button variant="outline" onClick={onRefresh} disabled={disabled}>
                 <SpinnerOrIcon busy={refreshing} icon={RefreshCwIcon} />
-                Refresh
+                {t("common.refresh", "Refresh")}
               </Button>
               <Button variant="outline" onClick={onReset} disabled={disabled}>
                 <SpinnerOrIcon busy={busyAction === "mapping:reset"} icon={Undo2Icon} />
-                Reset
+                {t("common.reset", "Reset")}
               </Button>
               <Button onClick={onSave} disabled={disabled || !touched}>
                 <SpinnerOrIcon busy={busyAction === "mapping:save"} icon={SaveIcon} />
-                Save
+                {t("common.save", "Save")}
               </Button>
             </ButtonGroup>
           </CardAction>
         </CardHeader>
         <CardContent className="min-h-0 md:flex-1">
-          <ScrollArea className="h-[calc(100vh-17rem)] rounded-md border md:h-full">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="w-48">Event</TableHead>
-                  <TableHead className="w-64">Action</TableHead>
-                  <TableHead>Parameters</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {envelope.events.map((event) => {
-                  const locked = Boolean(event.locked)
-                  const entry = entriesByEvent.get(event.id) ?? blankMappingEntry(event.id, locked)
-                  const action = envelope.actions.find((item) => item.id === entry.action)
-                  return (
-                    <TableRow key={event.id}>
-                      <TableCell className="align-top">
-                        <div className="flex flex-col gap-2">
-                          <span className="font-medium">{event.label}</span>
-                          {locked && <Badge variant="outline">Locked</Badge>}
-                        </div>
-                      </TableCell>
-                      <TableCell className="align-top">
-                        <Select
-                          value={entry.action}
-                          onValueChange={(value) => {
-                            if (value == null) {
-                              return
-                            }
-                            onChange(withMappingAction({ ...entry, locked }, value))
-                          }}
-                          disabled={disabled || locked}
-                        >
-                          <SelectTrigger className="w-full">
-                            <SelectValue placeholder="Action" />
-                          </SelectTrigger>
-                          <SelectContent alignItemWithTrigger={false}>
-                            <SelectGroup>
-                              <SelectLabel>Actions</SelectLabel>
-                              {envelope.actions.map((item) => (
-                                <SelectItem key={item.id} value={item.id}>
-                                  {item.label}
-                                </SelectItem>
-                              ))}
-                            </SelectGroup>
-                          </SelectContent>
-                        </Select>
-                        <p className="mt-2 text-xs text-muted-foreground">
-                          {action?.id ?? entry.action}
-                        </p>
-                      </TableCell>
-                      <TableCell className="align-top">
-                        <MappingParameterEditor
-                          entry={{ ...entry, locked }}
-                          envelope={envelope}
-                          disabled={disabled}
-                          onChange={(nextEntry) => onChange(nextEntry)}
-                        />
-                      </TableCell>
-                    </TableRow>
-                  )
-                })}
-              </TableBody>
-            </Table>
-          </ScrollArea>
+          <Tabs
+            value={mapView}
+            onValueChange={(value) => setMapView(value as "common" | "all")}
+            className="flex min-h-0 flex-col gap-3 md:h-full"
+          >
+            <TabsList>
+              <TabsTrigger value="common">{t("mapping.common", "Common")}</TabsTrigger>
+              <TabsTrigger value="all">{t("mapping.all_events", "All events")}</TabsTrigger>
+            </TabsList>
+
+            {(["common", "all"] as const).map((view) => (
+              <TabsContent key={view} value={view} className="min-h-0 md:flex-1">
+                {visibleRows.length ? (
+                  <ScrollArea className="h-[calc(100vh-21rem)] rounded-md border md:h-full">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-[32%]">{t("mapping.event", "Event")}</TableHead>
+                          <TableHead>{t("mapping.result", "Result")}</TableHead>
+                          <TableHead className="w-32 text-right">{t("mapping.action", "Action")}</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {visibleRows.map((row) => (
+                          <TableRow key={row.event.id}>
+                            <TableCell className="align-middle">
+                              <div className="flex min-w-0 items-center gap-2">
+                                <span className="truncate font-medium">{row.eventLabel}</span>
+                                {row.locked && <Badge variant="outline">{t("common.locked", "Locked")}</Badge>}
+                              </div>
+                            </TableCell>
+                            <TableCell className="align-middle">
+                              <div className="flex min-w-0 flex-col gap-1">
+                                <span className="truncate">{row.actionLabel}</span>
+                                <span className="truncate text-sm text-muted-foreground">{row.summary}</span>
+                              </div>
+                            </TableCell>
+                            <TableCell className="align-middle text-right">
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                onClick={() => setEditingEventId(row.event.id)}
+                              >
+                                <SettingsIcon data-icon="inline-start" />
+                                {t("mapping.open_editor", "Open editor")}
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </ScrollArea>
+                ) : (
+                  <Empty className="rounded-md border">
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon">
+                        <MapIcon />
+                      </EmptyMedia>
+                      <EmptyTitle>{t("mapping.empty_title", "No common mappings")}</EmptyTitle>
+                      <EmptyDescription>{t("mapping.empty_description", "Open All events to configure a watch gesture.")}</EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
+                )}
+              </TabsContent>
+            ))}
+          </Tabs>
         </CardContent>
         <CardFooter className="shrink-0 justify-between text-sm text-muted-foreground">
           <span>
-            Revision {envelope.mapping.revision} · Updated {updatedAt}
+            {t("mapping.revision", "Revision")} {envelope.mapping.revision} · {t("mapping.updated", "Updated")} {updatedAt}
           </span>
-          <span>{touched ? "Unsaved changes" : "Saved changes sync to the watch while connected"}</span>
+          <span>{touched ? t("mapping.unsaved_hint", "Unsaved changes") : t("mapping.saved_hint", "Saved changes sync to the watch while connected")}</span>
         </CardFooter>
       </Card>
+
+      <Sheet open={Boolean(selectedRow)} onOpenChange={(open) => !open && setEditingEventId(null)}>
+        <SheetContent className="w-[min(520px,calc(100vw-2rem))] sm:max-w-lg">
+          <SheetHeader>
+            <SheetTitle>{selectedRow?.eventLabel ?? t("mapping.edit_title", "Edit event")}</SheetTitle>
+            <SheetDescription>{t("mapping.edit_description", "Choose what this watch event does on this computer.")}</SheetDescription>
+          </SheetHeader>
+
+          {selectedRow && (
+            <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
+              <FieldGroup>
+                <Field orientation="horizontal">
+                  <FieldContent>
+                    <FieldTitle>{t("mapping.event", "Event")}</FieldTitle>
+                    <FieldDescription>{selectedRow.eventLabel}</FieldDescription>
+                  </FieldContent>
+                  {selectedRow.locked && <Badge variant="outline">{t("common.locked", "Locked")}</Badge>}
+                </Field>
+                <Field data-disabled={selectedRow.locked || disabled ? true : undefined}>
+                  <FieldLabel>{t("mapping.action", "Action")}</FieldLabel>
+                  <Select
+                    items={actionItems}
+                    value={selectedRow.entry.action}
+                    onValueChange={(value) => {
+                      if (value == null) {
+                        return
+                      }
+                      onChange(withMappingAction(selectedRow.entry, value))
+                    }}
+                    disabled={selectedRow.locked || disabled}
+                  >
+                    <SelectTrigger className="w-full">
+                      <SelectValue placeholder={t("mapping.action", "Action")} />
+                    </SelectTrigger>
+                    <SelectContent alignItemWithTrigger={false}>
+                      <SelectGroup>
+                        <SelectLabel>{t("mapping.actions", "Actions")}</SelectLabel>
+                        {actionItems.map((item) => (
+                          <SelectItem key={item.value} value={item.value}>
+                            {item.label}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                  <FieldDescription>{selectedRow.summary}</FieldDescription>
+                </Field>
+                <Field>
+                  <FieldTitle>{t("mapping.parameters", "Parameters")}</FieldTitle>
+                  <MappingParameterEditor
+                    entry={selectedRow.entry}
+                    envelope={envelope}
+                    disabled={disabled || selectedRow.locked}
+                    onChange={(nextEntry) => onChange(nextEntry)}
+                    t={t}
+                  />
+                </Field>
+              </FieldGroup>
+            </div>
+          )}
+
+          <SheetFooter>
+            <Button variant="outline" onClick={() => setEditingEventId(null)}>
+              {t("common.done", "Done")}
+            </Button>
+          </SheetFooter>
+        </SheetContent>
+      </Sheet>
     </section>
   )
 }
@@ -1376,6 +1644,7 @@ function App() {
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [autoFollowLogs, setAutoFollowLogs] = useState(true)
   const [page, setPage] = useState<PageKey>("home")
+  const [language, setLanguage] = useState<LanguageCode>(() => detectInitialLanguage())
   const [mappingEnvelope, setMappingEnvelope] = useState<MappingEnvelope | null>(null)
   const [mappingEntries, setMappingEntries] = useState<MappingEntry[]>([])
   const [mappingTouched, setMappingTouched] = useState(false)
@@ -1395,40 +1664,44 @@ function App() {
   const controlsDisabled = busyAction !== null
   const activeModel = selectedModel || currentModel?.selected || "small"
   const isCurrentModel = activeModel === currentModel?.selected
+  const t = useMemo(() => createTranslator(language), [language])
+  const languageItems = useMemo(
+    () => LANGUAGE_OPTIONS.map((option) => ({ label: option.label, value: option.value })),
+    []
+  )
 
   const logEntries = useMemo(
     () => logsEnvelope?.logs.entries.map(structuredLogEntry) ?? [],
     [logsEnvelope]
   )
 
-  const dailyState = useMemo(
+  const rawDailyState = useMemo(
     () => deriveDailyState(status, logEntries, telemetry),
     [status, logEntries, telemetry]
   )
+  const dailyState = useMemo(() => localizedDailyState(rawDailyState, t), [rawDailyState, t])
 
   const dictation = useMemo(() => latestDictation(logEntries, telemetry), [logEntries, telemetry])
   const activity = useMemo(() => recentActivity(logEntries), [logEntries])
 
   const modelItems = useMemo(() => {
     const items: Array<{ label: string; value: string }> = MODEL_OPTIONS.map((model) => ({
-      label: model.label,
+      label: modelDisplayLabel(model.value, t),
       value: model.value,
     }))
     const known = new Set<string>(MODEL_IDS)
     for (const value of [currentModel?.selected, selectedModel]) {
       if (value && !known.has(value)) {
         known.add(value)
-        items.push({ label: value, value })
+        items.push({ label: modelDisplayLabel(value, t), value })
       }
     }
     return items
-  }, [currentModel?.selected, selectedModel])
+  }, [currentModel?.selected, selectedModel, t])
 
   const selectedModelDetail = useMemo(
-    () =>
-      MODEL_OPTIONS.find((model) => model.value === activeModel)?.detail ??
-      "Custom model selected by the helper.",
-    [activeModel]
+    () => modelDetail(activeModel, t),
+    [activeModel, t]
   )
 
   const applySnapshots = useCallback(
@@ -1463,13 +1736,13 @@ function App() {
       setNotice({ level, message })
       if (toastType) {
         toast.add({
-          title: level === "error" ? "Action failed" : "M5StopWatch",
+          title: level === "error" ? t("notice.action_failed", "Action failed") : "M5StopWatch",
           description: message,
           type: toastType,
         })
       }
     },
-    []
+    [t]
   )
 
   const refreshMappings = useCallback(
@@ -1594,6 +1867,10 @@ function App() {
       setSelectedModel(current)
     }
   }, [currentModel?.selected, modelSelectionTouched])
+
+  useEffect(() => {
+    persistLanguage(language)
+  }, [language])
 
   useEffect(() => {
     if (!autoFollowLogs || !diagnosticsOpen) {
@@ -1861,12 +2138,12 @@ function App() {
   }, [dailyState.action, requestPermission, runModelAction, runServiceAction])
 
   const primaryActionLabel: Record<NonNullable<DailyState["action"]>, string> = {
-    start: "Start voice",
-    retry: "Retry link",
-    "install-model": "Install model",
-    "request-bluetooth": "Allow Bluetooth",
-    "request-input": "Allow text input",
-    diagnostics: "Open diagnostics",
+    start: t("action.start_voice", "Start voice"),
+    retry: t("action.retry_link", "Retry link"),
+    "install-model": t("action.install_model", "Install model"),
+    "request-bluetooth": t("action.allow_bluetooth", "Allow Bluetooth"),
+    "request-input": t("action.allow_text_input", "Allow text input"),
+    diagnostics: t("action.open_diagnostics", "Open diagnostics"),
   }
 
   return (
@@ -1876,8 +2153,8 @@ function App() {
           <div className="flex items-start gap-3">
             <div className="flex size-10 items-center justify-center rounded-lg border font-semibold">M5</div>
             <div>
-              <p className="text-sm text-muted-foreground">M5StopWatch</p>
-              <h1 className="text-2xl font-semibold tracking-tight">Speech Control</h1>
+              <p className="text-sm text-muted-foreground">{t("app.name", "M5StopWatch")}</p>
+              <h1 className="text-2xl font-semibold tracking-tight">{t("app.title", "Speech Control")}</h1>
             </div>
             <StatusBadge state={dailyState} />
           </div>
@@ -1886,11 +2163,11 @@ function App() {
               <TabsList>
                 <TabsTrigger value="home">
                   <HomeIcon data-icon="inline-start" />
-                  Home
+                  {t("nav.home", "Home")}
                 </TabsTrigger>
                 <TabsTrigger value="map">
                   <MapIcon data-icon="inline-start" />
-                  Map
+                  {t("nav.map", "Map")}
                 </TabsTrigger>
               </TabsList>
             </Tabs>
@@ -1900,15 +2177,15 @@ function App() {
               disabled={busyAction !== null || refreshing}
             >
               <SpinnerOrIcon busy={busyAction === null && refreshing} icon={RefreshCwIcon} />
-              Refresh
+              {t("common.refresh", "Refresh")}
             </Button>
             <Button variant="outline" onClick={() => setSettingsOpen(true)}>
               <SettingsIcon data-icon="inline-start" />
-              Settings
+              {t("common.settings", "Settings")}
             </Button>
             <Button variant="outline" onClick={() => setDiagnosticsOpen(true)}>
               <BugIcon data-icon="inline-start" />
-              Diagnostics
+              {t("common.diagnostics", "Diagnostics")}
             </Button>
           </div>
         </header>
@@ -1916,7 +2193,7 @@ function App() {
         {notice && (
           <Alert className="shrink-0" variant={notice.level === "error" ? "destructive" : "default"}>
             {notice.level === "error" ? <AlertCircleIcon /> : <CheckCircle2Icon />}
-            <AlertTitle>{notice.level === "error" ? "Needs attention" : "Notice"}</AlertTitle>
+            <AlertTitle>{notice.level === "error" ? t("notice.needs_attention", "Needs attention") : t("notice.notice", "Notice")}</AlertTitle>
             <AlertDescription>{notice.message}</AlertDescription>
           </Alert>
         )}
@@ -1931,13 +2208,14 @@ function App() {
                 busyAction={busyAction}
                 onAction={handleDailyAction}
                 primaryActionLabel={primaryActionLabel}
+                t={t}
               />
-              <TranscriptCard dictation={dictation} className="md:flex-1" />
+              <TranscriptCard dictation={dictation} className="md:flex-1" t={t} />
             </div>
 
             <div className="flex min-w-0 flex-col gap-3 md:min-h-0">
-              <ModelCard model={currentModel} onOpenSettings={() => setSettingsOpen(true)} />
-              <RuntimeCard state={dailyState} telemetry={telemetry} className="md:min-h-0 md:flex-1" />
+              <ModelCard model={currentModel} onOpenSettings={() => setSettingsOpen(true)} t={t} />
+              <RuntimeCard state={dailyState} telemetry={telemetry} className="md:min-h-0 md:flex-1" t={t} />
             </div>
           </section>
         ) : (
@@ -1951,6 +2229,7 @@ function App() {
             onSave={() => void saveEventMappings()}
             onReset={() => void resetEventMappings()}
             onChange={updateMappingEntry}
+            t={t}
           />
         )}
       </main>
@@ -1958,20 +2237,60 @@ function App() {
       <Sheet open={settingsOpen} onOpenChange={setSettingsOpen}>
         <SheetContent className="w-[min(760px,calc(100vw-2rem))] sm:max-w-2xl">
           <SheetHeader>
-            <SheetTitle>Settings</SheetTitle>
-            <SheetDescription>Model, permissions, and voice service controls.</SheetDescription>
+            <SheetTitle>{t("settings.title", "Settings")}</SheetTitle>
+            <SheetDescription>{t("settings.description", "Model, permissions, and voice service controls.")}</SheetDescription>
           </SheetHeader>
 
           <div className="flex flex-col gap-4 overflow-y-auto px-4 py-4">
             <Card>
               <CardHeader>
-                <CardTitle>Speech model</CardTitle>
+                <CardTitle>{t("settings.general", "General")}</CardTitle>
+                <CardDescription>{t("settings.general_description", "App preferences for this computer.")}</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <FieldGroup>
+                  <Field orientation="horizontal">
+                    <FieldContent>
+                      <FieldTitle>{t("settings.language", "Language")}</FieldTitle>
+                      <FieldDescription>{t("settings.language_description", "Changes apply immediately.")}</FieldDescription>
+                    </FieldContent>
+                    <Select
+                      items={languageItems}
+                      value={language}
+                      onValueChange={(value) => {
+                        if (value == null) {
+                          return
+                        }
+                        setLanguage(value as LanguageCode)
+                      }}
+                    >
+                      <SelectTrigger className="w-40">
+                        <SelectValue placeholder={t("settings.language", "Language")} />
+                      </SelectTrigger>
+                      <SelectContent alignItemWithTrigger={false}>
+                        <SelectGroup>
+                          {languageItems.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>
+                              {item.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                </FieldGroup>
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle>{t("settings.speech_model", "Speech model")}</CardTitle>
                 <CardDescription>{selectedModelDetail}</CardDescription>
               </CardHeader>
               <CardContent>
                 <FieldGroup>
                   <Field>
-                    <FieldLabel>Model</FieldLabel>
+                    <FieldLabel>{t("settings.model", "Model")}</FieldLabel>
                     <Select
                       items={modelItems}
                       value={activeModel}
@@ -1984,11 +2303,11 @@ function App() {
                       }}
                     >
                       <SelectTrigger className="w-full">
-                        <SelectValue placeholder="Select model" />
+                        <SelectValue placeholder={t("settings.select_model", "Select model")} />
                       </SelectTrigger>
                       <SelectContent alignItemWithTrigger={false}>
                         <SelectGroup>
-                          <SelectLabel>Available models</SelectLabel>
+                          <SelectLabel>{t("settings.available_models", "Available models")}</SelectLabel>
                           {modelItems.map((item) => (
                             <SelectItem key={item.value} value={item.value}>
                               {item.label}
@@ -1998,12 +2317,12 @@ function App() {
                       </SelectContent>
                     </Select>
                     <FieldDescription>
-                      Current: {modelLabel(currentModel?.selected)} / {currentModel?.message ?? "Unknown"}
+                      {t("settings.current_model", "Current")}: {modelDisplayLabel(currentModel?.selected, t)} / {currentModel?.message ?? t("common.unknown", "Unknown")}
                     </FieldDescription>
                   </Field>
                   <Field orientation="horizontal">
                     <FieldContent>
-                      <FieldTitle>Storage</FieldTitle>
+                      <FieldTitle>{t("home.storage", "Storage")}</FieldTitle>
                       <FieldDescription>{formatBytes(currentModel?.disk_bytes ?? 0)}</FieldDescription>
                     </FieldContent>
                     <Badge variant={readinessVariant(Boolean(currentModel?.installed))}>
@@ -2012,13 +2331,13 @@ function App() {
                   </Field>
                   <Field orientation="horizontal">
                     <FieldContent>
-                      <FieldTitle>Update</FieldTitle>
+                      <FieldTitle>{t("settings.update", "Update")}</FieldTitle>
                       <FieldDescription>
-                        {currentModel?.update_available ? "An update is available." : "No update is available."}
+                        {currentModel?.update_available ? t("settings.update_available", "An update is available.") : t("settings.no_update", "No update is available.")}
                       </FieldDescription>
                     </FieldContent>
                     <Badge variant={currentModel?.update_available ? "secondary" : "outline"}>
-                      {currentModel?.update_available ? "Available" : "Current"}
+                      {currentModel?.update_available ? t("settings.available", "Available") : t("settings.current", "Current")}
                     </Badge>
                   </Field>
                 </FieldGroup>
@@ -2026,23 +2345,23 @@ function App() {
               <CardFooter className="flex flex-wrap gap-2">
                 <Button onClick={() => void runModelAction("use")} disabled={useModelDisabled}>
                   <SpinnerOrIcon busy={busyAction === "model:use"} icon={CheckCircle2Icon} />
-                  Use
+                  {t("settings.use", "Use")}
                 </Button>
                 <Button variant="outline" onClick={() => void runModelAction("install")} disabled={installModelDisabled}>
                   <SpinnerOrIcon busy={busyAction === "model:install"} icon={DownloadIcon} />
-                  Install
+                  {t("settings.install", "Install")}
                 </Button>
                 <Button variant="outline" onClick={() => void runModelAction("update")} disabled={updateModelDisabled}>
                   <SpinnerOrIcon busy={busyAction === "model:update"} icon={RefreshCwIcon} />
-                  Update
+                  {t("settings.update", "Update")}
                 </Button>
                 <Button variant="outline" onClick={() => void runModelAction("repair")} disabled={repairModelDisabled}>
                   <SpinnerOrIcon busy={busyAction === "model:repair"} icon={WrenchIcon} />
-                  Repair
+                  {t("settings.repair", "Repair")}
                 </Button>
                 <Button variant="destructive" onClick={() => setDeleteOpen(true)} disabled={deleteModelDisabled}>
                   <Trash2Icon data-icon="inline-start" />
-                  Delete
+                  {t("settings.delete", "Delete")}
                 </Button>
               </CardFooter>
             </Card>
@@ -2051,32 +2370,33 @@ function App() {
               status={status}
               busyAction={busyAction}
               requestPermission={(kind) => void requestPermission(kind)}
+              t={t}
             />
 
             <Card>
               <CardHeader>
-                <CardTitle>Voice service</CardTitle>
-                <CardDescription>Advanced controls for the background process.</CardDescription>
+                <CardTitle>{t("settings.voice_service", "Voice service")}</CardTitle>
+                <CardDescription>{t("settings.voice_service_description", "Advanced controls for the background process.")}</CardDescription>
               </CardHeader>
               <CardContent>
                 <FieldGroup>
                   <Field orientation="horizontal">
                     <FieldContent>
-                      <FieldTitle>Login service</FieldTitle>
+                      <FieldTitle>{t("settings.login_service", "Login service")}</FieldTitle>
                       <FieldDescription>
-                        {status?.service.installed ? "installed" : "not installed"} /{" "}
-                        {status?.service.running ? "running" : "stopped"}
+                        {status?.service.installed ? t("settings.installed", "installed") : t("settings.not_installed", "not installed")} /{" "}
+                        {status?.service.running ? t("settings.running", "running") : t("settings.stopped", "stopped")}
                       </FieldDescription>
                     </FieldContent>
                     <Badge variant={readinessVariant(Boolean(status?.service.running))}>
-                      {status?.service.running ? "Running" : "Stopped"}
+                      {status?.service.running ? t("settings.running_badge", "Running") : t("settings.stopped_badge", "Stopped")}
                     </Badge>
                   </Field>
                   {serviceModelBlocked && (
                     <Alert>
                       <AlertCircleIcon />
-                      <AlertTitle>Model required</AlertTitle>
-                      <AlertDescription>Install a model before starting the voice service.</AlertDescription>
+                      <AlertTitle>{t("settings.model_required", "Model required")}</AlertTitle>
+                      <AlertDescription>{t("settings.model_required_description", "Install a model before starting the voice service.")}</AlertDescription>
                     </Alert>
                   )}
                 </FieldGroup>
@@ -2085,19 +2405,19 @@ function App() {
                 <ButtonGroup className="flex-wrap">
                   <Button variant="outline" onClick={() => void runServiceAction("install")} disabled={controlsDisabled}>
                     <SpinnerOrIcon busy={busyAction === "service:install"} icon={DownloadIcon} />
-                    Install
+                    {t("settings.install", "Install")}
                   </Button>
                   <Button onClick={() => void runServiceAction("start")} disabled={controlsDisabled || serviceModelBlocked}>
                     <SpinnerOrIcon busy={busyAction === "service:start"} icon={PlayIcon} />
-                    Start
+                    {t("settings.start", "Start")}
                   </Button>
                   <Button variant="outline" onClick={() => void runServiceAction("stop")} disabled={controlsDisabled}>
                     <SpinnerOrIcon busy={busyAction === "service:stop"} icon={SquareIcon} />
-                    Stop
+                    {t("settings.stop", "Stop")}
                   </Button>
                   <Button variant="outline" onClick={() => void runServiceAction("restart")} disabled={controlsDisabled || serviceModelBlocked}>
                     <SpinnerOrIcon busy={busyAction === "service:restart"} icon={RotateCcwIcon} />
-                    Restart
+                    {t("settings.restart", "Restart")}
                   </Button>
                 </ButtonGroup>
               </CardFooter>
@@ -2205,7 +2525,7 @@ function App() {
             <TabsContent value="runtime" className="min-h-0">
               <ScrollArea className="h-[calc(100vh-9rem)] pr-3">
                 <div className="flex flex-col gap-4 py-4">
-                  <RuntimeCard state={dailyState} telemetry={telemetry} />
+                  <RuntimeCard state={dailyState} telemetry={telemetry} t={t} />
                   <Card>
                     <CardHeader>
                       <CardTitle>Runtime telemetry</CardTitle>
