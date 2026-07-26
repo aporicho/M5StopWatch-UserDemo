@@ -34,8 +34,18 @@ void Hal::button_init()
 
 void Hal::updateButtonStates(bool feedback)
 {
-    btnA.setRawState(millis(), !gpio_get_level(USER_BUTTONA_PIN));
-    btnB.setRawState(millis(), !gpio_get_level(USER_BUTTONB_PIN));
+    bool btn_a_pressed = !gpio_get_level(USER_BUTTONA_PIN);
+    bool btn_b_pressed = !gpio_get_level(USER_BUTTONB_PIN);
+#ifdef CONFIG_M5_TEST_CONTROL
+    if (_synthetic_btn_a_enabled.load()) {
+        btn_a_pressed = _synthetic_btn_a_pressed.load();
+    }
+    if (_synthetic_btn_b_enabled.load()) {
+        btn_b_pressed = _synthetic_btn_b_pressed.load();
+    }
+#endif
+    btnA.setRawState(millis(), btn_a_pressed);
+    btnB.setRawState(millis(), btn_b_pressed);
     // btnPwr.setRawState(millis(), pmic_get_pwr_btn_state());
 
     auto& config = getButtonConfig();
@@ -78,3 +88,40 @@ const Hal::ButtonConfig& Hal::getButtonConfig(bool loadFromSettings)
     }
     return _btn_config;
 }
+
+#ifdef CONFIG_M5_TEST_CONTROL
+void Hal::setSyntheticButtonState(bool leftButton, bool pressed)
+{
+    if (leftButton) {
+        _synthetic_btn_a_pressed = pressed;
+        _synthetic_btn_a_enabled = true;
+    } else {
+        _synthetic_btn_b_pressed = pressed;
+        _synthetic_btn_b_enabled = true;
+    }
+}
+
+void Hal::setSyntheticTouchState(bool pressed, int x, int y)
+{
+    if (x >= 0) {
+        _synthetic_touch_x = x;
+    }
+    if (y >= 0) {
+        _synthetic_touch_y = y;
+    }
+    _synthetic_touch_pressed = pressed;
+    _synthetic_touch_enabled = true;
+}
+
+void Hal::clearSyntheticInput()
+{
+    _synthetic_btn_a_enabled = false;
+    _synthetic_btn_b_enabled = false;
+    _synthetic_btn_a_pressed = false;
+    _synthetic_btn_b_pressed = false;
+    _synthetic_touch_enabled = false;
+    _synthetic_touch_pressed = false;
+    _synthetic_touch_x       = -1;
+    _synthetic_touch_y       = -1;
+}
+#endif

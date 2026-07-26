@@ -13,13 +13,16 @@ from typing import Any, Awaitable, Callable, Sequence
 from .agreement import common_prefix
 from .config import UserConfig
 from .diagnostics import runtime_logging
+from .mapping import encode_mapping, parse_user_event_packet, read_mapping
 from .models import DEFAULT_ENGINE, DEFAULT_MODEL, model_status, record_model_ready, runtime_model_name
 from .platforms import PlatformAdapter, create_platform
 from .protocol import (
     AUDIO_UUID,
     HOST_STATUS_UUID,
+    MAPPING_CONFIG_UUID,
     SERVICE_UUID,
     STATUS_UUID,
+    USER_EVENT_UUID,
     AudioFrame,
     HostStatus,
     HostStatusPacket,
@@ -34,6 +37,7 @@ from .types import Recognizer, TextInjector, TranscriptSegment
 # Compatibility name for code that imported the old recognizer directly.
 LocalRecognizer = FasterWhisperRecognizer
 LOGGER = logging.getLogger("ble_stt.runtime")
+MAPPING_SYNC_INTERVAL = 2.0
 
 
 @dataclass
@@ -508,6 +512,25 @@ def _is_pairing_removed_error(exc: Exception) -> bool:
     return "peer removed pairing information" in message or "cberrordomain code=14" in message
 
 
+async def _mapping_sync_loop(client: Any, characteristic: Any) -> None:
+    last_revision: int | None = None
+    while client.is_connected:
+        try:
+            mapping = read_mapping(UserConfig())
+            revision = int(mapping.get("revision", 0))
+            if revision != last_revision:
+                await client.write_gatt_char(characteristic, encode_mapping(mapping), response=True)
+                LOGGER.info("mapping synced revision=%s records=%s", revision, len(mapping.get("entries", [])))
+                print(f"[mapping] synced revision {revision}")
+                last_revision = revision
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            LOGGER.warning("mapping sync failed: %s", exc)
+            print(f"[mapping] sync failed: {exc}")
+        await asyncio.sleep(MAPPING_SYNC_INTERVAL)
+
+
 async def run_ble(
     controller: SpeechController,
     identifier: str | None,
@@ -545,6 +568,32 @@ async def run_ble(
                 await client.start_notify(STATUS_UUID, lambda _, data: controller.receive_status(bytes(data)))
                 await client.start_notify(AUDIO_UUID, lambda _, data: controller.receive_audio(bytes(data)))
                 host_characteristic = client.services.get_characteristic(HOST_STATUS_UUID)
+                mapping_characteristic = client.services.get_characteristic(MAPPING_CONFIG_UUID)
+                user_event_characteristic = client.services.get_characteristic(USER_EVENT_UUID)
+
+                if user_event_characteristic is not None:
+                    def receive_user_event(_: Any, data: bytearray) -> None:
+                        try:
+                            packet = parse_user_event_packet(bytes(data))
+                        except ProtocolError as exc:
+                            LOGGER.warning("invalid user event packet: %s", exc)
+                            return
+                        LOGGER.info(
+                            "watch event event=%s action=%s handled=%s value=%s sequence=%s",
+                            packet["event"],
+                            packet["action"],
+                            packet["handled"],
+                            packet["value"],
+                            packet["sequence"],
+                        )
+
+                    await client.start_notify(USER_EVENT_UUID, receive_user_event)
+
+                mapping_task: asyncio.Task[None] | None = None
+                if mapping_characteristic is not None:
+                    mapping_task = asyncio.create_task(_mapping_sync_loop(client, mapping_characteristic))
+                else:
+                    LOGGER.info("watch firmware does not expose mapping config characteristic")
 
                 async def write_host_status(status: HostStatus, error: int = 0) -> None:
                     if host_characteristic is None or not client.is_connected:
@@ -562,55 +611,63 @@ async def run_ble(
                         print(f"[ble] could not update watch status: {exc}")
 
                 controller.set_host_status_writer(write_host_status)
-                if runtime_validator is not None:
-                    while True:
-                        try:
-                            runtime_validator()
-                            break
-                        except Exception as exc:
-                            LOGGER.warning("runtime requirement not ready: %s", exc)
-                            print(f"[host] runtime requirement is not ready: {exc}")
-                            message = str(exc).lower()
-                            status = (
-                                HostStatus.PERMISSION_ERROR
-                                if "permission" in message or "accessibility" in message
-                                else HostStatus.HOST_ERROR
-                            )
-                            await write_host_status(status, 1)
-                            await asyncio.sleep(10)
-                            if not client.is_connected:
-                                raise RuntimeError(
-                                    "Bluetooth disconnected while waiting for host requirements"
+                try:
+                    if runtime_validator is not None:
+                        while True:
+                            try:
+                                runtime_validator()
+                                break
+                            except Exception as exc:
+                                LOGGER.warning("runtime requirement not ready: %s", exc)
+                                print(f"[host] runtime requirement is not ready: {exc}")
+                                message = str(exc).lower()
+                                status = (
+                                    HostStatus.PERMISSION_ERROR
+                                    if "permission" in message or "accessibility" in message
+                                    else HostStatus.HOST_ERROR
                                 )
-                if controller.recognizer is None:
-                    while controller.recognizer is None:
-                        await write_host_status(HostStatus.PREPARING)
+                                await write_host_status(status, 1)
+                                await asyncio.sleep(10)
+                                if not client.is_connected:
+                                    raise RuntimeError(
+                                        "Bluetooth disconnected while waiting for host requirements"
+                                    )
+                    if controller.recognizer is None:
+                        while controller.recognizer is None:
+                            await write_host_status(HostStatus.PREPARING)
+                            try:
+                                if recognizer_factory is None:
+                                    raise RuntimeError("speech recognizer factory is missing")
+                                controller.recognizer = await asyncio.to_thread(recognizer_factory)
+                            except Exception as exc:
+                                LOGGER.exception("model preparation failed")
+                                print(f"[model] preparation failed: {exc}; retrying in 10s")
+                                await write_host_status(HostStatus.MODEL_ERROR, 1)
+                                await asyncio.sleep(10)
+                                if not client.is_connected:
+                                    raise RuntimeError("Bluetooth disconnected while preparing the model")
+                    await write_host_status(HostStatus.READY)
+                    controller.mark_ready()
+                    delay = 1.0
+                    if controller.once:
+                        disconnect_task = asyncio.create_task(disconnect_event.wait())
+                        complete_task = asyncio.create_task(controller.completed.wait())
+                        done, pending = await asyncio.wait(
+                            (disconnect_task, complete_task), return_when=asyncio.FIRST_COMPLETED
+                        )
+                        for task in pending:
+                            task.cancel()
+                        if complete_task in done:
+                            return
+                    else:
+                        await disconnect_event.wait()
+                finally:
+                    if mapping_task is not None:
+                        mapping_task.cancel()
                         try:
-                            if recognizer_factory is None:
-                                raise RuntimeError("speech recognizer factory is missing")
-                            controller.recognizer = await asyncio.to_thread(recognizer_factory)
-                        except Exception as exc:
-                            LOGGER.exception("model preparation failed")
-                            print(f"[model] preparation failed: {exc}; retrying in 10s")
-                            await write_host_status(HostStatus.MODEL_ERROR, 1)
-                            await asyncio.sleep(10)
-                            if not client.is_connected:
-                                raise RuntimeError("Bluetooth disconnected while preparing the model")
-                await write_host_status(HostStatus.READY)
-                controller.mark_ready()
-                delay = 1.0
-                if controller.once:
-                    disconnect_task = asyncio.create_task(disconnect_event.wait())
-                    complete_task = asyncio.create_task(controller.completed.wait())
-                    done, pending = await asyncio.wait(
-                        (disconnect_task, complete_task), return_when=asyncio.FIRST_COMPLETED
-                    )
-                    for task in pending:
-                        task.cancel()
-                    if complete_task in done:
-                        return
-                else:
-                    await disconnect_event.wait()
+                            await mapping_task
+                        except asyncio.CancelledError:
+                            pass
             controller.abort("Bluetooth disconnected")
             controller.mark_disconnected("Bluetooth disconnected")
             controller.set_host_status_writer(None)

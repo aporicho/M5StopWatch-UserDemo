@@ -13,6 +13,7 @@
 #include <mooncake_log.h>
 #include <smooth_lvgl.hpp>
 
+#include <algorithm>
 #include <cstdarg>
 #include <cstdio>
 #include <sys/stat.h>
@@ -28,6 +29,8 @@ namespace {
 constexpr const char* LogTag      = "BLE-REMOTE-APP";
 constexpr const char* LogFileName = "ble_remote.log";
 constexpr size_t MaxLogBytes      = 48 * 1024;
+constexpr uint32_t SpeechHoldMs      = 500;
+constexpr uint32_t VibrationSettleMs = 70;
 
 const char* hostStatusToString(model::BleHidRemote::HostStatus status)
 {
@@ -164,6 +167,137 @@ void AppBleHidRemote::logRemoteSnapshot(const char* reason)
     _logged_host_error      = hostErr;
 }
 
+#ifdef CONFIG_M5_TEST_CONTROL
+AppBleHidRemote::TestSnapshot AppBleHidRemote::testSnapshot() const
+{
+    TestSnapshot snapshot{};
+    if (!_remote) {
+        return snapshot;
+    }
+    snapshot.hasRemote      = true;
+    snapshot.state          = model::bleHidStateToString(_remote->state());
+    snapshot.lastError      = _remote->lastError();
+    snapshot.lastErrorStage = _remote->lastErrorStage();
+    snapshot.speechService  = model::speechServiceStateToString(_remote->speechServiceState());
+    snapshot.hostStatus     = hostStatusToString(_remote->hostStatus());
+    snapshot.hostError      = _remote->hostError();
+    snapshot.speechReady    = _remote->isSpeechReady();
+    snapshot.speechActive   = _remote->isSpeechActive();
+    return snapshot;
+}
+#endif
+
+bool AppBleHidRemote::scheduleSpeechStart()
+{
+    if (!_remote || !_remote->isSpeechReady()) {
+        logEvent("speech start rejected not ready");
+        logRemoteSnapshot("speech not ready");
+        GetHAL().vibrate(160, 100);
+        return false;
+    }
+
+    const uint32_t now = GetHAL().millis();
+    logEvent("speech start scheduled");
+    GetHAL().vibrate(20, 70);
+    _speech_start_at      = now + VibrationSettleMs;
+    _speech_start_pending = true;
+    return true;
+}
+
+bool AppBleHidRemote::stopSpeechFromMapping(bool abort)
+{
+    if (!_remote || !_remote->isSpeechActive()) {
+        return false;
+    }
+    _remote->stopSpeech(abort);
+    _speech_end_feedback = !abort;
+    return true;
+}
+
+bool AppBleHidRemote::executeMappedAction(const model::UserActionMapping& mapping, int8_t value)
+{
+    if (!_remote) {
+        return false;
+    }
+
+    switch (mapping.action) {
+        case model::UserActionType::None:
+            return false;
+        case model::UserActionType::HidKeyboardTap:
+            return _remote->sendKeyboardShortcut(mapping.param0, mapping.param1);
+        case model::UserActionType::HidMouseWheel: {
+            int delta = value;
+            if (delta == 0) {
+                delta = mapping.param2 == 0 ? 1 : mapping.param2;
+            }
+            const int multiplier = mapping.param0 == 0 ? 1 : mapping.param0;
+            delta *= multiplier;
+            if (mapping.param1 != 0) {
+                delta = -delta;
+            }
+            delta = std::clamp(delta, -127, 127);
+            return _remote->sendWheel(static_cast<int8_t>(delta));
+        }
+        case model::UserActionType::HidMouseClick:
+            return _remote->sendMouseClick(mapping.param0 == 0 ? 1 : mapping.param0);
+        case model::UserActionType::HidMediaControl:
+            return _remote->sendMediaControl(static_cast<uint16_t>(mapping.param2));
+        case model::UserActionType::VoiceHoldStart:
+            return scheduleSpeechStart();
+        case model::UserActionType::VoiceHoldStop:
+            return stopSpeechFromMapping(false);
+        case model::UserActionType::VoiceToggle:
+            if (_remote->isSpeechActive()) {
+                return stopSpeechFromMapping(false);
+            }
+            return scheduleSpeechStart();
+        case model::UserActionType::DevicePairNewComputer:
+            return _remote->pairNewComputer();
+        case model::UserActionType::DeviceShowControls:
+            if (_view) {
+                _view->showControls();
+                return true;
+            }
+            return false;
+        case model::UserActionType::DeviceHideControls:
+            if (_view) {
+                _view->hideControls();
+                return true;
+            }
+            return false;
+        case model::UserActionType::DeviceToggleControls:
+            if (_view) {
+                _view->toggleControls();
+                return true;
+            }
+            return false;
+        case model::UserActionType::DeviceGoHome:
+            _close_requested_by_home = true;
+            _speech_start_pending    = false;
+            if (_remote) {
+                _remote->stopSpeech(true);
+            }
+            close();
+            return true;
+        default:
+            return false;
+    }
+}
+
+bool AppBleHidRemote::executeMappedEvent(model::UserEvent event, int8_t value)
+{
+    if (!_remote || event == model::UserEvent::None) {
+        return false;
+    }
+
+    const model::UserActionMapping mapping = _remote->mappingFor(event);
+    const bool handled                     = executeMappedAction(mapping, value);
+    _remote->notifyUserEvent(event, mapping.action, value, handled);
+    logEvent("event=%s action=%s value=%d handled=%d", model::userEventToId(event),
+             model::userActionToId(mapping.action), static_cast<int>(value), handled ? 1 : 0);
+    return handled;
+}
+
 void AppBleHidRemote::onCreate()
 {
     mclog::tagInfo(getAppInfo().name, "on create");
@@ -189,6 +323,7 @@ void AppBleHidRemote::onOpen()
     }
 
     _remote->start();
+    _left_long_latched       = false;
     _right_long_latched      = false;
     _speech_start_pending    = false;
     _speech_end_feedback     = false;
@@ -201,9 +336,6 @@ void AppBleHidRemote::onOpen()
 
 void AppBleHidRemote::onRunning()
 {
-    constexpr uint32_t SpeechHoldMs      = 500;
-    constexpr uint32_t VibrationSettleMs = 70;
-
     auto& hal = GetHAL();
     hal.updateButtonStates(false);
     const uint32_t now = hal.millis();
@@ -211,14 +343,9 @@ void AppBleHidRemote::onRunning()
     if (hal.btnA.isHolding() && hal.btnB.isHolding()) {
         if (!_home_latched) {
             _home_latched = true;
-            _close_requested_by_home = true;
             logEvent("home combo detected btnA=holding btnB=holding");
             logRemoteSnapshot("before home close");
-            if (_remote) {
-                _remote->stopSpeech(true);
-            }
-            _speech_start_pending = false;
-            close();
+            executeMappedEvent(model::UserEvent::ButtonBothHold);
         }
         return;
     }
@@ -226,12 +353,26 @@ void AppBleHidRemote::onRunning()
         _home_latched = false;
     }
 
-    bool keyFlashed = false;
-    bool leftKey    = false;
-    if (_remote && hal.btnA.wasClicked()) {
-        keyFlashed = _remote->sendKeyTap(model::BleHidRemote::Key::Escape);
-        leftKey    = true;
-        logEvent("left button tap ESC queued=%d", keyFlashed ? 1 : 0);
+    if (hal.btnA.wasPressed()) {
+        _left_long_latched    = false;
+        _speech_start_pending = false;
+        logEvent("left button pressed");
+    }
+    if (_remote && hal.btnA.isPressed() && !_left_long_latched && hal.btnA.pressedFor(SpeechHoldMs)) {
+        _left_long_latched = true;
+        executeMappedEvent(model::UserEvent::ButtonLeftHold);
+    }
+    if (_remote && hal.btnA.wasReleased()) {
+        _speech_start_pending = false;
+        if (_left_long_latched) {
+            executeMappedEvent(model::UserEvent::ButtonLeftReleaseAfterHold);
+        } else {
+            const bool handled = executeMappedEvent(model::UserEvent::ButtonLeftTap);
+            if (handled && _view) {
+                LvglLockGuard lock;
+                _view->flashKey(true);
+            }
+        }
         hal.vibrate(20, 60);
     }
 
@@ -242,45 +383,30 @@ void AppBleHidRemote::onRunning()
     }
     if (_remote && hal.btnB.isPressed() && !_right_long_latched && hal.btnB.pressedFor(SpeechHoldMs)) {
         _right_long_latched = true;
-        if (_remote->isSpeechReady()) {
-            logEvent("right hold speech start scheduled");
-            hal.vibrate(20, 70);
-            _speech_start_at      = now + VibrationSettleMs;
-            _speech_start_pending = true;
-        } else {
-            logEvent("right hold rejected speech not ready");
-            logRemoteSnapshot("speech not ready");
-            hal.vibrate(160, 100);
-        }
+        executeMappedEvent(model::UserEvent::ButtonRightHold);
     }
     if (_remote && _speech_start_pending && static_cast<int32_t>(now - _speech_start_at) >= 0) {
         _speech_start_pending = false;
-        if (hal.btnB.isPressed()) {
-            if (!_remote->startSpeech()) {
-                logEvent("speech start failed");
-                logRemoteSnapshot("speech start failed");
-                hal.vibrate(160, 100);
-            } else {
-                logEvent("speech start ok");
-            }
+        if (!_remote->startSpeech()) {
+            logEvent("speech start failed");
+            logRemoteSnapshot("speech start failed");
+            hal.vibrate(160, 100);
+        } else {
+            logEvent("speech start ok");
         }
     }
     if (_remote && hal.btnB.wasReleased()) {
         _speech_start_pending = false;
         if (_right_long_latched) {
-            if (_remote->isSpeechActive()) {
-                logEvent("right release stop speech");
-                _remote->stopSpeech(false);
-                _speech_end_feedback = true;
-            } else {
-                logEvent("right release after hold speech inactive");
-            }
+            executeMappedEvent(model::UserEvent::ButtonRightReleaseAfterHold);
         } else {
-            keyFlashed = _remote->sendKeyTap(model::BleHidRemote::Key::Enter);
-            leftKey    = false;
-            logEvent("right button tap ENTER queued=%d", keyFlashed ? 1 : 0);
-            hal.vibrate(20, 60);
+            const bool handled = executeMappedEvent(model::UserEvent::ButtonRightTap);
+            if (handled && _view) {
+                LvglLockGuard lock;
+                _view->flashKey(false);
+            }
         }
+        hal.vibrate(20, 60);
     }
     if (_remote && _speech_end_feedback && !_remote->isSpeechActive()) {
         _speech_end_feedback = false;
@@ -297,13 +423,12 @@ void AppBleHidRemote::onRunning()
 
     int8_t wheelDelta = 0;
     bool pairComputer = false;
+    model::UserEvent touchEvent = model::UserEvent::None;
     if (_view) {
         LvglLockGuard lock;
-        if (keyFlashed) {
-            _view->flashKey(leftKey);
-        }
         _view->update(_remote->state(), _remote->lastError(), _remote->speechServiceState(), _remote->hostError());
         wheelDelta   = _view->consumeWheelDelta();
+        touchEvent   = _view->consumeTouchEvent();
         pairComputer = _view->consumePairRequested();
     }
 
@@ -316,7 +441,10 @@ void AppBleHidRemote::onRunning()
             logEvent("wheel delta=%d", static_cast<int>(wheelDelta));
             _last_wheel_log_at = now;
         }
-        _remote->sendWheel(wheelDelta);
+        executeMappedEvent(model::UserEvent::TouchScrollDelta, wheelDelta);
+    }
+    if (touchEvent != model::UserEvent::None) {
+        executeMappedEvent(touchEvent);
     }
 }
 

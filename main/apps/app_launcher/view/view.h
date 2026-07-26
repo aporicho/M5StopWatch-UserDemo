@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #pragma once
+#include "sdkconfig.h"
 #include <apps/common/arc_top_clock/arc_top_clock.h>
 #include <apps/common/key_manager/key_manager.h>
 #include <mooncake.h>
@@ -33,6 +34,9 @@ public:
 
     void init(std::vector<mooncake::AppProps_t> appPorps);
     void update();
+#ifdef CONFIG_M5_TEST_CONTROL
+    int selectedIndex() const;
+#endif
 
 private:
     std::unique_ptr<uitk::lvgl_cpp::Container> _panel;

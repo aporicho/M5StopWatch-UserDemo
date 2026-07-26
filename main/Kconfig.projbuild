@@ -1,0 +1,11 @@
+menu "M5StopWatch development options"
+
+config M5_TEST_CONTROL
+    bool "Enable USB synthetic user-input test control"
+    default n
+    help
+        Enables a development-only serial control plane for hardware-in-the-loop
+        tests. It injects button and touch input through the HAL input path and
+        exposes read-only diagnostics. Keep this disabled for release firmware.
+
+endmenu

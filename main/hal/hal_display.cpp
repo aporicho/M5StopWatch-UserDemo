@@ -247,6 +247,16 @@ void Hal::touchpad_init()
 Hal::TouchPoint Hal::getTouchPoint()
 {
     Hal::TouchPoint point;
+#ifdef CONFIG_M5_TEST_CONTROL
+    if (_synthetic_touch_enabled.load()) {
+        if (_synthetic_touch_pressed.load()) {
+            point.num = 1;
+            point.x   = _synthetic_touch_x.load();
+            point.y   = _synthetic_touch_y.load();
+        }
+        return point;
+    }
+#endif
     if (_cst820 && _cst820->read()) {
         point.num = _cst820->getFingerNum();
         if (point.num > 0) {

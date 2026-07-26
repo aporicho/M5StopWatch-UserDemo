@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ble_stt import cli
+from ble_stt.config import UserConfig
 
 
 class CliJsonTests(unittest.TestCase):
@@ -113,6 +114,22 @@ class CliJsonTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["telemetry"]["stage"], "listening")
+
+    def test_mappings_json_reports_default_event_map(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "ble-stt.json"
+            with patch("ble_stt.cli.UserConfig", return_value=UserConfig(config_path)):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.main(["mappings", "status", "--json"])
+
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["mapping"]["entries"][0]["event"], "button.left.tap")
+        self.assertEqual(payload["events"][-1]["id"], "button.both.hold")
 
 
 if __name__ == "__main__":

@@ -13,6 +13,7 @@ from typing import Sequence
 from . import __version__
 from .config import UserConfig, install_dir, log_dir
 from .diagnostics import event_log_paths
+from .mapping import mapping_payload, read_mapping, reset_mapping, save_mapping
 from .models import (
     DEFAULT_ENGINE,
     DEFAULT_MODEL,
@@ -46,6 +47,7 @@ COMMANDS = {
     "uninstall",
     "prepare",
     "models",
+    "mappings",
     "permissions",
     "help",
 }
@@ -178,6 +180,39 @@ def manage_models(argv: Sequence[str]) -> int:
         else:
             print(json.dumps(payload, ensure_ascii=False, indent=2))
     return code
+
+
+def manage_mappings(argv: Sequence[str]) -> int:
+    values = [value for value in argv if value != "--json"]
+    json_output = len(values) != len(argv)
+    parser = argparse.ArgumentParser(prog="ble-stt mappings", description="Manage watch event mappings")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    subparsers.add_parser("status")
+    save_parser = subparsers.add_parser("save")
+    save_parser.add_argument("--payload", required=True, help="JSON payload with an entries array")
+    subparsers.add_parser("reset")
+
+    args = parser.parse_args(values)
+    config = UserConfig()
+    if args.action == "status":
+        payload = {"ok": True, "action": args.action, **mapping_payload(config)}
+    elif args.action == "save":
+        value = json.loads(args.payload)
+        entries = value.get("entries") if isinstance(value, dict) else value
+        if not isinstance(entries, list):
+            raise ValueError("mapping payload must contain an entries array")
+        mapping = save_mapping(entries, config)
+        payload = {"ok": True, "action": args.action, "mapping": mapping, **mapping_payload(config)}
+    else:
+        mapping = reset_mapping(config)
+        payload = {"ok": True, "action": args.action, "mapping": mapping, **mapping_payload(config)}
+
+    if json_output:
+        _print_json(payload)
+    else:
+        mapping = read_mapping(config)
+        print(f"[ok] {len(mapping['entries'])} mapping record(s), revision {mapping['revision']}")
+    return 0
 
 
 def _display_log_text(value: str) -> str:
@@ -460,6 +495,7 @@ Commands:
   journey-test Run the long end-to-end push-to-talk journey test
   prepare      Download and validate the speech model now
   models       Select, install, update, repair, and delete speech models
+  mappings     Configure watch event-to-action mappings
   logs         Show or follow background service logs
   telemetry    Show live runtime telemetry for the desktop HUD
   restart      Restart the login service
@@ -510,6 +546,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             code = prepare(values)
         elif command == "models":
             code = manage_models(values)
+        elif command == "mappings":
+            code = manage_mappings(values)
         elif command == "logs":
             code = show_logs(values)
         elif command == "telemetry":

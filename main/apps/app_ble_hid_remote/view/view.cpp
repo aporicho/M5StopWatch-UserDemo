@@ -24,7 +24,9 @@ constexpr int MaxWheelStepsPerConsume = 8;
 constexpr uint32_t KeyFlashDurationMs = 130;
 constexpr uint32_t TapMaxDurationMs   = 280;
 constexpr uint32_t MultiTapTimeoutMs  = 600;
+constexpr uint32_t TouchHoldMs        = 650;
 constexpr int TapMaxMovement          = 14;
+constexpr int SwipeMinDistance        = 82;
 
 constexpr uint32_t BackgroundColor       = 0x000000;
 constexpr uint32_t SurfaceColor          = 0x292E39;
@@ -113,6 +115,7 @@ void BleHidRemoteView::init(lv_obj_t* parent)
 {
     _pair_requested = false;
     _wheel_pending  = 0;
+    _pending_touch_event = model::UserEvent::None;
     resetGesture();
 
     _panel = std::make_unique<Container>(parent);
@@ -281,11 +284,33 @@ int8_t BleHidRemoteView::consumeWheelDelta()
     return static_cast<int8_t>(delta);
 }
 
+model::UserEvent BleHidRemoteView::consumeTouchEvent()
+{
+    const model::UserEvent event = _pending_touch_event;
+    _pending_touch_event         = model::UserEvent::None;
+    return event;
+}
+
 bool BleHidRemoteView::consumePairRequested()
 {
     const bool requested = _pair_requested;
     _pair_requested      = false;
     return requested;
+}
+
+void BleHidRemoteView::showControls()
+{
+    setControlsVisible(true);
+}
+
+void BleHidRemoteView::hideControls()
+{
+    setControlsVisible(false);
+}
+
+void BleHidRemoteView::toggleControls()
+{
+    setControlsVisible(!_controls_visible);
 }
 
 void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastError,
@@ -390,7 +415,7 @@ bool BleHidRemoteView::updateUiToggleGesture()
     if (!pressed) {
         if (_tap_pressing) {
             _tap_pressing = false;
-            if (!_tap_moved && now - _tap_started_at <= TapMaxDurationMs) {
+            if (!_tap_moved && !_tap_hold_sent && now - _tap_started_at <= TapMaxDurationMs) {
                 if (_tap_count == 0 || now - _last_tap_at <= MultiTapTimeoutMs) {
                     ++_tap_count;
                 } else {
@@ -400,7 +425,7 @@ bool BleHidRemoteView::updateUiToggleGesture()
 
                 if (_tap_count >= 3) {
                     _tap_count = 0;
-                    setControlsVisible(!_controls_visible);
+                    _pending_touch_event = model::UserEvent::TouchTripleTap;
                     resetGesture();
                     return true;
                 }
@@ -408,7 +433,9 @@ bool BleHidRemoteView::updateUiToggleGesture()
                 _tap_count = 0;
             }
         } else if (_tap_count != 0 && now - _last_tap_at > MultiTapTimeoutMs) {
+            _pending_touch_event = _tap_count == 1 ? model::UserEvent::TouchTap : model::UserEvent::TouchDoubleTap;
             _tap_count = 0;
+            return true;
         }
         return false;
     }
@@ -416,6 +443,7 @@ bool BleHidRemoteView::updateUiToggleGesture()
     if (!_tap_pressing) {
         _tap_pressing   = true;
         _tap_moved      = false;
+        _tap_hold_sent  = false;
         _tap_start      = point;
         _tap_started_at = now;
         return false;
@@ -424,6 +452,12 @@ bool BleHidRemoteView::updateUiToggleGesture()
     if (std::abs(point.x - _tap_start.x) > TapMaxMovement || std::abs(point.y - _tap_start.y) > TapMaxMovement) {
         _tap_moved = true;
         _tap_count = 0;
+    }
+    if (!_tap_moved && !_tap_hold_sent && now - _tap_started_at >= TouchHoldMs) {
+        _tap_hold_sent       = true;
+        _tap_count           = 0;
+        _pending_touch_event = model::UserEvent::TouchHold;
+        return true;
     }
     return false;
 }
@@ -452,6 +486,20 @@ void BleHidRemoteView::updateGesture(model::BleHidRemote::State state)
     const bool pressed = lv_indev_get_state(GetHAL().lvTouchpad) == LV_INDEV_STATE_PRESSED;
 
     if (!pressed) {
+        if (_gesture_pressing) {
+            const int totalX    = _gesture_last.x - _gesture_start.x;
+            const int totalY    = _gesture_last.y - _gesture_start.y;
+            const int absX      = std::abs(totalX);
+            const int absY      = std::abs(totalY);
+            const bool blocked  = _controls_visible && _gesture_start.y >= GestureButtonBoundary;
+            if (!blocked && std::max(absX, absY) >= SwipeMinDistance) {
+                if (absX > absY) {
+                    _pending_touch_event = totalX < 0 ? model::UserEvent::TouchSwipeLeft : model::UserEvent::TouchSwipeRight;
+                } else {
+                    _pending_touch_event = totalY < 0 ? model::UserEvent::TouchSwipeUp : model::UserEvent::TouchSwipeDown;
+                }
+            }
+        }
         resetGesture();
         return;
     }

@@ -9,6 +9,7 @@
 #include <mooncake.h>
 #include <apps/apps.h>
 #include <hal/hal.h>
+#include <hal/utils/test_control/test_control.h>
 #include <lv_demos.h>
 #include <apps/common/audio/audio.h>
 
@@ -41,9 +42,12 @@ extern "C" void app_main(void)
     GetMooncake().installApp(std::make_unique<AppSetup>());
     // GetMooncake().installApp(std::make_unique<AppTemplate>());
 
+    test_control::start();
+
     // Main loop
     while (1) {
         GetHAL().feedTheDog();
+        test_control::update();
         GetMooncake().update();
     }
 }

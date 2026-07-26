@@ -5,6 +5,7 @@
  */
 #pragma once
 
+#include "sdkconfig.h"
 #include "model/ble_hid_remote.h"
 #include "view/view.h"
 
@@ -16,6 +17,21 @@ class AppBleHidRemote : public mooncake::AppAbility {
 public:
     AppBleHidRemote();
 
+#ifdef CONFIG_M5_TEST_CONTROL
+    struct TestSnapshot {
+        bool hasRemote            = false;
+        const char* state         = "none";
+        int lastError             = 0;
+        const char* lastErrorStage = "none";
+        const char* speechService = "none";
+        const char* hostStatus    = "none";
+        uint16_t hostError        = 0;
+        bool speechReady          = false;
+        bool speechActive         = false;
+    };
+    TestSnapshot testSnapshot() const;
+#endif
+
     void onCreate() override;
     void onOpen() override;
     void onRunning() override;
@@ -25,11 +41,16 @@ public:
 private:
     void logEvent(const char* format, ...) const;
     void logRemoteSnapshot(const char* reason);
+    bool executeMappedEvent(model::UserEvent event, int8_t value = 0);
+    bool executeMappedAction(const model::UserActionMapping& mapping, int8_t value);
+    bool scheduleSpeechStart();
+    bool stopSpeechFromMapping(bool abort = false);
 
     std::unique_ptr<model::BleHidRemote> _remote;
     std::unique_ptr<view::BleHidRemoteView> _view;
     uint32_t _speech_start_at      = 0;
     uint32_t _last_wheel_log_at    = 0;
+    bool _left_long_latched        = false;
     bool _right_long_latched       = false;
     bool _speech_start_pending     = false;
     bool _speech_end_feedback      = false;

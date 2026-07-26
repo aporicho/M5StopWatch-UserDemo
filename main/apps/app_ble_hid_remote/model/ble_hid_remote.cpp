@@ -39,6 +39,7 @@ constexpr char DeviceName[] = "M5StopWatch HID";
 
 constexpr uint8_t KeyboardReportId = 1;
 constexpr uint8_t MouseReportId    = 2;
+constexpr uint8_t ConsumerReportId = 3;
 constexpr size_t MaxBondedComputers = 2;
 
 constexpr uint8_t SpeechProtocolVersion = 1;
@@ -64,6 +65,10 @@ const ble_uuid128_t SpeechAudioUuid =
     BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x02, 0x10, 0x3a, 0x7f);
 const ble_uuid128_t HostStatusUuid =
     BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x03, 0x10, 0x3a, 0x7f);
+const ble_uuid128_t MappingConfigUuid =
+    BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x04, 0x10, 0x3a, 0x7f);
+const ble_uuid128_t UserEventUuid =
+    BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x05, 0x10, 0x3a, 0x7f);
 
 constexpr uint8_t HidReportMap[] = {
     // Keyboard, report ID 1.
@@ -188,6 +193,33 @@ constexpr uint8_t HidReportMap[] = {
     0x06,  // Input (Data, Variable, Relative)
     0xC0,
     0xC0,
+
+    // Consumer control, report ID 3.
+    0x05,
+    0x0C,  // Usage Page (Consumer)
+    0x09,
+    0x01,  // Usage (Consumer Control)
+    0xA1,
+    0x01,  // Collection (Application)
+    0x85,
+    ConsumerReportId,
+    0x15,
+    0x00,  // Logical Minimum (0)
+    0x26,
+    0xFF,
+    0x03,  // Logical Maximum (1023)
+    0x19,
+    0x00,  // Usage Minimum (0)
+    0x2A,
+    0xFF,
+    0x03,  // Usage Maximum (1023)
+    0x75,
+    0x10,  // Report Size (16)
+    0x95,
+    0x01,  // Report Count (1)
+    0x81,
+    0x00,  // Input (Data, Array, Absolute)
+    0xC0,
 };
 
 esp_hid_raw_report_map_t ReportMaps[] = {
@@ -244,6 +276,7 @@ bool BleHidRemote::start()
 
     _state                    = State::Starting;
     _last_error               = ESP_OK;
+    _last_error_stage         = "none";
     _active                   = true;
     _speech_active            = false;
     _speech_abort_requested   = false;
@@ -254,10 +287,12 @@ bool BleHidRemote::start()
     _last_peer_valid          = false;
     _host_status              = HostStatus::Waiting;
     _host_error               = 0;
+    _user_event_subscribed    = false;
+    _mapping.load();
 
     _command_queue = xQueueCreate(16, sizeof(Command));
     if (_command_queue == nullptr) {
-        setError(ESP_ERR_NO_MEM);
+        setError(ESP_ERR_NO_MEM, "command_queue");
         _active = false;
         return false;
     }
@@ -267,15 +302,16 @@ bool BleHidRemote::start()
         _report_worker_running = false;
         vQueueDelete(_command_queue);
         _command_queue = nullptr;
-        setError(ESP_ERR_NO_MEM);
+        setError(ESP_ERR_NO_MEM, "report_worker_task");
         _active = false;
         return false;
     }
 
     if (!initializeBluetooth()) {
-        const int error = _last_error.load();
+        const int error         = _last_error.load();
+        const char* errorStage  = _last_error_stage.load();
         stop();
-        setError(error);
+        setError(error, errorStage);
         return false;
     }
 
@@ -316,13 +352,19 @@ void BleHidRemote::stop()
 
 bool BleHidRemote::sendKeyTap(Key key)
 {
+    return sendKeyboardShortcut(static_cast<uint8_t>(key), 0);
+}
+
+bool BleHidRemote::sendKeyboardShortcut(uint8_t keyCode, uint8_t modifiers)
+{
     if (!isConnected() || _command_queue == nullptr) {
         return false;
     }
 
     const Command command{
         .type  = CommandType::KeyTap,
-        .value = static_cast<int8_t>(key),
+        .value = static_cast<int16_t>(keyCode),
+        .modifier = modifiers,
     };
     return xQueueSend(_command_queue, &command, 0) == pdTRUE;
 }
@@ -336,8 +378,70 @@ bool BleHidRemote::sendWheel(int8_t delta)
     const Command command{
         .type  = CommandType::Wheel,
         .value = delta,
+        .modifier = 0,
     };
     return xQueueSend(_command_queue, &command, 0) == pdTRUE;
+}
+
+bool BleHidRemote::sendMouseClick(uint8_t buttons)
+{
+    if (!isConnected() || buttons == 0 || _command_queue == nullptr) {
+        return false;
+    }
+
+    const Command command{
+        .type  = CommandType::MouseClick,
+        .value = buttons,
+        .modifier = 0,
+    };
+    return xQueueSend(_command_queue, &command, 0) == pdTRUE;
+}
+
+bool BleHidRemote::sendMediaControl(uint16_t usage)
+{
+    if (!isConnected() || usage == 0 || _command_queue == nullptr) {
+        return false;
+    }
+
+    const Command command{
+        .type  = CommandType::MediaControl,
+        .value = static_cast<int16_t>(usage),
+        .modifier = 0,
+    };
+    return xQueueSend(_command_queue, &command, 0) == pdTRUE;
+}
+
+UserActionMapping BleHidRemote::mappingFor(UserEvent event) const
+{
+    return _mapping.actionFor(event);
+}
+
+bool BleHidRemote::notifyUserEvent(UserEvent event, UserActionType action, int8_t value, bool handled)
+{
+    if (!_user_event_subscribed.load()) {
+        return false;
+    }
+    const uint16_t connectionHandle = _connection_handle.load();
+    if (connectionHandle == InvalidConnectionHandle || _user_event_handle == 0) {
+        return false;
+    }
+
+    ++_user_event_sequence;
+    std::array<uint8_t, 8> packet{};
+    packet[0] = UserEventMapper::MappingVersion;
+    packet[1] = static_cast<uint8_t>(event);
+    packet[2] = static_cast<uint8_t>(action);
+    packet[3] = handled ? 1 : 0;
+    packet[4] = static_cast<uint8_t>(value);
+    packet[5] = static_cast<uint8_t>(_user_event_sequence & 0xFF);
+    packet[6] = static_cast<uint8_t>(_user_event_sequence >> 8);
+    packet[7] = 0;
+
+    os_mbuf* buffer = ble_hs_mbuf_from_flat(packet.data(), packet.size());
+    if (buffer == nullptr) {
+        return false;
+    }
+    return ble_gatts_notify_custom(connectionHandle, _user_event_handle, buffer) == 0;
 }
 
 bool BleHidRemote::isSpeechReady() const
@@ -446,7 +550,7 @@ bool BleHidRemote::pairNewComputer()
             waitingForDisconnect = true;
         } else if (terminateResult != BLE_HS_ENOTCONN) {
             ESP_LOGE(Tag, "failed to disconnect before clearing bond: %d", terminateResult);
-            setError(terminateResult);
+            setError(terminateResult, "pair_disconnect");
             return false;
         }
     }
@@ -471,28 +575,28 @@ bool BleHidRemote::initializeBluetooth()
     esp_bt_controller_config_t controller_config = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
     esp_err_t result                             = esp_bt_controller_init(&controller_config);
     if (result != ESP_OK) {
-        setError(result);
+        setError(result, "controller_init");
         return false;
     }
     _controller_initialized = true;
 
     result = esp_bt_controller_enable(ESP_BT_MODE_BLE);
     if (result != ESP_OK) {
-        setError(result);
+        setError(result, "controller_enable");
         return false;
     }
     _controller_enabled = true;
 
     result = esp_nimble_init();
     if (result != ESP_OK) {
-        setError(result);
+        setError(result, "nimble_init");
         return false;
     }
     _nimble_initialized = true;
 
     const int mtuResult = ble_att_set_preferred_mtu(247);
     if (mtuResult != 0) {
-        setError(mtuResult);
+        setError(mtuResult, "preferred_mtu");
         return false;
     }
 
@@ -510,20 +614,20 @@ bool BleHidRemote::initializeBluetooth()
     ble_store_config_init();
     ble_hs_cfg.store_status_cb = ble_store_util_status_rr;
 
-    result = esp_hidd_dev_init(&HidConfig, ESP_HID_TRANSPORT_BLE,
-                               reinterpret_cast<esp_event_handler_t>(hidEventCallback), &_hid_device);
-    if (result != ESP_OK) {
-        setError(result);
+    if (!registerSpeechService()) {
         return false;
     }
 
-    if (!registerSpeechService()) {
+    result = esp_hidd_dev_init(&HidConfig, ESP_HID_TRANSPORT_BLE,
+                               reinterpret_cast<esp_event_handler_t>(hidEventCallback), &_hid_device);
+    if (result != ESP_OK) {
+        setError(result, "hid_init");
         return false;
     }
 
     const int nameResult = ble_svc_gap_device_name_set(DeviceName);
     if (nameResult != 0) {
-        setError(nameResult);
+        setError(nameResult, "device_name");
         return false;
     }
 
@@ -531,7 +635,7 @@ bool BleHidRemote::initializeBluetooth()
     result        = esp_nimble_enable(reinterpret_cast<void*>(hostTask));
     if (result != ESP_OK) {
         _host_running = false;
-        setError(result);
+        setError(result, "nimble_enable");
         return false;
     }
 
@@ -540,7 +644,7 @@ bool BleHidRemote::initializeBluetooth()
 
 bool BleHidRemote::registerSpeechService()
 {
-    static ble_gatt_chr_def characteristics[4]{};
+    static ble_gatt_chr_def characteristics[6]{};
     static ble_gatt_svc_def services[2]{};
     static bool initialized = false;
 
@@ -560,6 +664,17 @@ bool BleHidRemote::registerSpeechService()
         characteristics[2].flags      = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC;
         characteristics[2].val_handle = &_host_status_handle;
 
+        characteristics[3].uuid       = &MappingConfigUuid.u;
+        characteristics[3].access_cb  = speechGattAccess;
+        characteristics[3].flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE |
+                                   BLE_GATT_CHR_F_WRITE_ENC;
+        characteristics[3].val_handle = &_mapping_config_handle;
+
+        characteristics[4].uuid       = &UserEventUuid.u;
+        characteristics[4].access_cb  = speechGattAccess;
+        characteristics[4].flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_NOTIFY;
+        characteristics[4].val_handle = &_user_event_handle;
+
         services[0].type            = BLE_GATT_SVC_TYPE_PRIMARY;
         services[0].uuid            = &SpeechServiceUuid.u;
         services[0].characteristics = characteristics;
@@ -570,6 +685,8 @@ bool BleHidRemote::registerSpeechService()
         characteristics[0].val_handle = &_speech_status_handle;
         characteristics[1].val_handle = &_speech_audio_handle;
         characteristics[2].val_handle = &_host_status_handle;
+        characteristics[3].val_handle = &_mapping_config_handle;
+        characteristics[4].val_handle = &_user_event_handle;
     }
 
     int result = ble_gatts_count_cfg(services);
@@ -578,7 +695,7 @@ bool BleHidRemote::registerSpeechService()
     }
     if (result != 0) {
         ESP_LOGE(Tag, "failed to register speech GATT service: %d", result);
-        setError(result);
+        setError(result, result == BLE_HS_EBUSY ? "speech_gatt_busy" : "speech_gatt_register");
         return false;
     }
     return true;
@@ -590,6 +707,7 @@ void BleHidRemote::cleanupBluetooth()
     waitForSpeechWorker();
     _speech_subscribed        = false;
     _speech_status_subscribed = false;
+    _user_event_subscribed    = false;
     _host_status              = HostStatus::Waiting;
     _host_error               = 0;
 
@@ -678,7 +796,7 @@ bool BleHidRemote::startAdvertising()
     int result = ble_gap_adv_set_fields(&fields);
     if (result != 0) {
         ESP_LOGE(Tag, "failed to set advertisement fields: %d", result);
-        setError(result);
+        setError(result, "adv_fields");
         return false;
     }
 
@@ -690,7 +808,7 @@ bool BleHidRemote::startAdvertising()
     result = ble_gap_adv_rsp_set_fields(&response);
     if (result != 0) {
         ESP_LOGE(Tag, "failed to set scan response fields: %d", result);
-        setError(result);
+        setError(result, "scan_response");
         return false;
     }
 
@@ -703,7 +821,7 @@ bool BleHidRemote::startAdvertising()
     result = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, nullptr, BLE_HS_FOREVER, &parameters, gapEventCallback, this);
     if (result != 0 && result != BLE_HS_EALREADY) {
         ESP_LOGE(Tag, "failed to start advertising: %d", result);
-        setError(result);
+        setError(result, "adv_start");
         return false;
     }
 
@@ -720,7 +838,7 @@ bool BleHidRemote::preparePairingWindow()
         ble_store_util_bonded_peers(bondedPeers.data(), &bondedCount, static_cast<int>(bondedPeers.size()));
     if (storeResult != 0) {
         ESP_LOGE(Tag, "failed to read BLE bonds: %d", storeResult);
-        setError(storeResult);
+        setError(storeResult, "read_bonds");
         return false;
     }
 
@@ -757,7 +875,7 @@ bool BleHidRemote::preparePairingWindow()
     const int result = ble_store_util_delete_peer(&bondedPeers[deleteIndex]);
     if (result != 0 && result != BLE_HS_ENOENT) {
         ESP_LOGE(Tag, "failed to delete BLE bond: %d", result);
-        setError(result);
+        setError(result, "delete_bond");
         return false;
     }
     return true;
@@ -914,6 +1032,7 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
             stopSpeech(true);
             _speech_subscribed        = false;
             _speech_status_subscribed = false;
+            _user_event_subscribed    = false;
             _host_status              = HostStatus::Waiting;
             _host_error               = 0;
             _connection_handle        = InvalidConnectionHandle;
@@ -929,6 +1048,9 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
             } else if (event->subscribe.attr_handle == _speech_status_handle) {
                 _speech_status_subscribed = event->subscribe.cur_notify != 0;
                 ESP_LOGI(Tag, "speech status subscription: %s", _speech_status_subscribed.load() ? "on" : "off");
+            } else if (event->subscribe.attr_handle == _user_event_handle) {
+                _user_event_subscribed = event->subscribe.cur_notify != 0;
+                ESP_LOGI(Tag, "user event subscription: %s", _user_event_subscribed.load() ? "on" : "off");
             }
             if (isSpeechReady()) {
                 sendSpeechStatus(SpeechReady);
@@ -978,18 +1100,23 @@ void BleHidRemote::runReportWorker()
         }
 
         if (command.type == CommandType::KeyTap) {
-            sendKeyboardReport(static_cast<uint8_t>(command.value));
+            sendKeyboardReport(static_cast<uint8_t>(command.value), command.modifier);
         } else if (command.type == CommandType::Wheel) {
-            sendMouseWheelReport(command.value);
+            sendMouseWheelReport(static_cast<int8_t>(command.value));
+        } else if (command.type == CommandType::MouseClick) {
+            sendMouseClickReport(static_cast<uint8_t>(command.value));
+        } else if (command.type == CommandType::MediaControl) {
+            sendConsumerControlReport(static_cast<uint16_t>(command.value));
         }
     }
 
     _report_worker_running = false;
 }
 
-void BleHidRemote::sendKeyboardReport(uint8_t keyCode)
+void BleHidRemote::sendKeyboardReport(uint8_t keyCode, uint8_t modifiers)
 {
     std::array<uint8_t, 8> report{};
+    report[0] = modifiers;
     report[2] = keyCode;
     esp_hidd_dev_input_set(_hid_device, 0, KeyboardReportId, report.data(), report.size());
     vTaskDelay(pdMS_TO_TICKS(12));
@@ -1004,6 +1131,31 @@ void BleHidRemote::sendMouseWheelReport(int8_t delta)
     std::array<uint8_t, 4> report{};
     report[3] = static_cast<uint8_t>(delta);
     esp_hidd_dev_input_set(_hid_device, 0, MouseReportId, report.data(), report.size());
+}
+
+void BleHidRemote::sendMouseClickReport(uint8_t buttons)
+{
+    std::array<uint8_t, 4> report{};
+    report[0] = buttons;
+    esp_hidd_dev_input_set(_hid_device, 0, MouseReportId, report.data(), report.size());
+    vTaskDelay(pdMS_TO_TICKS(20));
+    report.fill(0);
+    if (_hid_device != nullptr) {
+        esp_hidd_dev_input_set(_hid_device, 0, MouseReportId, report.data(), report.size());
+    }
+}
+
+void BleHidRemote::sendConsumerControlReport(uint16_t usage)
+{
+    std::array<uint8_t, 2> report{};
+    report[0] = static_cast<uint8_t>(usage & 0xFF);
+    report[1] = static_cast<uint8_t>(usage >> 8);
+    esp_hidd_dev_input_set(_hid_device, 0, ConsumerReportId, report.data(), report.size());
+    vTaskDelay(pdMS_TO_TICKS(20));
+    report.fill(0);
+    if (_hid_device != nullptr) {
+        esp_hidd_dev_input_set(_hid_device, 0, ConsumerReportId, report.data(), report.size());
+    }
 }
 
 void BleHidRemote::configureConnection(uint16_t connectionHandle)
@@ -1170,6 +1322,43 @@ int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attribute
     if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == ActiveInstance->_speech_audio_handle) {
         return 0;
     }
+    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == ActiveInstance->_mapping_config_handle) {
+        std::array<uint8_t, UserEventMapper::WireHeaderSize + UserEventMapper::MaxRecords * UserEventMapper::WireRecordSize>
+            packet{};
+        const std::size_t length = ActiveInstance->_mapping.writeWire(packet.data(), packet.size());
+        if (length == 0) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        return os_mbuf_append(context->om, packet.data(), length) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == ActiveInstance->_mapping_config_handle) {
+        const uint16_t length = OS_MBUF_PKTLEN(context->om);
+        if (length < UserEventMapper::WireHeaderSize ||
+            length > UserEventMapper::WireHeaderSize + UserEventMapper::MaxRecords * UserEventMapper::WireRecordSize) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        std::array<uint8_t, UserEventMapper::WireHeaderSize + UserEventMapper::MaxRecords * UserEventMapper::WireRecordSize>
+            packet{};
+        if (os_mbuf_copydata(context->om, 0, length, packet.data()) != 0) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        if (!ActiveInstance->_mapping.updateFromWire(packet.data(), length)) {
+            ESP_LOGW(Tag, "invalid mapping config write length=%u", length);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        if (!ActiveInstance->_mapping.save()) {
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+        ESP_LOGI(Tag, "mapping config updated over BLE");
+        return 0;
+    }
+    if (context->op == BLE_GATT_ACCESS_OP_READ_CHR && attributeHandle == ActiveInstance->_user_event_handle) {
+        std::array<uint8_t, 8> packet{};
+        packet[0] = UserEventMapper::MappingVersion;
+        packet[5] = static_cast<uint8_t>(ActiveInstance->_user_event_sequence & 0xFF);
+        packet[6] = static_cast<uint8_t>(ActiveInstance->_user_event_sequence >> 8);
+        return os_mbuf_append(context->om, packet.data(), packet.size()) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
     if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == ActiveInstance->_host_status_handle) {
         if (OS_MBUF_PKTLEN(context->om) != 4) {
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -1192,10 +1381,12 @@ int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attribute
     return BLE_ATT_ERR_UNLIKELY;
 }
 
-void BleHidRemote::setError(int error)
+void BleHidRemote::setError(int error, const char* stage)
 {
-    _last_error = error;
-    _state      = State::Error;
+    _last_error       = error;
+    _last_error_stage = stage == nullptr ? "unknown" : stage;
+    _state            = State::Error;
+    ESP_LOGE(Tag, "BLE error stage=%s code=%d", _last_error_stage.load(), error);
 }
 
 void BleHidRemote::hostTask(void* parameter)

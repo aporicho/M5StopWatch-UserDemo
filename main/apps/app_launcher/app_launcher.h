@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #pragma once
+#include "sdkconfig.h"
 #include "view/view.h"
 #include <mooncake.h>
 #include <mooncake_templates.h>
@@ -17,6 +18,9 @@ public:
     void onLauncherRunning() override;
     void onLauncherClose() override;
     void onLauncherDestroy() override;
+#ifdef CONFIG_M5_TEST_CONTROL
+    int testSelectedIndex() const;
+#endif
 
 private:
     std::unique_ptr<view::LauncherView> _view;

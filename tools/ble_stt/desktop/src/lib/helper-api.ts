@@ -142,6 +142,35 @@ export type ServiceAction = "install" | "start" | "stop" | "restart"
 export type ModelAction = "use" | "install" | "update" | "repair" | "delete"
 export type PermissionKind = "bluetooth" | "input"
 
+export type MappingDefinition = {
+  id: string
+  code: number
+  label: string
+  locked?: boolean
+}
+
+export type MappingOption = {
+  label: string
+  value: number
+}
+
+export type MappingEntry = {
+  event: string
+  action: string
+  param0: number
+  param1: number
+  param2: number
+  flags?: number
+  locked?: boolean
+}
+
+export type MappingPayload = {
+  schema: number
+  revision: number
+  updated_at: number | null
+  entries: MappingEntry[]
+}
+
 export type ServiceEnvelope = {
   ok: boolean
   action: string
@@ -153,6 +182,18 @@ export type ModelEnvelope = {
   action: string
   message?: string
   model: ModelStatus
+}
+
+export type MappingEnvelope = {
+  ok: boolean
+  schema: number
+  mapping: MappingPayload
+  events: MappingDefinition[]
+  actions: MappingDefinition[]
+  keyOptions: MappingOption[]
+  modifierOptions: MappingOption[]
+  mouseButtons: MappingOption[]
+  mediaControls: MappingOption[]
 }
 
 const LOG_RECORD_PATTERN =
@@ -278,6 +319,23 @@ export async function helperLogs(lines = LOG_LINES) {
 export async function helperTelemetry() {
   const result = await invoke<HelperResult>("helper_telemetry")
   return parseHelperJson<TelemetryEnvelope>(result)
+}
+
+export async function helperMappings() {
+  const result = await invoke<HelperResult>("mapping_status")
+  return parseHelperJson<MappingEnvelope>(result)
+}
+
+export async function saveMappings(entries: MappingEntry[]) {
+  const result = await invoke<HelperResult>("mapping_save", {
+    payload: JSON.stringify({ entries }),
+  })
+  return parseHelperJson<MappingEnvelope>(result)
+}
+
+export async function resetMappings() {
+  const result = await invoke<HelperResult>("mapping_reset")
+  return parseHelperJson<MappingEnvelope>(result)
 }
 
 export async function invokeServiceAction(action: ServiceAction) {

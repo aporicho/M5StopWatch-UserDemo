@@ -44,7 +44,11 @@ public:
                 model::BleHidRemote::SpeechServiceState serviceState, uint16_t hostError);
     void flashKey(bool leftKey);
     int8_t consumeWheelDelta();
+    model::UserEvent consumeTouchEvent();
     bool consumePairRequested();
+    void showControls();
+    void hideControls();
+    void toggleControls();
 
 private:
     void updateStatus(model::BleHidRemote::State state, int lastError,
@@ -86,12 +90,14 @@ private:
     bool _controls_visible                                 = false;
     bool _tap_pressing                                     = false;
     bool _tap_moved                                        = false;
+    bool _tap_hold_sent                                    = false;
     bool _gesture_pressing                                 = false;
     bool _gesture_locked                                   = false;
     bool _gesture_rejected                                 = false;
     lv_point_t _gesture_start{};
     lv_point_t _gesture_last{};
     lv_point_t _tap_start{};
+    model::UserEvent _pending_touch_event = model::UserEvent::None;
     int _gesture_remainder = 0;
     int _wheel_pending     = 0;
 };

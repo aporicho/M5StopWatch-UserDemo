@@ -36,6 +36,7 @@
 
 # Build files
 build/
+build-test/
 build-idf*/
 cmake-build-*/
 /components/

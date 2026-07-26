@@ -5,6 +5,8 @@
  */
 #pragma once
 
+#include "user_event_mapping.h"
+
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -67,12 +69,17 @@ public:
     bool start();
     void stop();
     bool sendKeyTap(Key key);
+    bool sendKeyboardShortcut(uint8_t keyCode, uint8_t modifiers);
     bool sendWheel(int8_t delta);
+    bool sendMouseClick(uint8_t buttons);
+    bool sendMediaControl(uint16_t usage);
     bool pairNewComputer();
     bool startSpeech();
     void stopSpeech(bool abort = false);
     bool isSpeechReady() const;
     SpeechServiceState speechServiceState() const;
+    UserActionMapping mappingFor(UserEvent event) const;
+    bool notifyUserEvent(UserEvent event, UserActionType action, int8_t value, bool handled);
 
     HostStatus hostStatus() const
     {
@@ -99,6 +106,11 @@ public:
         return _last_error.load();
     }
 
+    const char* lastErrorStage() const
+    {
+        return _last_error_stage.load();
+    }
+
     bool isConnected() const
     {
         return _state.load() == State::Connected;
@@ -108,18 +120,22 @@ private:
     enum class CommandType : uint8_t {
         KeyTap,
         Wheel,
+        MouseClick,
+        MediaControl,
         Stop,
     };
 
     struct Command {
         CommandType type = CommandType::Stop;
-        int8_t value     = 0;
+        int16_t value    = 0;
+        uint8_t modifier = 0;
     };
 
     static constexpr uint16_t InvalidConnectionHandle = 0xFFFF;
 
     std::atomic<State> _state{State::Stopped};
     std::atomic<int> _last_error{0};
+    std::atomic<const char*> _last_error_stage{"none"};
     std::atomic<bool> _active{false};
     std::atomic<bool> _host_running{false};
     std::atomic<bool> _report_worker_running{false};
@@ -128,6 +144,7 @@ private:
     std::atomic<bool> _speech_abort_requested{false};
     std::atomic<bool> _speech_status_subscribed{false};
     std::atomic<bool> _speech_subscribed{false};
+    std::atomic<bool> _user_event_subscribed{false};
     std::atomic<bool> _pairing_open{false};
     std::atomic<HostStatus> _host_status{HostStatus::Waiting};
     std::atomic<uint16_t> _host_error{0};
@@ -140,8 +157,11 @@ private:
     uint16_t _speech_status_handle   = 0;
     uint16_t _speech_audio_handle    = 0;
     uint16_t _host_status_handle     = 0;
+    uint16_t _mapping_config_handle  = 0;
+    uint16_t _user_event_handle      = 0;
     uint16_t _speech_session         = 0;
     uint16_t _speech_sequence        = 0;
+    uint16_t _user_event_sequence    = 0;
     std::array<uint8_t, 6> _pairing_blocked_peer_address{};
     uint8_t _pairing_blocked_peer_type = 0;
     bool _pairing_blocked_peer_valid   = false;
@@ -161,14 +181,18 @@ private:
     void handleHidEvent(int32_t eventId, void* eventData);
     int handleGapEvent(struct ble_gap_event* event);
     void runReportWorker();
-    void sendKeyboardReport(uint8_t keyCode);
+    void sendKeyboardReport(uint8_t keyCode, uint8_t modifiers = 0);
     void sendMouseWheelReport(int8_t delta);
+    void sendMouseClickReport(uint8_t buttons);
+    void sendConsumerControlReport(uint16_t usage);
     void configureConnection(uint16_t connectionHandle);
     void runSpeechWorker();
     bool sendSpeechStatus(uint8_t event, uint16_t error = 0);
     bool sendSpeechAudio(const uint8_t* adpcm, std::size_t length);
     void waitForSpeechWorker();
-    void setError(int error);
+    void setError(int error, const char* stage);
+
+    UserEventMapper _mapping;
 
     static void hostTask(void* parameter);
     static void reportWorkerTask(void* parameter);

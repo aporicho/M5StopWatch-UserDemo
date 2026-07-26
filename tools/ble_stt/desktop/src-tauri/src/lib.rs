@@ -44,8 +44,8 @@ fn helper_cli_args() -> Option<Vec<String>> {
     }
     match args[0].as_str() {
         "run" | "status" | "logs" | "telemetry" | "service" | "permissions" | "prepare"
-        | "models" | "doctor" | "test" | "journey-test" | "restart" | "upgrade" | "uninstall"
-        | "help" | "--version" | "-h" | "--help" => Some(args),
+        | "models" | "mappings" | "doctor" | "test" | "journey-test" | "restart" | "upgrade"
+        | "uninstall" | "help" | "--version" | "-h" | "--help" => Some(args),
         _ => None,
     }
 }
@@ -466,6 +466,13 @@ fn validate_model_action(action: &str) -> Result<(), String> {
     }
 }
 
+fn validate_mapping_action(action: &str) -> Result<(), String> {
+    match action {
+        "status" | "save" | "reset" => Ok(()),
+        _ => Err(format!("unsupported mapping action: {action}")),
+    }
+}
+
 #[tauri::command]
 fn service_action(app: tauri::AppHandle, action: String) -> Result<HelperResult, String> {
     validate_service_action(action.as_str())?;
@@ -493,6 +500,23 @@ async fn model_action(
     tauri::async_runtime::spawn_blocking(move || run_helper(Some(&app), args))
         .await
         .map_err(|error| format!("model action failed to join: {error}"))?
+}
+
+#[tauri::command]
+fn mapping_status(app: tauri::AppHandle) -> Result<HelperResult, String> {
+    run_helper(Some(&app), ["mappings", "status", "--json"])
+}
+
+#[tauri::command]
+fn mapping_save(app: tauri::AppHandle, payload: String) -> Result<HelperResult, String> {
+    validate_mapping_action("save")?;
+    run_helper(Some(&app), ["mappings", "save", "--json", "--payload", payload.as_str()])
+}
+
+#[tauri::command]
+fn mapping_reset(app: tauri::AppHandle) -> Result<HelperResult, String> {
+    validate_mapping_action("reset")?;
+    run_helper(Some(&app), ["mappings", "reset", "--json"])
 }
 
 #[tauri::command]
@@ -555,6 +579,9 @@ pub fn run() {
             helper_telemetry,
             service_action,
             model_action,
+            mapping_status,
+            mapping_save,
+            mapping_reset,
             open_permission,
             open_logs
         ])
@@ -584,5 +611,11 @@ mod tests {
     fn rejects_unknown_model_action() {
         let error = validate_model_action("wipe").unwrap_err();
         assert!(error.contains("unsupported model action"));
+    }
+
+    #[test]
+    fn rejects_unknown_mapping_action() {
+        let error = validate_mapping_action("wipe").unwrap_err();
+        assert!(error.contains("unsupported mapping action"));
     }
 }

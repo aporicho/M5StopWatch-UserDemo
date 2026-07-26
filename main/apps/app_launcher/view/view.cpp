@@ -392,6 +392,25 @@ void LauncherView::update()
     }
 }
 
+#ifdef CONFIG_M5_TEST_CONTROL
+int LauncherView::selectedIndex() const
+{
+    if (!_panel || _icon_panels.empty()) {
+        return -1;
+    }
+    const int icons_per_set = static_cast<int>(_icon_panels.size()) / _loop_copies;
+    if (icons_per_set <= 0) {
+        return -1;
+    }
+    int index = (_panel->getScrollX() + _icon_gap / 2) / _icon_gap;
+    index %= icons_per_set;
+    if (index < 0) {
+        index += icons_per_set;
+    }
+    return index;
+}
+#endif
+
 void LauncherView::scroll_to_nearby_icon(int direction)
 {
     auto current_scroll_x = _panel->getScrollX();

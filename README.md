@@ -26,6 +26,24 @@ idf.py build
 idf.py flash
 ```
 
+### 固件自动化测试
+
+开发回归可以构建带测试入口的固件。这个入口只注入按钮和触摸输入，不直接打开应用或修改 BLE 状态，因此测试走的是实际用户路径。
+测试固件会把主 console 切到 USB Serial/JTAG，方便电脑通过同一个 USB 口发送用户输入事件。
+
+```bash
+idf.py -B build-test -D SDKCONFIG=build-test/sdkconfig -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.test" build flash
+~/.espressif/python_env/idf5.5_py3.14_env/bin/python tools/firmware_hil.py smoke --port /dev/cu.usbmodem101
+```
+
+常用旅程：
+
+```bash
+python tools/firmware_hil.py smoke --port /dev/cu.usbmodem101 --skip-ble-check
+python tools/firmware_hil.py diagnose-not-found --port /dev/cu.usbmodem101
+python tools/firmware_hil.py voice-link --port /dev/cu.usbmodem101
+```
+
 ## BLE 语音输入服务
 
 手表上的 **BLE Remote** 应用可以把按住说话时的音频传给电脑，由电脑本地完成语音识别，再把文字输入到录音开始时聚焦的窗口。音频和识别过程均保留在本机。

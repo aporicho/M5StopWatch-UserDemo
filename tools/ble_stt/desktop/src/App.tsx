@@ -9,13 +9,17 @@ import {
   DownloadIcon,
   FileTextIcon,
   FolderOpenIcon,
+  HomeIcon,
   KeyboardIcon,
+  MapIcon,
   PlayIcon,
   RefreshCwIcon,
   RotateCcwIcon,
+  SaveIcon,
   SettingsIcon,
   SquareIcon,
   Trash2Icon,
+  Undo2Icon,
   WrenchIcon,
 } from "lucide-react"
 
@@ -99,6 +103,7 @@ import {
 import { toast } from "@/components/ui/toast"
 import {
   formatBytes,
+  helperMappings,
   helperLogs,
   helperStatus,
   helperTelemetry,
@@ -111,12 +116,17 @@ import {
   openLogsFolder,
   openPermissionPanel,
   POLL_MS,
+  resetMappings,
+  saveMappings,
   serviceNeedsInputPermissionRestart,
   SERVICE_SETTLE_MS,
   sleep,
   structuredLogEntry,
   TELEMETRY_POLL_MS,
   type LogsEnvelope,
+  type MappingEntry,
+  type MappingEnvelope,
+  type MappingOption,
   type ModelAction,
   type PermissionKind,
   type RuntimeTelemetry,
@@ -163,6 +173,8 @@ type ActivityItem = {
   variant: BadgeVariant
 }
 
+type PageKey = "home" | "map"
+
 const MODEL_OPTIONS = [
   {
     value: "small",
@@ -185,6 +197,17 @@ const MODEL_OPTIONS = [
     detail: "Fast large-model variant when available.",
   },
 ] as const
+
+const WHEEL_MULTIPLIER_OPTIONS: MappingOption[] = [
+  { label: "1x", value: 1 },
+  { label: "2x", value: 2 },
+  { label: "4x", value: 4 },
+]
+
+const WHEEL_DIRECTION_OPTIONS: MappingOption[] = [
+  { label: "Normal", value: 0 },
+  { label: "Inverted", value: 1 },
+]
 
 const DEFAULT_DAILY_STATE: DailyState = {
   key: "loading",
@@ -258,6 +281,42 @@ function ratio(value: number | null | undefined) {
 
 function percent(value: number | null | undefined) {
   return `${Math.round(ratio(value) * 100)}%`
+}
+
+function mappingDefaults(action: string) {
+  switch (action) {
+    case "hid.keyboard.tap":
+      return { param0: 0x29, param1: 0, param2: 0, flags: 0 }
+    case "hid.mouse.wheel":
+      return { param0: 1, param1: 0, param2: 0, flags: 0 }
+    case "hid.mouse.click":
+      return { param0: 1, param1: 0, param2: 0, flags: 0 }
+    case "hid.media.control":
+      return { param0: 0, param1: 0, param2: 0x00CD, flags: 0 }
+    default:
+      return { param0: 0, param1: 0, param2: 0, flags: 0 }
+  }
+}
+
+function blankMappingEntry(eventId: string, locked = false): MappingEntry {
+  return {
+    event: eventId,
+    action: locked ? "device.go_home" : "none",
+    ...mappingDefaults(locked ? "device.go_home" : "none"),
+    locked,
+  }
+}
+
+function withMappingAction(entry: MappingEntry, action: string): MappingEntry {
+  return {
+    ...entry,
+    action,
+    ...mappingDefaults(action),
+  }
+}
+
+function mappingOptionValue(value: number | null | undefined) {
+  return String(value ?? 0)
 }
 
 function progressValue(value: number | null | undefined) {
@@ -1021,6 +1080,285 @@ function PermissionPanel({
   )
 }
 
+function MappingSelectField({
+  label,
+  value,
+  options,
+  disabled,
+  onChange,
+}: {
+  label: string
+  value: number
+  options: MappingOption[]
+  disabled: boolean
+  onChange: (value: number) => void
+}) {
+  return (
+    <Field>
+      <FieldLabel>{label}</FieldLabel>
+      <Select
+        value={mappingOptionValue(value)}
+        onValueChange={(nextValue) => {
+          if (nextValue == null) {
+            return
+          }
+          onChange(Number(nextValue))
+        }}
+        disabled={disabled}
+      >
+        <SelectTrigger className="w-full">
+          <SelectValue placeholder={label} />
+        </SelectTrigger>
+        <SelectContent alignItemWithTrigger={false}>
+          <SelectGroup>
+            {options.map((option) => (
+              <SelectItem key={option.value} value={String(option.value)}>
+                {option.label}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+    </Field>
+  )
+}
+
+function MappingParameterEditor({
+  entry,
+  envelope,
+  disabled,
+  onChange,
+}: {
+  entry: MappingEntry
+  envelope: MappingEnvelope
+  disabled: boolean
+  onChange: (entry: MappingEntry) => void
+}) {
+  if (entry.locked) {
+    return <p className="text-sm text-muted-foreground">Fixed safety shortcut.</p>
+  }
+
+  if (entry.action === "hid.keyboard.tap") {
+    return (
+      <FieldGroup className="grid gap-2 sm:grid-cols-2">
+        <MappingSelectField
+          label="Key"
+          value={entry.param0}
+          options={envelope.keyOptions}
+          disabled={disabled}
+          onChange={(value) => onChange({ ...entry, param0: value })}
+        />
+        <MappingSelectField
+          label="Modifier"
+          value={entry.param1}
+          options={envelope.modifierOptions}
+          disabled={disabled}
+          onChange={(value) => onChange({ ...entry, param1: value })}
+        />
+      </FieldGroup>
+    )
+  }
+
+  if (entry.action === "hid.mouse.wheel") {
+    return (
+      <FieldGroup className="grid gap-2 sm:grid-cols-2">
+        <MappingSelectField
+          label="Speed"
+          value={entry.param0}
+          options={WHEEL_MULTIPLIER_OPTIONS}
+          disabled={disabled}
+          onChange={(value) => onChange({ ...entry, param0: value })}
+        />
+        <MappingSelectField
+          label="Direction"
+          value={entry.param1}
+          options={WHEEL_DIRECTION_OPTIONS}
+          disabled={disabled}
+          onChange={(value) => onChange({ ...entry, param1: value })}
+        />
+      </FieldGroup>
+    )
+  }
+
+  if (entry.action === "hid.mouse.click") {
+    return (
+      <MappingSelectField
+        label="Button"
+        value={entry.param0}
+        options={envelope.mouseButtons}
+        disabled={disabled}
+        onChange={(value) => onChange({ ...entry, param0: value })}
+      />
+    )
+  }
+
+  if (entry.action === "hid.media.control") {
+    return (
+      <MappingSelectField
+        label="Media key"
+        value={entry.param2}
+        options={envelope.mediaControls}
+        disabled={disabled}
+        onChange={(value) => onChange({ ...entry, param2: value })}
+      />
+    )
+  }
+
+  return <p className="text-sm text-muted-foreground">No parameters.</p>
+}
+
+function MappingPage({
+  envelope,
+  entries,
+  touched,
+  busyAction,
+  refreshing,
+  onRefresh,
+  onSave,
+  onReset,
+  onChange,
+}: {
+  envelope: MappingEnvelope | null
+  entries: MappingEntry[]
+  touched: boolean
+  busyAction: string | null
+  refreshing: boolean
+  onRefresh: () => void
+  onSave: () => void
+  onReset: () => void
+  onChange: (entry: MappingEntry) => void
+}) {
+  const entriesByEvent = useMemo(
+    () => new Map(entries.map((entry) => [entry.event, entry])),
+    [entries]
+  )
+  const disabled = busyAction !== null || refreshing
+
+  if (!envelope) {
+    return (
+      <section className="min-h-0 flex-1">
+        <Card className="min-h-0">
+          <CardHeader>
+            <CardTitle>Event map</CardTitle>
+            <CardDescription>Loading watch event configuration.</CardDescription>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-4/5" />
+            <Skeleton className="h-10 w-3/5" />
+          </CardContent>
+        </Card>
+      </section>
+    )
+  }
+
+  const updatedAt = envelope.mapping.updated_at
+    ? formatUnixTime(envelope.mapping.updated_at)
+    : "defaults"
+
+  return (
+    <section className="min-h-0 flex-1">
+      <Card className="min-h-0 md:flex md:h-full md:flex-col">
+        <CardHeader className="shrink-0">
+          <div>
+            <CardTitle>Event map</CardTitle>
+            <CardDescription>Map watch gestures to keyboard, mouse, voice, and device actions.</CardDescription>
+          </div>
+          <CardAction>
+            <ButtonGroup className="flex-wrap">
+              <Button variant="outline" onClick={onRefresh} disabled={disabled}>
+                <SpinnerOrIcon busy={refreshing} icon={RefreshCwIcon} />
+                Refresh
+              </Button>
+              <Button variant="outline" onClick={onReset} disabled={disabled}>
+                <SpinnerOrIcon busy={busyAction === "mapping:reset"} icon={Undo2Icon} />
+                Reset
+              </Button>
+              <Button onClick={onSave} disabled={disabled || !touched}>
+                <SpinnerOrIcon busy={busyAction === "mapping:save"} icon={SaveIcon} />
+                Save
+              </Button>
+            </ButtonGroup>
+          </CardAction>
+        </CardHeader>
+        <CardContent className="min-h-0 md:flex-1">
+          <ScrollArea className="h-[calc(100vh-17rem)] rounded-md border md:h-full">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-48">Event</TableHead>
+                  <TableHead className="w-64">Action</TableHead>
+                  <TableHead>Parameters</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {envelope.events.map((event) => {
+                  const locked = Boolean(event.locked)
+                  const entry = entriesByEvent.get(event.id) ?? blankMappingEntry(event.id, locked)
+                  const action = envelope.actions.find((item) => item.id === entry.action)
+                  return (
+                    <TableRow key={event.id}>
+                      <TableCell className="align-top">
+                        <div className="flex flex-col gap-2">
+                          <span className="font-medium">{event.label}</span>
+                          {locked && <Badge variant="outline">Locked</Badge>}
+                        </div>
+                      </TableCell>
+                      <TableCell className="align-top">
+                        <Select
+                          value={entry.action}
+                          onValueChange={(value) => {
+                            if (value == null) {
+                              return
+                            }
+                            onChange(withMappingAction({ ...entry, locked }, value))
+                          }}
+                          disabled={disabled || locked}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue placeholder="Action" />
+                          </SelectTrigger>
+                          <SelectContent alignItemWithTrigger={false}>
+                            <SelectGroup>
+                              <SelectLabel>Actions</SelectLabel>
+                              {envelope.actions.map((item) => (
+                                <SelectItem key={item.id} value={item.id}>
+                                  {item.label}
+                                </SelectItem>
+                              ))}
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        <p className="mt-2 text-xs text-muted-foreground">
+                          {action?.id ?? entry.action}
+                        </p>
+                      </TableCell>
+                      <TableCell className="align-top">
+                        <MappingParameterEditor
+                          entry={{ ...entry, locked }}
+                          envelope={envelope}
+                          disabled={disabled}
+                          onChange={(nextEntry) => onChange(nextEntry)}
+                        />
+                      </TableCell>
+                    </TableRow>
+                  )
+                })}
+              </TableBody>
+            </Table>
+          </ScrollArea>
+        </CardContent>
+        <CardFooter className="shrink-0 justify-between text-sm text-muted-foreground">
+          <span>
+            Revision {envelope.mapping.revision} · Updated {updatedAt}
+          </span>
+          <span>{touched ? "Unsaved changes" : "Saved changes sync to the watch while connected"}</span>
+        </CardFooter>
+      </Card>
+    </section>
+  )
+}
+
 function App() {
   useSystemTheme()
 
@@ -1037,10 +1375,16 @@ function App() {
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
   const [autoFollowLogs, setAutoFollowLogs] = useState(true)
+  const [page, setPage] = useState<PageKey>("home")
+  const [mappingEnvelope, setMappingEnvelope] = useState<MappingEnvelope | null>(null)
+  const [mappingEntries, setMappingEntries] = useState<MappingEntry[]>([])
+  const [mappingTouched, setMappingTouched] = useState(false)
+  const [mappingRefreshing, setMappingRefreshing] = useState(false)
 
   const latestStatusRef = useRef<StatusEnvelope | null>(null)
   const latestLogsRef = useRef<LogsEnvelope | null>(null)
   const latestTelemetryRef = useRef<TelemetryEnvelope | null>(null)
+  const latestMappingRef = useRef<MappingEnvelope | null>(null)
   const latestTelemetryRenderKeyRef = useRef("")
   const permissionRestartInFlight = useRef(false)
   const logEndRef = useRef<HTMLDivElement | null>(null)
@@ -1103,6 +1447,13 @@ function App() {
     []
   )
 
+  const applyMappingSnapshot = useCallback((nextMapping: MappingEnvelope) => {
+    latestMappingRef.current = nextMapping
+    setMappingEnvelope(nextMapping)
+    setMappingEntries(nextMapping.mapping.entries)
+    setMappingTouched(false)
+  }, [])
+
   const showNotice = useCallback(
     (
       message: string,
@@ -1119,6 +1470,21 @@ function App() {
       }
     },
     []
+  )
+
+  const refreshMappings = useCallback(
+    async ({ notifyErrors = false }: { notifyErrors?: boolean } = {}) => {
+      setMappingRefreshing(true)
+      try {
+        const payload = await helperMappings()
+        applyMappingSnapshot(payload)
+      } catch (error) {
+        showNotice(errorMessage(error), "error", notifyErrors ? "error" : undefined)
+      } finally {
+        setMappingRefreshing(false)
+      }
+    },
+    [applyMappingSnapshot, showNotice]
   )
 
   const restartAfterInputPermissionGrant = useCallback(
@@ -1208,6 +1574,10 @@ function App() {
 
     return () => window.clearInterval(timer)
   }, [refreshAll])
+
+  useEffect(() => {
+    void refreshMappings({ notifyErrors: true })
+  }, [refreshMappings])
 
   useEffect(() => {
     void refreshTelemetry()
@@ -1363,6 +1733,49 @@ function App() {
     [refreshAll, showNotice]
   )
 
+  const updateMappingEntry = useCallback((entry: MappingEntry) => {
+    setMappingEntries((currentEntries) => {
+      const nextEntry = {
+        ...entry,
+        flags: entry.flags ?? 0,
+      }
+      const index = currentEntries.findIndex((item) => item.event === nextEntry.event)
+      if (index === -1) {
+        return [...currentEntries, nextEntry]
+      }
+      const nextEntries = [...currentEntries]
+      nextEntries[index] = nextEntry
+      return nextEntries
+    })
+    setMappingTouched(true)
+  }, [])
+
+  const saveEventMappings = useCallback(async () => {
+    setBusyAction("mapping:save")
+    try {
+      const payload = await saveMappings(mappingEntries)
+      applyMappingSnapshot(payload)
+      showNotice("event map saved", "info", "success")
+    } catch (error) {
+      showNotice(errorMessage(error), "error", "error")
+    } finally {
+      setBusyAction(null)
+    }
+  }, [applyMappingSnapshot, mappingEntries, showNotice])
+
+  const resetEventMappings = useCallback(async () => {
+    setBusyAction("mapping:reset")
+    try {
+      const payload = await resetMappings()
+      applyMappingSnapshot(payload)
+      showNotice("event map reset", "info", "success")
+    } catch (error) {
+      showNotice(errorMessage(error), "error", "error")
+    } finally {
+      setBusyAction(null)
+    }
+  }, [applyMappingSnapshot, showNotice])
+
   const openLogs = useCallback(async () => {
     setBusyAction("logs")
     try {
@@ -1381,12 +1794,15 @@ function App() {
       const snapshotLogs = latestLogsRef.current ?? (await helperLogs(LOG_LINES))
       const snapshotTelemetry =
         latestTelemetryRef.current ?? (await helperTelemetry().catch(() => null))
+      const snapshotMapping =
+        latestMappingRef.current ?? (await helperMappings().catch(() => null))
       await navigator.clipboard.writeText(
         JSON.stringify(
           {
             generated_at: new Date().toISOString(),
             status: snapshotStatus,
             telemetry: snapshotTelemetry,
+            mapping: snapshotMapping,
             logs: snapshotLogs,
           },
           null,
@@ -1465,7 +1881,19 @@ function App() {
             </div>
             <StatusBadge state={dailyState} />
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Tabs value={page} onValueChange={(value) => setPage(value as PageKey)}>
+              <TabsList>
+                <TabsTrigger value="home">
+                  <HomeIcon data-icon="inline-start" />
+                  Home
+                </TabsTrigger>
+                <TabsTrigger value="map">
+                  <MapIcon data-icon="inline-start" />
+                  Map
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
             <Button
               variant="outline"
               onClick={() => void refreshAll({ clearNotice: true, notifyErrors: true })}
@@ -1493,24 +1921,38 @@ function App() {
           </Alert>
         )}
 
-        <section className="grid gap-3 md:min-h-0 md:flex-1 md:grid-cols-3 md:overflow-hidden">
-          <div className="flex min-w-0 flex-col gap-3 md:col-span-2 md:min-h-0">
-            <StatusCard
-              state={dailyState}
-              status={status}
-              lastUpdated={lastUpdated}
-              busyAction={busyAction}
-              onAction={handleDailyAction}
-              primaryActionLabel={primaryActionLabel}
-            />
-            <TranscriptCard dictation={dictation} className="md:flex-1" />
-          </div>
+        {page === "home" ? (
+          <section className="grid gap-3 md:min-h-0 md:flex-1 md:grid-cols-3 md:overflow-hidden">
+            <div className="flex min-w-0 flex-col gap-3 md:col-span-2 md:min-h-0">
+              <StatusCard
+                state={dailyState}
+                status={status}
+                lastUpdated={lastUpdated}
+                busyAction={busyAction}
+                onAction={handleDailyAction}
+                primaryActionLabel={primaryActionLabel}
+              />
+              <TranscriptCard dictation={dictation} className="md:flex-1" />
+            </div>
 
-          <div className="flex min-w-0 flex-col gap-3 md:min-h-0">
-            <ModelCard model={currentModel} onOpenSettings={() => setSettingsOpen(true)} />
-            <RuntimeCard state={dailyState} telemetry={telemetry} className="md:min-h-0 md:flex-1" />
-          </div>
-        </section>
+            <div className="flex min-w-0 flex-col gap-3 md:min-h-0">
+              <ModelCard model={currentModel} onOpenSettings={() => setSettingsOpen(true)} />
+              <RuntimeCard state={dailyState} telemetry={telemetry} className="md:min-h-0 md:flex-1" />
+            </div>
+          </section>
+        ) : (
+          <MappingPage
+            envelope={mappingEnvelope}
+            entries={mappingEntries}
+            touched={mappingTouched}
+            busyAction={busyAction}
+            refreshing={mappingRefreshing}
+            onRefresh={() => void refreshMappings({ notifyErrors: true })}
+            onSave={() => void saveEventMappings()}
+            onReset={() => void resetEventMappings()}
+            onChange={updateMappingEntry}
+          />
+        )}
       </main>
 
       <Sheet open={settingsOpen} onOpenChange={setSettingsOpen}>

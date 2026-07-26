@@ -95,6 +95,13 @@ void AppLauncher::onLauncherDestroy()
     mclog::tagInfo(getAppInfo().name, "on close");
 }
 
+#ifdef CONFIG_M5_TEST_CONTROL
+int AppLauncher::testSelectedIndex() const
+{
+    return _view ? _view->selectedIndex() : -1;
+}
+#endif
+
 void AppLauncher::create_launcher_view()
 {
     _view = std::make_unique<view::LauncherView>();

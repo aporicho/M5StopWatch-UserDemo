@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 #pragma once
+#include "sdkconfig.h"
 #include "utils/button/Button_Class.hpp"
 #include <apps/common/common.h>
+#include <atomic>
 #include <memory>
 #include <cstddef>
 #include <cstdint>
@@ -253,6 +255,12 @@ public:
     void setButtonConfig(ButtonConfig config, bool saveToSettings = false);
     const ButtonConfig& getButtonConfig(bool loadFromSettings = false);
 
+#ifdef CONFIG_M5_TEST_CONTROL
+    void setSyntheticButtonState(bool leftButton, bool pressed);
+    void setSyntheticTouchState(bool pressed, int x = -1, int y = -1);
+    void clearSyntheticInput();
+#endif
+
     /* ---------------------------------- Badge --------------------------------- */
     bool loadBadgeImage(lv_obj_t* image);
     bool loadNextBadgeImage(lv_obj_t* image);
@@ -271,6 +279,17 @@ private:
     AudioSpectrumFrame _audio_spectrum;
     int _bl_brightness = 80;
     int _spk_volume    = 80;
+
+#ifdef CONFIG_M5_TEST_CONTROL
+    std::atomic<bool> _synthetic_btn_a_enabled{false};
+    std::atomic<bool> _synthetic_btn_b_enabled{false};
+    std::atomic<bool> _synthetic_btn_a_pressed{false};
+    std::atomic<bool> _synthetic_btn_b_pressed{false};
+    std::atomic<bool> _synthetic_touch_enabled{false};
+    std::atomic<bool> _synthetic_touch_pressed{false};
+    std::atomic<int> _synthetic_touch_x{-1};
+    std::atomic<int> _synthetic_touch_y{-1};
+#endif
 
     void i2c_init();
     void i2c_detect();
