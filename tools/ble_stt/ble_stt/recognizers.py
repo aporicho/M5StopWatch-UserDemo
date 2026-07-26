@@ -7,7 +7,7 @@ import sys
 from typing import Any
 
 from .config import model_cache_dir
-from .types import Recognizer, TranscriptSegment
+from .types import RecognitionContext, Recognizer, TranscriptSegment
 
 
 MLX_MODELS = {
@@ -84,6 +84,13 @@ class _SimplifyingRecognizer:
         return result
 
 
+def _command_prompt(context: RecognitionContext | None) -> str | None:
+    if context is None or context.mode != "command" or not context.command_phrases:
+        return None
+    phrases = "、".join(context.command_phrases[:24])
+    return f"以下是可能的中文短指令：{phrases}。请只转写用户说出的短指令。"
+
+
 class FasterWhisperRecognizer(_SimplifyingRecognizer):
     def __init__(self, model_name: str, device: str, cpu_threads: int) -> None:
         super().__init__()
@@ -113,23 +120,30 @@ class FasterWhisperRecognizer(_SimplifyingRecognizer):
             self.device = device
         print(f"[model] ready on {self.device}")
 
-    def transcribe(self, pcm: list[int]) -> list[TranscriptSegment]:
+    def transcribe(self, pcm: list[int], context: RecognitionContext | None = None) -> list[TranscriptSegment]:
         import numpy as np
 
         if not pcm:
             return []
         audio = np.asarray(pcm, dtype=np.float32) / 32768.0
-        segments, _ = self.model.transcribe(
-            audio,
-            language=None,
-            task="transcribe",
-            beam_size=1,
-            best_of=1,
-            temperature=0.0,
-            condition_on_previous_text=True,
-            vad_filter=True,
-            vad_parameters={"min_silence_duration_ms": 300},
-        )
+        kwargs: dict[str, Any] = {
+            "language": None,
+            "task": "transcribe",
+            "beam_size": 1,
+            "best_of": 1,
+            "temperature": 0.0,
+            "condition_on_previous_text": context.mode != "command" if context else True,
+            "vad_filter": True,
+            "vad_parameters": {"min_silence_duration_ms": 300},
+        }
+        prompt = _command_prompt(context)
+        if prompt:
+            kwargs["initial_prompt"] = prompt
+        try:
+            segments, _ = self.model.transcribe(audio, **kwargs)
+        except TypeError:
+            kwargs.pop("initial_prompt", None)
+            segments, _ = self.model.transcribe(audio, **kwargs)
         return self._segments(segments)
 
 
@@ -151,21 +165,28 @@ class MlxWhisperRecognizer(_SimplifyingRecognizer):
         transcribe_module.ModelHolder.get_model(self.model_name, mx.float16)
         print("[model] MLX ready")
 
-    def transcribe(self, pcm: list[int]) -> list[TranscriptSegment]:
+    def transcribe(self, pcm: list[int], context: RecognitionContext | None = None) -> list[TranscriptSegment]:
         import numpy as np
 
         if not pcm:
             return []
         audio = np.asarray(pcm, dtype=np.float32) / 32768.0
-        result = self.module.transcribe(
-            audio,
-            path_or_hf_repo=self.model_name,
-            language=None,
-            task="transcribe",
-            temperature=0.0,
-            condition_on_previous_text=True,
-            verbose=None,
-        )
+        kwargs: dict[str, Any] = {
+            "path_or_hf_repo": self.model_name,
+            "language": None,
+            "task": "transcribe",
+            "temperature": 0.0,
+            "condition_on_previous_text": context.mode != "command" if context else True,
+            "verbose": None,
+        }
+        prompt = _command_prompt(context)
+        if prompt:
+            kwargs["initial_prompt"] = prompt
+        try:
+            result = self.module.transcribe(audio, **kwargs)
+        except TypeError:
+            kwargs.pop("initial_prompt", None)
+            result = self.module.transcribe(audio, **kwargs)
         return self._segments(result.get("segments", []))
 
 

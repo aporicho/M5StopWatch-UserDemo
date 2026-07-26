@@ -11,8 +11,14 @@ class TranscriptSegment:
     text: str
 
 
+@dataclass(frozen=True)
+class RecognitionContext:
+    mode: str = "dictation"
+    command_phrases: tuple[str, ...] = ()
+
+
 class Recognizer(Protocol):
-    def transcribe(self, pcm: list[int]) -> list[TranscriptSegment]: ...
+    def transcribe(self, pcm: list[int], context: RecognitionContext | None = None) -> list[TranscriptSegment]: ...
 
 
 class TextInjector(Protocol):

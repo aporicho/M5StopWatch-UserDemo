@@ -20,6 +20,8 @@ def test_default_mapping_contains_voice_and_locked_home(tmp_path):
     mapping = read_mapping(config_at(tmp_path))
     entries = {entry["event"]: entry for entry in mapping["entries"]}
 
+    assert entries["button.left.hold"]["action"] == "voice.command.start"
+    assert entries["button.left.release_after_hold"]["action"] == "voice.command.stop"
     assert entries["button.right.hold"]["action"] == "voice.hold.start"
     assert entries["button.right.release_after_hold"]["action"] == "voice.hold.stop"
     assert entries["button.both.hold"]["action"] == "device.go_home"
@@ -97,3 +99,12 @@ def test_parse_user_event_packet():
         "value": -1,
         "sequence": 0x1234,
     }
+
+
+def test_parse_user_event_packet_reports_command_action():
+    packet = bytes([1, 2, 13, 1, 0, 0x35, 0x12, 0])
+
+    parsed = parse_user_event_packet(packet)
+
+    assert parsed["event"] == "button.left.hold"
+    assert parsed["action"] == "voice.command.start"

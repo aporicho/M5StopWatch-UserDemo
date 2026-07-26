@@ -55,6 +55,7 @@ def default_telemetry(stage: str = "offline") -> dict[str, Any]:
             "mode": "idle",
         },
         "last_text": None,
+        "last_command": None,
         "error": None,
         "updated_at": time.time(),
         "stale": True,
@@ -70,6 +71,7 @@ def make_telemetry(
     recognition_busy: bool = False,
     recognition_mode: str = "idle",
     last_text: dict[str, Any] | None = None,
+    last_command: dict[str, Any] | None = None,
     error: str | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
@@ -84,6 +86,7 @@ def make_telemetry(
                 "mode": recognition_mode,
             },
             "last_text": last_text,
+            "last_command": last_command,
             "error": error,
             "updated_at": timestamp,
             "stale": False,
@@ -130,6 +133,7 @@ def read_telemetry(path: Path | None = None, now: float | None = None) -> dict[s
     payload.setdefault("audio", default_telemetry()["audio"])
     payload.setdefault("recognition", default_telemetry()["recognition"])
     payload.setdefault("last_text", None)
+    payload.setdefault("last_command", None)
     payload.setdefault("error", None)
     payload["age_seconds"] = round(age, 3) if age is not None else None
     payload["stale"] = age is None or age > TELEMETRY_STALE_SECONDS

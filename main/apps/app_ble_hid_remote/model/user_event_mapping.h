@@ -45,6 +45,8 @@ enum class UserActionType : uint8_t {
     DeviceHideControls   = 10,
     DeviceToggleControls = 11,
     DeviceGoHome         = 12,
+    VoiceCommandStart    = 13,
+    VoiceCommandStop     = 14,
 };
 
 struct UserActionMapping {

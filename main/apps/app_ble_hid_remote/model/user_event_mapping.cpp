@@ -25,6 +25,8 @@ constexpr uint8_t KeyEnter  = 0x28;
 
 constexpr UserActionMapping DefaultMappings[] = {
     {UserEvent::ButtonLeftTap, UserActionType::HidKeyboardTap, KeyEscape, ModNone, 0, 0},
+    {UserEvent::ButtonLeftHold, UserActionType::VoiceCommandStart, 0, 0, 0, 0},
+    {UserEvent::ButtonLeftReleaseAfterHold, UserActionType::VoiceCommandStop, 0, 0, 0, 0},
     {UserEvent::ButtonRightTap, UserActionType::HidKeyboardTap, KeyEnter, ModNone, 0, 0},
     {UserEvent::ButtonRightHold, UserActionType::VoiceHoldStart, 0, 0, 0, 0},
     {UserEvent::ButtonRightReleaseAfterHold, UserActionType::VoiceHoldStop, 0, 0, 0, 0},
@@ -40,7 +42,7 @@ bool validEvent(UserEvent event)
 
 bool validAction(UserActionType action)
 {
-    return action <= UserActionType::DeviceGoHome;
+    return action <= UserActionType::VoiceCommandStop;
 }
 
 UserActionMapping sanitize(UserActionMapping record)
@@ -290,6 +292,10 @@ const char* userActionToId(UserActionType action)
             return "device.toggle_controls";
         case UserActionType::DeviceGoHome:
             return "device.go_home";
+        case UserActionType::VoiceCommandStart:
+            return "voice.command.start";
+        case UserActionType::VoiceCommandStop:
+            return "voice.command.stop";
         case UserActionType::None:
         default:
             return "none";

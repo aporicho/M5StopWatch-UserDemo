@@ -44,7 +44,7 @@ fn helper_cli_args() -> Option<Vec<String>> {
     }
     match args[0].as_str() {
         "run" | "status" | "logs" | "telemetry" | "service" | "permissions" | "prepare"
-        | "models" | "mappings" | "doctor" | "test" | "journey-test" | "restart" | "upgrade"
+        | "models" | "mappings" | "commands" | "doctor" | "test" | "journey-test" | "restart" | "upgrade"
         | "uninstall" | "help" | "--version" | "-h" | "--help" => Some(args),
         _ => None,
     }
@@ -310,6 +310,7 @@ fn default_telemetry(stage: &str) -> Value {
             "mode": "idle"
         },
         "last_text": null,
+        "last_command": null,
         "error": null,
         "updated_at": unix_timestamp(),
         "stale": true,
@@ -357,6 +358,7 @@ fn read_runtime_telemetry() -> Value {
             "mode": "idle"
         }));
         object.entry("last_text").or_insert(Value::Null);
+        object.entry("last_command").or_insert(Value::Null);
         object.entry("error").or_insert(Value::Null);
         object.insert(
             "age_seconds".into(),
@@ -473,6 +475,13 @@ fn validate_mapping_action(action: &str) -> Result<(), String> {
     }
 }
 
+fn validate_command_action(action: &str) -> Result<(), String> {
+    match action {
+        "status" | "save" | "reset" => Ok(()),
+        _ => Err(format!("unsupported command action: {action}")),
+    }
+}
+
 #[tauri::command]
 fn service_action(app: tauri::AppHandle, action: String) -> Result<HelperResult, String> {
     validate_service_action(action.as_str())?;
@@ -517,6 +526,23 @@ fn mapping_save(app: tauri::AppHandle, payload: String) -> Result<HelperResult, 
 fn mapping_reset(app: tauri::AppHandle) -> Result<HelperResult, String> {
     validate_mapping_action("reset")?;
     run_helper(Some(&app), ["mappings", "reset", "--json"])
+}
+
+#[tauri::command]
+fn command_status(app: tauri::AppHandle) -> Result<HelperResult, String> {
+    run_helper(Some(&app), ["commands", "status", "--json"])
+}
+
+#[tauri::command]
+fn command_save(app: tauri::AppHandle, payload: String) -> Result<HelperResult, String> {
+    validate_command_action("save")?;
+    run_helper(Some(&app), ["commands", "save", "--json", "--payload", payload.as_str()])
+}
+
+#[tauri::command]
+fn command_reset(app: tauri::AppHandle) -> Result<HelperResult, String> {
+    validate_command_action("reset")?;
+    run_helper(Some(&app), ["commands", "reset", "--json"])
 }
 
 #[tauri::command]
@@ -582,6 +608,9 @@ pub fn run() {
             mapping_status,
             mapping_save,
             mapping_reset,
+            command_status,
+            command_save,
+            command_reset,
             open_permission,
             open_logs
         ])
@@ -617,5 +646,11 @@ mod tests {
     fn rejects_unknown_mapping_action() {
         let error = validate_mapping_action("wipe").unwrap_err();
         assert!(error.contains("unsupported mapping action"));
+    }
+
+    #[test]
+    fn rejects_unknown_command_action() {
+        let error = validate_command_action("wipe").unwrap_err();
+        assert!(error.contains("unsupported command action"));
     }
 }

@@ -243,8 +243,10 @@ bool AppBleHidRemote::executeMappedAction(const model::UserActionMapping& mappin
         case model::UserActionType::HidMediaControl:
             return _remote->sendMediaControl(static_cast<uint16_t>(mapping.param2));
         case model::UserActionType::VoiceHoldStart:
+        case model::UserActionType::VoiceCommandStart:
             return scheduleSpeechStart();
         case model::UserActionType::VoiceHoldStop:
+        case model::UserActionType::VoiceCommandStop:
             return stopSpeechFromMapping(false);
         case model::UserActionType::VoiceToggle:
             if (_remote->isSpeechActive()) {

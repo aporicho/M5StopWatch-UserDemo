@@ -69,6 +69,8 @@ const ble_uuid128_t MappingConfigUuid =
     BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x04, 0x10, 0x3a, 0x7f);
 const ble_uuid128_t UserEventUuid =
     BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x05, 0x10, 0x3a, 0x7f);
+const ble_uuid128_t ActionExecUuid =
+    BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x06, 0x10, 0x3a, 0x7f);
 
 constexpr uint8_t HidReportMap[] = {
     // Keyboard, report ID 1.
@@ -639,7 +641,7 @@ bool BleHidRemote::initializeBluetooth()
 
 bool BleHidRemote::registerSpeechService()
 {
-    static ble_gatt_chr_def characteristics[6]{};
+    static ble_gatt_chr_def characteristics[7]{};
     static ble_gatt_svc_def services[2]{};
     static bool initialized = false;
 
@@ -670,6 +672,11 @@ bool BleHidRemote::registerSpeechService()
         characteristics[4].flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_NOTIFY;
         characteristics[4].val_handle = &_user_event_handle;
 
+        characteristics[5].uuid       = &ActionExecUuid.u;
+        characteristics[5].access_cb  = speechGattAccess;
+        characteristics[5].flags      = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC;
+        characteristics[5].val_handle = &_action_exec_handle;
+
         services[0].type            = BLE_GATT_SVC_TYPE_PRIMARY;
         services[0].uuid            = &SpeechServiceUuid.u;
         services[0].characteristics = characteristics;
@@ -682,6 +689,7 @@ bool BleHidRemote::registerSpeechService()
         characteristics[2].val_handle = &_host_status_handle;
         characteristics[3].val_handle = &_mapping_config_handle;
         characteristics[4].val_handle = &_user_event_handle;
+        characteristics[5].val_handle = &_action_exec_handle;
     }
 
     int result = ble_gatts_count_cfg(services);
@@ -1369,6 +1377,60 @@ int BleHidRemote::writeHostStatus(ble_gatt_access_ctxt* context)
     return 0;
 }
 
+int BleHidRemote::writeActionExecute(ble_gatt_access_ctxt* context)
+{
+    if (OS_MBUF_PKTLEN(context->om) != 8) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    std::array<uint8_t, 8> packet{};
+    if (os_mbuf_copydata(context->om, 0, packet.size(), packet.data()) != 0) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (packet[0] != UserEventMapper::MappingVersion) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+
+    const auto action = static_cast<UserActionType>(packet[1]);
+    const uint8_t param0 = packet[2];
+    const uint8_t param1 = packet[3];
+    const int16_t param2 = static_cast<int16_t>(packet[4] | (packet[5] << 8));
+    bool handled = false;
+
+    switch (action) {
+        case UserActionType::None:
+            handled = true;
+            break;
+        case UserActionType::HidKeyboardTap:
+            handled = sendKeyboardShortcut(param0, param1);
+            break;
+        case UserActionType::HidMouseWheel: {
+            int delta = param2 == 0 ? 1 : param2;
+            delta *= param0 == 0 ? 1 : param0;
+            if (param1 != 0) {
+                delta = -delta;
+            }
+            delta = std::clamp(delta, -127, 127);
+            handled = sendWheel(static_cast<int8_t>(delta));
+            break;
+        }
+        case UserActionType::HidMouseClick:
+            handled = sendMouseClick(param0 == 0 ? 1 : param0);
+            break;
+        case UserActionType::HidMediaControl:
+            handled = sendMediaControl(static_cast<uint16_t>(param2));
+            break;
+        case UserActionType::DevicePairNewComputer:
+            handled = pairNewComputer();
+            break;
+        default:
+            handled = false;
+            break;
+    }
+
+    ESP_LOGI(Tag, "host action execute action=%u handled=%d", static_cast<unsigned>(packet[1]), handled ? 1 : 0);
+    return handled ? 0 : BLE_ATT_ERR_UNLIKELY;
+}
+
 int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attributeHandle, ble_gatt_access_ctxt* context,
                                    void* argument)
 {
@@ -1398,6 +1460,9 @@ int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attribute
     }
     if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == instance->_host_status_handle) {
         return instance->writeHostStatus(context);
+    }
+    if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == instance->_action_exec_handle) {
+        return instance->writeActionExecute(context);
     }
     return BLE_ATT_ERR_UNLIKELY;
 }

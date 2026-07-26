@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import __version__
+from .commands import command_payload, read_commands, reset_commands, save_commands
 from .config import UserConfig, install_dir, log_dir
 from .diagnostics import event_log_paths
 from .mapping import mapping_payload, read_mapping, reset_mapping, save_mapping
@@ -48,6 +49,7 @@ COMMANDS = {
     "prepare",
     "models",
     "mappings",
+    "commands",
     "permissions",
     "help",
 }
@@ -212,6 +214,39 @@ def manage_mappings(argv: Sequence[str]) -> int:
     else:
         mapping = read_mapping(config)
         print(f"[ok] {len(mapping['entries'])} mapping record(s), revision {mapping['revision']}")
+    return 0
+
+
+def manage_commands(argv: Sequence[str]) -> int:
+    values = [value for value in argv if value != "--json"]
+    json_output = len(values) != len(argv)
+    parser = argparse.ArgumentParser(prog="ble-stt commands", description="Manage voice command mappings")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    subparsers.add_parser("status")
+    save_parser = subparsers.add_parser("save")
+    save_parser.add_argument("--payload", required=True, help="JSON payload with an entries array")
+    subparsers.add_parser("reset")
+
+    args = parser.parse_args(values)
+    config = UserConfig()
+    if args.action == "status":
+        payload = {"ok": True, "action": args.action, **command_payload(config)}
+    elif args.action == "save":
+        value = json.loads(args.payload)
+        entries = value.get("entries") if isinstance(value, dict) else value
+        if not isinstance(entries, list):
+            raise ValueError("command payload must contain an entries array")
+        commands = save_commands(entries, config)
+        payload = {"ok": True, "action": args.action, "commands": commands, **command_payload(config)}
+    else:
+        commands = reset_commands(config)
+        payload = {"ok": True, "action": args.action, "commands": commands, **command_payload(config)}
+
+    if json_output:
+        _print_json(payload)
+    else:
+        commands = read_commands(config)
+        print(f"[ok] {len(commands['entries'])} command(s), revision {commands['revision']}")
     return 0
 
 
@@ -496,6 +531,7 @@ Commands:
   prepare      Download and validate the speech model now
   models       Select, install, update, repair, and delete speech models
   mappings     Configure watch event-to-action mappings
+  commands     Configure speech command-to-action mappings
   logs         Show or follow background service logs
   telemetry    Show live runtime telemetry for the desktop HUD
   restart      Restart the login service
@@ -548,6 +584,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             code = manage_models(values)
         elif command == "mappings":
             code = manage_mappings(values)
+        elif command == "commands":
+            code = manage_commands(values)
         elif command == "logs":
             code = show_logs(values)
         elif command == "telemetry":

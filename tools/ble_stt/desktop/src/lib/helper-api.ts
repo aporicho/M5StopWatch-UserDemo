@@ -127,6 +127,16 @@ export type RuntimeTelemetry = {
     final: boolean
     time: number
   } | null
+  last_command: {
+    text: string
+    matched: boolean
+    phrase: string | null
+    action: string | null
+    score: number
+    reason: string
+    time: number
+    error?: string
+  } | null
   error: string | null
   updated_at: number
   stale: boolean
@@ -189,6 +199,36 @@ export type MappingEnvelope = {
   schema: number
   mapping: MappingPayload
   events: MappingDefinition[]
+  actions: MappingDefinition[]
+  keyOptions: MappingOption[]
+  modifierOptions: MappingOption[]
+  mouseButtons: MappingOption[]
+  mediaControls: MappingOption[]
+}
+
+export type CommandEntry = {
+  id: string
+  phrase: string
+  aliases: string[]
+  enabled: boolean
+  action: string
+  param0: number
+  param1: number
+  param2: number
+  flags?: number
+}
+
+export type CommandPayload = {
+  schema: number
+  revision: number
+  updated_at: number | null
+  entries: CommandEntry[]
+}
+
+export type CommandEnvelope = {
+  ok: boolean
+  schema: number
+  commands: CommandPayload
   actions: MappingDefinition[]
   keyOptions: MappingOption[]
   modifierOptions: MappingOption[]
@@ -326,6 +366,11 @@ export async function helperMappings() {
   return parseHelperJson<MappingEnvelope>(result)
 }
 
+export async function helperCommands() {
+  const result = await invoke<HelperResult>("command_status")
+  return parseHelperJson<CommandEnvelope>(result)
+}
+
 export async function saveMappings(entries: MappingEntry[]) {
   const result = await invoke<HelperResult>("mapping_save", {
     payload: JSON.stringify({ entries }),
@@ -336,6 +381,18 @@ export async function saveMappings(entries: MappingEntry[]) {
 export async function resetMappings() {
   const result = await invoke<HelperResult>("mapping_reset")
   return parseHelperJson<MappingEnvelope>(result)
+}
+
+export async function saveCommands(entries: CommandEntry[]) {
+  const result = await invoke<HelperResult>("command_save", {
+    payload: JSON.stringify({ entries }),
+  })
+  return parseHelperJson<CommandEnvelope>(result)
+}
+
+export async function resetCommands() {
+  const result = await invoke<HelperResult>("command_reset")
+  return parseHelperJson<CommandEnvelope>(result)
 }
 
 export async function invokeServiceAction(action: ServiceAction) {

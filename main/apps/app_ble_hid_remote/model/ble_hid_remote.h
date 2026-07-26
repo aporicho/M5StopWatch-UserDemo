@@ -153,6 +153,7 @@ private:
     uint16_t _host_status_handle     = 0;
     uint16_t _mapping_config_handle  = 0;
     uint16_t _user_event_handle      = 0;
+    uint16_t _action_exec_handle     = 0;
     uint16_t _speech_session         = 0;
     uint16_t _speech_sequence        = 0;
     uint16_t _user_event_sequence    = 0;
@@ -190,6 +191,7 @@ private:
     int writeMappingConfig(struct ble_gatt_access_ctxt* context);
     int readUserEvent(struct ble_gatt_access_ctxt* context);
     int writeHostStatus(struct ble_gatt_access_ctxt* context);
+    int writeActionExecute(struct ble_gatt_access_ctxt* context);
     void setError(int error, const char* stage);
 
     UserEventMapper _mapping;

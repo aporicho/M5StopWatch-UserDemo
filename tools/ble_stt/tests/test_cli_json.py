@@ -131,6 +131,22 @@ class CliJsonTests(unittest.TestCase):
         self.assertEqual(payload["mapping"]["entries"][0]["event"], "button.left.tap")
         self.assertEqual(payload["events"][-1]["id"], "button.both.hold")
 
+    def test_commands_json_reports_default_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "ble-stt.json"
+            with patch("ble_stt.cli.UserConfig", return_value=UserConfig(config_path)):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.main(["commands", "status", "--json"])
+
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["commands"]["entries"][0]["phrase"], "清空")
+        self.assertTrue(any(action["id"] == "hid.keyboard.tap" for action in payload["actions"]))
+
 
 if __name__ == "__main__":
     unittest.main()

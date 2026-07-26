@@ -64,6 +64,8 @@ ACTIONS = (
     ActionDefinition("device.hide_controls", 10, "Hide controls"),
     ActionDefinition("device.toggle_controls", 11, "Toggle controls"),
     ActionDefinition("device.go_home", 12, "Go home"),
+    ActionDefinition("voice.command.start", 13, "Command start"),
+    ActionDefinition("voice.command.stop", 14, "Command stop"),
 )
 
 KEY_OPTIONS = (
@@ -162,6 +164,8 @@ def default_scroll_direction() -> int:
 def default_entries() -> list[dict[str, Any]]:
     return [
         {"event": "button.left.tap", "action": "hid.keyboard.tap", "param0": 0x29, "param1": 0, "param2": 0},
+        {"event": "button.left.hold", "action": "voice.command.start", "param0": 0, "param1": 0, "param2": 0},
+        {"event": "button.left.release_after_hold", "action": "voice.command.stop", "param0": 0, "param1": 0, "param2": 0},
         {"event": "button.right.tap", "action": "hid.keyboard.tap", "param0": 0x28, "param1": 0, "param2": 0},
         {"event": "button.right.hold", "action": "voice.hold.start", "param0": 0, "param1": 0, "param2": 0},
         {"event": "button.right.release_after_hold", "action": "voice.hold.stop", "param0": 0, "param1": 0, "param2": 0},
@@ -280,6 +284,24 @@ def encode_mapping(mapping: dict[str, Any]) -> bytes:
             )
         )
     return bytes(output)
+
+
+def encode_action_packet(entry: dict[str, Any]) -> bytes:
+    cleaned = _clean_entry({"event": "button.left.tap", **entry})
+    param2 = int(cleaned.get("param2", 0))
+    flags = int(cleaned.get("flags", 0))
+    return bytes(
+        (
+            WIRE_VERSION,
+            ACTION_BY_ID[cleaned["action"]].code,
+            int(cleaned.get("param0", 0)) & 0xFF,
+            int(cleaned.get("param1", 0)) & 0xFF,
+            param2 & 0xFF,
+            (param2 >> 8) & 0xFF,
+            flags & 0xFF,
+            (flags >> 8) & 0xFF,
+        )
+    )
 
 
 def decode_mapping(data: bytes) -> dict[str, Any]:
