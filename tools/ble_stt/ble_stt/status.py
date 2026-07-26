@@ -9,6 +9,7 @@ from .diagnostics import event_log_paths
 from .models import ModelStatus, model_status
 from .platforms import create_platform
 from .service import ServiceManager
+from .telemetry import TELEMETRY_FILE_NAME, read_telemetry
 
 
 @dataclass(frozen=True)
@@ -219,9 +220,35 @@ def _service_state(manager: ServiceManager) -> tuple[bool, bool, str | None]:
         return False, False, str(exc)
 
 
-def _runtime_status(service_running: bool, latest_event: str | None) -> RuntimeStatus:
+def _runtime_status_from_telemetry(telemetry: dict[str, Any] | None) -> RuntimeStatus | None:
+    if not telemetry or telemetry.get("stale"):
+        return None
+
+    stage = str(telemetry.get("stage") or "").lower()
+    error = telemetry.get("error")
+    if stage == "error":
+        return RuntimeStatus(False, str(error) if error else "runtime error")
+    if stage in {"ready", "inserted"}:
+        return RuntimeStatus(True, "ready")
+    if stage in {"listening", "recognizing"}:
+        return RuntimeStatus(True, stage)
+    if stage == "offline":
+        return RuntimeStatus(False, "service is offline")
+    if stage:
+        return RuntimeStatus(False, stage.replace("_", " "))
+    return None
+
+
+def _runtime_status(
+    service_running: bool,
+    latest_event: str | None,
+    telemetry: dict[str, Any] | None = None,
+) -> RuntimeStatus:
     if not service_running:
         return RuntimeStatus(False, "service is not running")
+    telemetry_status = _runtime_status_from_telemetry(telemetry)
+    if telemetry_status is not None:
+        return telemetry_status
     if not latest_event:
         return RuntimeStatus(False, "waiting for service log")
 
@@ -289,12 +316,13 @@ def collect_status(
     resolved_log_paths = log_paths or event_log_paths(platform_name)
 
     latest_event = latest_log_line(resolved_log_paths)
+    runtime_telemetry = read_telemetry(resolved_log_directory / TELEMETRY_FILE_NAME)
 
     return StatusSnapshot(
         service_installed=installed,
         service_running=running,
         service_error=service_error,
-        runtime=_runtime_status(running, latest_event),
+        runtime=_runtime_status(running, latest_event, runtime_telemetry),
         watch_id=str(watch_id) if watch_id else None,
         engine=engine,
         model=model,

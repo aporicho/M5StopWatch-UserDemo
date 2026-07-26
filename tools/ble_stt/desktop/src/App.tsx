@@ -84,6 +84,7 @@ import {
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet"
+import { Slider } from "@/components/ui/slider"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import {
@@ -100,6 +101,7 @@ import {
   TabsList,
   TabsTrigger,
 } from "@/components/ui/tabs"
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { toast } from "@/components/ui/toast"
 import {
   formatBytes,
@@ -209,12 +211,20 @@ const MODEL_OPTIONS = [
 const WHEEL_MULTIPLIER_OPTIONS: MappingOption[] = [
   { label: "1x", value: 1 },
   { label: "2x", value: 2 },
+  { label: "3x", value: 3 },
   { label: "4x", value: 4 },
 ]
 
 const WHEEL_DIRECTION_OPTIONS: MappingOption[] = [
   { label: "Normal", value: 0 },
   { label: "Inverted", value: 1 },
+]
+
+const MODIFIER_TOGGLE_OPTIONS: MappingOption[] = [
+  { label: "Ctrl", value: 1 },
+  { label: "Shift", value: 2 },
+  { label: "Alt", value: 4 },
+  { label: "Cmd / Win", value: 8 },
 ]
 
 const COMMON_MAPPING_EVENT_IDS = new Set([
@@ -406,6 +416,18 @@ function localizedMappingOptionLabel(label: string, t: Translator) {
   if (normalized === "none") {
     return t("map.option.none", label)
   }
+  if (normalized === "ctrl") {
+    return t("map.option.ctrl", label)
+  }
+  if (normalized === "shift") {
+    return t("map.option.shift", label)
+  }
+  if (normalized === "alt") {
+    return t("map.option.alt", label)
+  }
+  if (normalized === "cmd / win") {
+    return t("map.option.cmd_win", label)
+  }
   if (normalized === "normal") {
     return t("map.option.normal", label)
   }
@@ -424,6 +446,13 @@ function mappingOptionLabel(options: MappingOption[], value: number, t: Translat
   return localizedMappingOptionLabel(option?.label ?? String(value), t)
 }
 
+function modifierLabel(value: number, t: Translator) {
+  const labels = MODIFIER_TOGGLE_OPTIONS
+    .filter((option) => (value & option.value) !== 0)
+    .map((option) => localizedMappingOptionLabel(option.label, t))
+  return labels.length ? labels.join("+") : t("map.option.none", "None")
+}
+
 function mappingActionSummary(entry: MappingEntry, envelope: MappingEnvelope, t: Translator) {
   if (entry.locked) {
     return t("mapping.locked_summary", "Fixed safety action")
@@ -436,7 +465,7 @@ function mappingActionSummary(entry: MappingEntry, envelope: MappingEnvelope, t:
       return t("mapping.none_summary", "No action")
     case "hid.keyboard.tap": {
       const key = mappingOptionLabel(envelope.keyOptions, entry.param0, t)
-      const modifier = mappingOptionLabel(envelope.modifierOptions, entry.param1, t)
+      const modifier = modifierLabel(entry.param1, t)
       return modifier === t("map.option.none", "None") ? key : `${modifier} + ${key}`
     }
     case "hid.mouse.wheel": {
@@ -1281,6 +1310,134 @@ function MappingSelectField({
   )
 }
 
+function MappingToggleField({
+  label,
+  value,
+  options,
+  disabled,
+  onChange,
+  t,
+}: {
+  label: string
+  value: number
+  options: MappingOption[]
+  disabled: boolean
+  onChange: (value: number) => void
+  t: Translator
+}) {
+  return (
+    <Field data-disabled={disabled ? true : undefined}>
+      <FieldLabel>{label}</FieldLabel>
+      <ToggleGroup
+        aria-label={label}
+        className="flex w-full flex-wrap"
+        spacing={0}
+        variant="outline"
+        value={[String(value)]}
+        onValueChange={(nextValues) => {
+          const nextValue = nextValues[nextValues.length - 1]
+          if (nextValue == null) {
+            return
+          }
+          onChange(Number(nextValue))
+        }}
+      >
+        {options.map((option) => (
+          <ToggleGroupItem
+            key={option.value}
+            className="min-w-20 flex-1"
+            disabled={disabled}
+            value={String(option.value)}
+          >
+            {localizedMappingOptionLabel(option.label, t)}
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+    </Field>
+  )
+}
+
+function MappingModifierField({
+  label,
+  value,
+  disabled,
+  onChange,
+  t,
+}: {
+  label: string
+  value: number
+  disabled: boolean
+  onChange: (value: number) => void
+  t: Translator
+}) {
+  return (
+    <Field data-disabled={disabled ? true : undefined}>
+      <FieldLabel>{label}</FieldLabel>
+      <ToggleGroup
+        aria-label={label}
+        className="flex w-full flex-wrap"
+        spacing={0}
+        variant="outline"
+        value={MODIFIER_TOGGLE_OPTIONS.filter((option) => (value & option.value) !== 0).map((option) => String(option.value))}
+        onValueChange={(nextValues) => {
+          const nextValue = nextValues.reduce((mask, item) => mask | Number(item), 0)
+          onChange(nextValue)
+        }}
+      >
+        {MODIFIER_TOGGLE_OPTIONS.map((option) => (
+          <ToggleGroupItem
+            key={option.value}
+            className="min-w-20 flex-1"
+            disabled={disabled}
+            value={String(option.value)}
+          >
+            {localizedMappingOptionLabel(option.label, t)}
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
+      <FieldDescription>{modifierLabel(value, t)}</FieldDescription>
+    </Field>
+  )
+}
+
+function MappingWheelSpeedField({
+  label,
+  value,
+  disabled,
+  onChange,
+}: {
+  label: string
+  value: number
+  disabled: boolean
+  onChange: (value: number) => void
+}) {
+  const safeValue = Math.min(4, Math.max(1, Math.round(value || 1)))
+
+  return (
+    <Field data-disabled={disabled ? true : undefined}>
+      <div className="flex items-center justify-between gap-3">
+        <FieldLabel>{label}</FieldLabel>
+        <Badge variant="outline">{safeValue}x</Badge>
+      </div>
+      <Slider
+        disabled={disabled}
+        max={4}
+        min={1}
+        step={1}
+        value={[safeValue]}
+        onValueChange={(nextValue) => {
+          const next = Array.isArray(nextValue) ? nextValue[0] : nextValue
+          onChange(Math.min(4, Math.max(1, Math.round(next || 1))))
+        }}
+      />
+      <div className="flex justify-between gap-2 text-xs text-muted-foreground">
+        <span>1x</span>
+        <span>4x</span>
+      </div>
+    </Field>
+  )
+}
+
 function MappingParameterEditor({
   entry,
   envelope,
@@ -1300,7 +1457,7 @@ function MappingParameterEditor({
 
   if (entry.action === "hid.keyboard.tap") {
     return (
-      <FieldGroup className="grid gap-2 sm:grid-cols-2">
+      <FieldGroup>
         <MappingSelectField
           label={t("mapping.key", "Key")}
           value={entry.param0}
@@ -1308,12 +1465,12 @@ function MappingParameterEditor({
           disabled={disabled}
           onChange={(value) => onChange({ ...entry, param0: value })}
         />
-        <MappingSelectField
+        <MappingModifierField
           label={t("mapping.modifier", "Modifier")}
           value={entry.param1}
-          options={envelope.modifierOptions}
           disabled={disabled}
           onChange={(value) => onChange({ ...entry, param1: value })}
+          t={t}
         />
       </FieldGroup>
     )
@@ -1321,20 +1478,20 @@ function MappingParameterEditor({
 
   if (entry.action === "hid.mouse.wheel") {
     return (
-      <FieldGroup className="grid gap-2 sm:grid-cols-2">
-        <MappingSelectField
+      <FieldGroup>
+        <MappingWheelSpeedField
           label={t("mapping.speed", "Speed")}
           value={entry.param0}
-          options={WHEEL_MULTIPLIER_OPTIONS}
           disabled={disabled}
           onChange={(value) => onChange({ ...entry, param0: value })}
         />
-        <MappingSelectField
+        <MappingToggleField
           label={t("mapping.direction", "Direction")}
           value={entry.param1}
           options={WHEEL_DIRECTION_OPTIONS}
           disabled={disabled}
           onChange={(value) => onChange({ ...entry, param1: value })}
+          t={t}
         />
       </FieldGroup>
     )
@@ -1342,24 +1499,26 @@ function MappingParameterEditor({
 
   if (entry.action === "hid.mouse.click") {
     return (
-      <MappingSelectField
+      <MappingToggleField
         label={t("mapping.button", "Button")}
         value={entry.param0}
         options={envelope.mouseButtons}
         disabled={disabled}
         onChange={(value) => onChange({ ...entry, param0: value })}
+        t={t}
       />
     )
   }
 
   if (entry.action === "hid.media.control") {
     return (
-      <MappingSelectField
+      <MappingToggleField
         label={t("mapping.media_key", "Media key")}
         value={entry.param2}
         options={envelope.mediaControls}
         disabled={disabled}
         onChange={(value) => onChange({ ...entry, param2: value })}
+        t={t}
       />
     )
   }
@@ -1799,11 +1958,15 @@ function App() {
     async ({
       clearNotice = false,
       notifyErrors = false,
+      showBusy = false,
     }: {
       clearNotice?: boolean
       notifyErrors?: boolean
+      showBusy?: boolean
     } = {}) => {
-      setRefreshing(true)
+      if (showBusy) {
+        setRefreshing(true)
+      }
       try {
         const [nextStatus, nextLogs, nextTelemetry] = await Promise.all([
           helperStatus(),
@@ -1818,7 +1981,9 @@ function App() {
       } catch (error) {
         showNotice(errorMessage(error), "error", notifyErrors ? "error" : undefined)
       } finally {
-        setRefreshing(false)
+        if (showBusy) {
+          setRefreshing(false)
+        }
       }
     },
     [applySnapshots, restartAfterInputPermissionGrant, showNotice]
@@ -2173,7 +2338,7 @@ function App() {
             </Tabs>
             <Button
               variant="outline"
-              onClick={() => void refreshAll({ clearNotice: true, notifyErrors: true })}
+              onClick={() => void refreshAll({ clearNotice: true, notifyErrors: true, showBusy: true })}
               disabled={busyAction !== null || refreshing}
             >
               <SpinnerOrIcon busy={busyAction === null && refreshing} icon={RefreshCwIcon} />

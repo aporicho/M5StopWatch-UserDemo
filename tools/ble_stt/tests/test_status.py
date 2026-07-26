@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from ble_stt.status import collect_status, latest_log_line, snapshot_to_dict, status_lines
+from ble_stt.telemetry import make_telemetry, write_telemetry
 
 
 class FakeConfig:
@@ -157,6 +158,42 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(payload["overall"]["label"], "Watch connected")
         self.assertEqual(payload["watch"]["id"], "watch-123")
         self.assertFalse(payload["voice"]["ready"])
+
+    def test_fresh_runtime_telemetry_overrides_unrelated_latest_event(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_snapshot = root / "cache" / "hub" / "models--Systran--faster-whisper-small" / "snapshots" / "revision"
+            model_snapshot.mkdir(parents=True)
+            (model_snapshot / "model.bin").write_text("weights", encoding="utf-8")
+            event_log = root / "ble-stt-events.log"
+            event_log.write_text(
+                "2026-07-25 20:00:00.000 INFO [123:MainThread] ble_stt.runtime: "
+                "watch event event=touch.scroll_delta action=hid.mouse.wheel handled=True value=1 sequence=31\n",
+                encoding="utf-8",
+            )
+            write_telemetry(make_telemetry(stage="ready", session_id=10), root / "ble-stt-runtime.json")
+            with patch("ble_stt.models.model_cache_dir", return_value=root / "cache"):
+                snapshot = collect_status(
+                    manager=FakeManager(installed=True, active=True),
+                    config=FakeConfig(
+                        {
+                            "device_id": "watch-123",
+                            "engine": "faster-whisper",
+                            "model": "small",
+                            "prepared_model": "small",
+                        }
+                    ),
+                    platform_adapter=FakePlatform(),
+                    log_directory=root,
+                    log_paths=(event_log,),
+                )
+
+        payload = snapshot_to_dict(snapshot)
+
+        self.assertTrue(snapshot.ready_for_voice)
+        self.assertEqual(payload["overall"]["code"], "voice_ready")
+        self.assertTrue(payload["voice"]["ready"])
+        self.assertEqual(payload["voice"]["message"], "ready")
 
     def test_service_error_is_reported_as_failed_service_line(self):
         snapshot = collect_status(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -154,13 +155,23 @@ ACTION_BY_ID = {item.id: item for item in ACTIONS}
 ACTION_BY_CODE = {item.code: item for item in ACTIONS}
 
 
+def default_scroll_direction() -> int:
+    return 1 if sys.platform == "darwin" else 0
+
+
 def default_entries() -> list[dict[str, Any]]:
     return [
         {"event": "button.left.tap", "action": "hid.keyboard.tap", "param0": 0x29, "param1": 0, "param2": 0},
         {"event": "button.right.tap", "action": "hid.keyboard.tap", "param0": 0x28, "param1": 0, "param2": 0},
         {"event": "button.right.hold", "action": "voice.hold.start", "param0": 0, "param1": 0, "param2": 0},
         {"event": "button.right.release_after_hold", "action": "voice.hold.stop", "param0": 0, "param1": 0, "param2": 0},
-        {"event": "touch.scroll_delta", "action": "hid.mouse.wheel", "param0": 1, "param1": 0, "param2": 0},
+        {
+            "event": "touch.scroll_delta",
+            "action": "hid.mouse.wheel",
+            "param0": 1,
+            "param1": default_scroll_direction(),
+            "param2": 0,
+        },
         {"event": "touch.triple_tap", "action": "device.toggle_controls", "param0": 0, "param1": 0, "param2": 0},
         {"event": "button.both.hold", "action": "device.go_home", "param0": 0, "param1": 0, "param2": 0, "locked": True},
     ]

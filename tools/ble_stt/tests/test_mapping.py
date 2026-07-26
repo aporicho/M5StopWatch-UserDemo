@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unittest.mock import patch
+
 from ble_stt.config import UserConfig
 from ble_stt.mapping import (
     decode_mapping,
@@ -22,6 +24,24 @@ def test_default_mapping_contains_voice_and_locked_home(tmp_path):
     assert entries["button.right.release_after_hold"]["action"] == "voice.hold.stop"
     assert entries["button.both.hold"]["action"] == "device.go_home"
     assert entries["button.both.hold"]["locked"] is True
+
+
+def test_default_scroll_direction_is_inverted_on_macos(tmp_path):
+    with patch("ble_stt.mapping.sys.platform", "darwin"):
+        mapping = read_mapping(config_at(tmp_path))
+    entries = {entry["event"]: entry for entry in mapping["entries"]}
+
+    assert entries["touch.scroll_delta"]["action"] == "hid.mouse.wheel"
+    assert entries["touch.scroll_delta"]["param1"] == 1
+
+
+def test_default_scroll_direction_is_normal_off_macos(tmp_path):
+    with patch("ble_stt.mapping.sys.platform", "win32"):
+        mapping = read_mapping(config_at(tmp_path))
+    entries = {entry["event"]: entry for entry in mapping["entries"]}
+
+    assert entries["touch.scroll_delta"]["action"] == "hid.mouse.wheel"
+    assert entries["touch.scroll_delta"]["param1"] == 0
 
 
 def test_save_mapping_preserves_locked_home(tmp_path):
