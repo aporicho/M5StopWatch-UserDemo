@@ -1,9 +1,12 @@
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::{
     env,
     ffi::OsStr,
+    fs,
     path::{Path, PathBuf},
     process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{path::BaseDirectory, Manager};
 
@@ -23,6 +26,10 @@ struct HelperResult {
     stderr: String,
 }
 
+const TELEMETRY_FILE_NAME: &str = "ble-stt-runtime.json";
+const TELEMETRY_SCHEMA: i32 = 1;
+const TELEMETRY_STALE_SECONDS: f64 = 8.0;
+
 fn helper_cli_args() -> Option<Vec<String>> {
     let mut args: Vec<String> = env::args()
         .skip(1)
@@ -36,9 +43,9 @@ fn helper_cli_args() -> Option<Vec<String>> {
         return Some(args);
     }
     match args[0].as_str() {
-        "run" | "status" | "logs" | "service" | "permissions" | "prepare" | "doctor" | "test"
-        | "journey-test" | "restart" | "upgrade" | "uninstall" | "help" | "--version" | "-h"
-        | "--help" => Some(args),
+        "run" | "status" | "logs" | "telemetry" | "service" | "permissions" | "prepare"
+        | "models" | "doctor" | "test" | "journey-test" | "restart" | "upgrade" | "uninstall"
+        | "help" | "--version" | "-h" | "--help" => Some(args),
         _ => None,
     }
 }
@@ -191,6 +198,7 @@ where
     let mut command = Command::new(&helper.program);
     command.args(&helper.prefix_args).args(args);
     configure_macos_service_env(&mut command, &helper);
+    configure_bundled_models_env(&mut command, app, &helper);
     if let Some(path) = helper.python_path {
         command.env("PYTHONPATH", path);
     }
@@ -213,6 +221,7 @@ fn run_helper_passthrough(args: &[String]) -> Result<i32, String> {
     let mut command = Command::new(&helper.program);
     command.args(&helper.prefix_args).args(args);
     configure_macos_service_env(&mut command, &helper);
+    configure_bundled_models_env(&mut command, None, &helper);
     if let Some(path) = helper.python_path {
         command.env("PYTHONPATH", path);
     }
@@ -238,6 +247,165 @@ fn configure_macos_service_env(command: &mut Command, helper: &HelperInvocation)
 
 #[cfg(not(target_os = "macos"))]
 fn configure_macos_service_env(_command: &mut Command, _helper: &HelperInvocation) {}
+
+fn configure_bundled_models_env(
+    command: &mut Command,
+    app: Option<&tauri::AppHandle>,
+    helper: &HelperInvocation,
+) {
+    if env::var_os("BLE_STT_BUNDLED_MODELS").is_some() {
+        return;
+    }
+    for path in candidate_bundled_models(app, helper) {
+        if path.exists() && path.is_dir() {
+            command.env("BLE_STT_BUNDLED_MODELS", path);
+            return;
+        }
+    }
+}
+
+fn home_dir() -> PathBuf {
+    env::var_os("HOME")
+        .or_else(|| env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn telemetry_log_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        return home_dir().join("Library").join("Logs").join("M5StopWatch");
+    }
+    if cfg!(target_os = "windows") {
+        let base = env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir().join("AppData").join("Local"));
+        return base.join("M5StopWatch").join("Logs");
+    }
+    env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home_dir().join(".local").join("state"))
+        .join("m5stopwatch")
+}
+
+fn unix_timestamp() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn default_telemetry(stage: &str) -> Value {
+    json!({
+        "schema": TELEMETRY_SCHEMA,
+        "stage": stage,
+        "session_id": null,
+        "audio": {
+            "level": 0.0,
+            "peak": 0.0,
+            "seconds": 0.0,
+            "frames": 0
+        },
+        "recognition": {
+            "busy": false,
+            "mode": "idle"
+        },
+        "last_text": null,
+        "error": null,
+        "updated_at": unix_timestamp(),
+        "stale": true,
+        "age_seconds": null
+    })
+}
+
+fn file_modified_timestamp(path: &Path) -> Option<f64> {
+    fs::metadata(path)
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_secs_f64())
+}
+
+fn read_runtime_telemetry() -> Value {
+    let path = telemetry_log_dir().join(TELEMETRY_FILE_NAME);
+    let now = unix_timestamp();
+    let mut payload = fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| default_telemetry("offline"));
+
+    let updated_at = payload
+        .get("updated_at")
+        .and_then(Value::as_f64)
+        .or_else(|| file_modified_timestamp(&path));
+    let age = updated_at.map(|timestamp| (now - timestamp).max(0.0));
+
+    if let Some(object) = payload.as_object_mut() {
+        object.entry("schema").or_insert(json!(TELEMETRY_SCHEMA));
+        object.entry("stage").or_insert(json!("offline"));
+        object.entry("session_id").or_insert(Value::Null);
+        object.entry("audio").or_insert(json!({
+            "level": 0.0,
+            "peak": 0.0,
+            "seconds": 0.0,
+            "frames": 0
+        }));
+        object.entry("recognition").or_insert(json!({
+            "busy": false,
+            "mode": "idle"
+        }));
+        object.entry("last_text").or_insert(Value::Null);
+        object.entry("error").or_insert(Value::Null);
+        object.insert(
+            "age_seconds".into(),
+            age.map(|value| json!((value * 1000.0).round() / 1000.0))
+                .unwrap_or(Value::Null),
+        );
+        object.insert(
+            "stale".into(),
+            json!(age
+                .map(|value| value > TELEMETRY_STALE_SECONDS)
+                .unwrap_or(true)),
+        );
+    }
+
+    payload
+}
+
+fn candidate_bundled_models(
+    app: Option<&tauri::AppHandle>,
+    helper: &HelperInvocation,
+) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(app) = app {
+        if let Ok(path) = app.path().resolve("models", BaseDirectory::Resource) {
+            paths.push(path);
+        }
+        if let Ok(path) = app
+            .path()
+            .resolve("resources/models", BaseDirectory::Resource)
+        {
+            paths.push(path);
+        }
+    }
+    if let Ok(exe) = env::current_exe() {
+        if let Some(directory) = exe.parent() {
+            paths.push(directory.join("models"));
+            if let Some(contents) = directory.parent() {
+                let resources = contents.join("Resources");
+                paths.push(resources.join("models"));
+                paths.push(resources.join("resources").join("models"));
+            }
+        }
+    }
+    for ancestor in helper.program.ancestors() {
+        paths.push(ancestor.join("models"));
+        paths.push(ancestor.join("resources").join("models"));
+    }
+    paths
+}
 
 #[cfg(target_os = "macos")]
 fn app_bundle_for_executable(executable: &Path) -> Option<PathBuf> {
@@ -267,6 +435,22 @@ fn helper_logs(app: tauri::AppHandle, lines: u16) -> Result<HelperResult, String
     )
 }
 
+#[tauri::command]
+fn helper_telemetry(_app: tauri::AppHandle) -> Result<HelperResult, String> {
+    let stdout = serde_json::to_string(&json!({
+        "ok": true,
+        "telemetry": read_runtime_telemetry()
+    }))
+    .map_err(|error| format!("could not encode telemetry: {error}"))?;
+
+    Ok(HelperResult {
+        ok: true,
+        code: Some(0),
+        stdout: format!("{stdout}\n"),
+        stderr: String::new(),
+    })
+}
+
 fn validate_service_action(action: &str) -> Result<(), String> {
     match action {
         "install" | "start" | "stop" | "restart" | "status" | "uninstall" => Ok(()),
@@ -274,10 +458,41 @@ fn validate_service_action(action: &str) -> Result<(), String> {
     }
 }
 
+fn validate_model_action(action: &str) -> Result<(), String> {
+    match action {
+        "status" | "list" | "check-updates" | "use" | "install" | "update" | "repair"
+        | "delete" => Ok(()),
+        _ => Err(format!("unsupported model action: {action}")),
+    }
+}
+
 #[tauri::command]
 fn service_action(app: tauri::AppHandle, action: String) -> Result<HelperResult, String> {
     validate_service_action(action.as_str())?;
     run_helper(Some(&app), ["service", action.as_str(), "--json"])
+}
+
+#[tauri::command]
+async fn model_action(
+    app: tauri::AppHandle,
+    action: String,
+    model: Option<String>,
+) -> Result<HelperResult, String> {
+    validate_model_action(action.as_str())?;
+    let mut args = vec!["models".to_string(), action.clone(), "--json".to_string()];
+    match action.as_str() {
+        "use" | "install" | "update" | "repair" | "delete" => {
+            let model = model.ok_or_else(|| format!("model is required for {action}"))?;
+            args.push("--model".to_string());
+            args.push(model);
+            args.push("--engine".to_string());
+            args.push("auto".to_string());
+        }
+        _ => {}
+    }
+    tauri::async_runtime::spawn_blocking(move || run_helper(Some(&app), args))
+        .await
+        .map_err(|error| format!("model action failed to join: {error}"))?
 }
 
 #[tauri::command]
@@ -337,7 +552,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             helper_status,
             helper_logs,
+            helper_telemetry,
             service_action,
+            model_action,
             open_permission,
             open_logs
         ])
@@ -361,5 +578,11 @@ mod tests {
     fn rejects_unknown_service_action() {
         let error = validate_service_action("wipe").unwrap_err();
         assert!(error.contains("unsupported service action"));
+    }
+
+    #[test]
+    fn rejects_unknown_model_action() {
+        let error = validate_model_action("wipe").unwrap_err();
+        assert!(error.contains("unsupported model action"));
     }
 }

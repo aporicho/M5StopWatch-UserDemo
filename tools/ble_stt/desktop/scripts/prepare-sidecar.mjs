@@ -7,7 +7,9 @@ const here = dirname(fileURLToPath(import.meta.url));
 const desktopRoot = resolve(here, "..");
 const bleRoot = resolve(desktopRoot, "..");
 const resourceRoot = resolve(desktopRoot, "src-tauri", "resources", "ble-stt-helper");
+const modelResourceRoot = resolve(desktopRoot, "src-tauri", "resources", "models");
 const helperName = process.platform === "win32" ? "m5stopwatch-ble-stt.exe" : "m5stopwatch-ble-stt";
+const starterEngine = process.platform === "darwin" ? "mlx" : "faster-whisper";
 
 function appBundleForPath(path) {
   let current = dirname(path);
@@ -66,6 +68,23 @@ if (process.platform !== "win32") {
   if (hasPyInstallerInternal && existsSync(join(resourceRoot, basename(sourceBinary)))) {
     chmodSync(join(resourceRoot, basename(sourceBinary)), 0o755);
   }
+}
+
+const starterSource = process.env.BLE_STT_STARTER_MODEL_DIR
+  ? resolve(process.env.BLE_STT_STARTER_MODEL_DIR)
+  : join(bleRoot, "starter-models", starterEngine, "small");
+const starterTarget = join(modelResourceRoot, starterEngine, "small");
+mkdirSync(modelResourceRoot, { recursive: true });
+rmSync(starterTarget, { recursive: true, force: true });
+if (existsSync(starterSource) && statSync(starterSource).isDirectory()) {
+  mkdirSync(dirname(starterTarget), { recursive: true });
+  cpSync(starterSource, starterTarget, { recursive: true });
+  console.log(`Prepared starter model resource: ${starterTarget}`);
+} else if (process.env.BLE_STT_REQUIRE_STARTER_MODEL === "1") {
+  console.error(`Missing starter model directory: ${starterSource}`);
+  process.exit(1);
+} else {
+  console.warn(`Starter model not bundled; set BLE_STT_STARTER_MODEL_DIR or create ${starterSource}`);
 }
 
 console.log(`Prepared helper resource: ${resourceRoot}`);

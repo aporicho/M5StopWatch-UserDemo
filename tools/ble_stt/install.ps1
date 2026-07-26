@@ -7,7 +7,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Repository = "aporicho/M5StopWatch-UserDemo"
-$Model = if ($env:BLE_STT_MODEL) { $env:BLE_STT_MODEL } else { "medium" }
+$Model = if ($env:BLE_STT_MODEL) { $env:BLE_STT_MODEL } else { "small" }
 $Engine = if ($env:BLE_STT_ENGINE) { $env:BLE_STT_ENGINE } else { "auto" }
 $Root = Join-Path $env:LOCALAPPDATA "M5StopWatch\ble-stt"
 $BinDir = Join-Path $env:LOCALAPPDATA "M5StopWatch\bin"

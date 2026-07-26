@@ -30,7 +30,8 @@
     "shortDescription": "M5StopWatch speech helper control panel",
     "longDescription": "Cross-platform desktop control panel for the M5StopWatch BLE speech helper.",
     "resources": [
-      "resources/ble-stt-helper/"
+      "resources/ble-stt-helper/",
+      "resources/models/"
     ],
     "macOS": {
       "minimumSystemVersion": "13.0"

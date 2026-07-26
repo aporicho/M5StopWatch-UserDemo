@@ -2,15 +2,19 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from ble_stt.config import UserConfig
 from ble_stt.main import (
     _clear_cached_device_after_timeout,
+    _create_configured_recognizer,
     _ensure_bluetooth_permission,
     _is_bluetooth_permission_error,
     _is_device_unavailable,
     _is_pairing_removed_error,
+    apply_runtime_defaults,
 )
+from ble_stt.models import model_status
 
 
 class ClearCachedDeviceAfterTimeoutTests(unittest.TestCase):
@@ -45,6 +49,58 @@ class ClearCachedDeviceAfterTimeoutTests(unittest.TestCase):
 
         self.assertIsNone(cleared)
         self.assertIsNone(config.get("device_id"))
+
+
+class RuntimeDefaultTests(unittest.TestCase):
+    def test_reads_config_when_model_args_are_omitted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = UserConfig(Path(directory) / "ble-stt.json")
+            config.set("engine", "faster-whisper")
+            config.set("model", "medium")
+            args = SimpleNamespace(engine=None, model=None)
+
+            apply_runtime_defaults(args, config)
+
+        self.assertEqual(args.engine, "faster-whisper")
+        self.assertEqual(args.model, "medium")
+
+    def test_explicit_model_args_win_over_config(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = UserConfig(Path(directory) / "ble-stt.json")
+            config.set("engine", "faster-whisper")
+            config.set("model", "medium")
+            args = SimpleNamespace(engine="mlx", model="small")
+
+            apply_runtime_defaults(args, config)
+
+        self.assertEqual(args.engine, "mlx")
+        self.assertEqual(args.model, "small")
+
+    def test_configured_recognizer_preserves_downloaded_source_for_local_snapshot(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cache = root / "cache"
+            snapshot = (
+                cache
+                / "models--mlx-community--whisper-small-mlx"
+                / "snapshots"
+                / "revision"
+            )
+            snapshot.mkdir(parents=True)
+            (snapshot / "weights.npz").write_text("weights", encoding="utf-8")
+            config = UserConfig(root / "ble-stt.json")
+            config.set("engine", "auto")
+            config.set("model", "small")
+            args = SimpleNamespace(engine="auto", model="small", device="auto", cpu_threads=2)
+
+            with patch("ble_stt.models.model_cache_dir", return_value=cache):
+                with patch("ble_stt.main.create_recognizer", return_value=object()) as create:
+                    _create_configured_recognizer(args, config)
+                status = model_status(config, "auto", "small")
+
+        self.assertEqual(Path(create.call_args.args[1]), snapshot)
+        self.assertEqual(status.source, "downloaded")
+        self.assertEqual(Path(status.resolved), snapshot)
 
 
 class DeviceUnavailableClassificationTests(unittest.TestCase):

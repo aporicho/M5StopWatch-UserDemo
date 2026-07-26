@@ -5,11 +5,15 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Sequence
 
 from .agreement import common_prefix
+from .config import UserConfig
 from .diagnostics import runtime_logging
+from .models import DEFAULT_ENGINE, DEFAULT_MODEL, model_status, record_model_ready, runtime_model_name
 from .platforms import PlatformAdapter, create_platform
 from .protocol import (
     AUDIO_UUID,
@@ -24,6 +28,7 @@ from .protocol import (
     StatusPacket,
 )
 from .recognizers import FasterWhisperRecognizer, create_recognizer
+from .telemetry import audio_metrics, make_telemetry, write_telemetry
 from .types import Recognizer, TextInjector, TranscriptSegment
 
 # Compatibility name for code that imported the old recognizer directly.
@@ -81,9 +86,15 @@ class SpeechController:
         self._host_status_writer: Callable[[HostStatus, int], Awaitable[None]] | None = None
         self.inference_lock = asyncio.Lock()
         self._rolling_task: asyncio.Task[None] | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._last_audio_telemetry_at = 0.0
+        self._last_text: dict[str, object] | None = None
+        self._last_ready_session_id: int | None = None
+        self._link_ready = False
 
     def start(self) -> None:
         self._rolling_task = asyncio.create_task(self._rolling_loop())
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
 
     def set_host_status_writer(self, writer: Callable[[HostStatus, int], Awaitable[None]] | None) -> None:
         self._host_status_writer = writer
@@ -91,6 +102,56 @@ class SpeechController:
     def report_host_status(self, status: HostStatus, error: int = 0) -> None:
         if self._host_status_writer is not None:
             asyncio.create_task(self._host_status_writer(status, error))
+
+    def _publish_telemetry(
+        self,
+        *,
+        stage: str,
+        session_id: int | None = None,
+        audio: dict[str, float | int] | None = None,
+        recognition_busy: bool = False,
+        recognition_mode: str = "idle",
+        last_text: dict[str, object] | None = None,
+        error: str | None = None,
+    ) -> None:
+        try:
+            write_telemetry(
+                make_telemetry(
+                    stage=stage,
+                    session_id=session_id,
+                    audio=audio,
+                    recognition_busy=recognition_busy,
+                    recognition_mode=recognition_mode,
+                    last_text=last_text if last_text is not None else self._last_text,
+                    error=error,
+                )
+            )
+        except Exception:
+            LOGGER.debug("could not write runtime telemetry", exc_info=True)
+
+    def mark_ready(self, session_id: int | None = None) -> None:
+        if session_id is not None:
+            self._last_ready_session_id = session_id
+        self._link_ready = True
+        if self.session is None and self.recognizer is not None:
+            self._publish_telemetry(stage="ready", session_id=self._last_ready_session_id)
+
+    def mark_disconnected(self, reason: str) -> None:
+        self._link_ready = False
+        if self.session is None:
+            self._publish_telemetry(stage="error", session_id=self._last_ready_session_id, error=reason)
+
+    def _session_audio_payload(
+        self,
+        session: SpeechSession,
+        frame_pcm: list[int] | None = None,
+    ) -> dict[str, float | int]:
+        metrics = audio_metrics(frame_pcm or session.audio[-320:])
+        return {
+            **metrics,
+            "seconds": round(len(session.audio) / 16000.0, 2),
+            "frames": len(session.audio) // 320,
+        }
 
     async def _restore_ready(self, delay: float = 5.0) -> None:
         await asyncio.sleep(delay)
@@ -102,6 +163,12 @@ class SpeechController:
             self._rolling_task.cancel()
             try:
                 await self._rolling_task
+            except asyncio.CancelledError:
+                pass
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
         self.abort("helper stopped")
@@ -116,12 +183,20 @@ class SpeechController:
         if status.event == StatusEvent.READY:
             LOGGER.info("watch status ready session=%s error=%s", status.session_id, status.error)
             print("[device] speech input ready; hold the right button to talk")
+            if self.session is None:
+                self.mark_ready(status.session_id)
         elif status.event == StatusEvent.START:
             if self.session is not None:
                 self.abort("new speech session started")
             self.session = SpeechSession(status.session_id, self.injector.active_window())
+            self._last_audio_telemetry_at = 0.0
             LOGGER.info("speech session started session=%s", status.session_id)
             print(f"[speech {status.session_id}] listening")
+            self._publish_telemetry(
+                stage="listening",
+                session_id=status.session_id,
+                audio=self._session_audio_payload(self.session),
+            )
         elif status.event == StatusEvent.END:
             session = self.session
             if session and session.session_id == status.session_id:
@@ -132,6 +207,13 @@ class SpeechController:
                     len(session.audio),
                 )
                 self.report_host_status(HostStatus.RECOGNIZING)
+                self._publish_telemetry(
+                    stage="recognizing",
+                    session_id=session.session_id,
+                    audio=self._session_audio_payload(session),
+                    recognition_busy=True,
+                    recognition_mode="final",
+                )
                 asyncio.create_task(self._finalize(session))
         elif status.event == StatusEvent.ABORT:
             self.abort("device aborted the session")
@@ -160,8 +242,19 @@ class SpeechController:
                 else:
                     self.abort(f"lost {missing} consecutive audio frames")
                     return
-            session.audio.extend(frame.decode())
+            decoded = frame.decode()
+            session.audio.extend(decoded)
             session.expected_sequence = (frame.sequence + 1) & 0xFFFF
+            now = time.monotonic()
+            if now - self._last_audio_telemetry_at >= 0.08:
+                self._last_audio_telemetry_at = now
+                self._publish_telemetry(
+                    stage="listening",
+                    session_id=session.session_id,
+                    audio=self._session_audio_payload(session, decoded),
+                    recognition_busy=session.inference_pending,
+                    recognition_mode="rolling" if session.inference_pending else "idle",
+                )
         except ProtocolError as exc:
             LOGGER.warning("audio protocol error session=%s error=%s", session.session_id, exc)
             self.abort(str(exc))
@@ -170,6 +263,12 @@ class SpeechController:
         if self.session is not None:
             LOGGER.warning("speech session aborted session=%s reason=%s", self.session.session_id, reason)
             print(f"[speech {self.session.session_id}] aborted: {reason}")
+            self._publish_telemetry(
+                stage="error",
+                session_id=self.session.session_id,
+                audio=self._session_audio_payload(self.session),
+                error=reason,
+            )
             self.session = None
 
     async def _rolling_loop(self) -> None:
@@ -184,6 +283,13 @@ class SpeechController:
                 continue
             session.last_inference_size = len(session.audio)
             session.inference_pending = True
+            self._publish_telemetry(
+                stage="listening",
+                session_id=session.session_id,
+                audio=self._session_audio_payload(session),
+                recognition_busy=True,
+                recognition_mode="rolling",
+            )
             asyncio.create_task(self._recognize_stable(session))
 
     async def _recognize(self, pcm: list[int]) -> list[TranscriptSegment]:
@@ -224,6 +330,18 @@ class SpeechController:
                 session.injection_enabled = self.injector.type_text(text, session.focus_window)
                 if session.injection_enabled:
                     print(f"[text] {text}")
+                    self._last_text = {
+                        "text": text,
+                        "final": False,
+                        "time": time.time(),
+                    }
+                    self._publish_telemetry(
+                        stage="listening",
+                        session_id=session.session_id,
+                        audio=self._session_audio_payload(session),
+                        recognition_busy=False,
+                        recognition_mode="rolling",
+                    )
                     session.has_output = True
             advance = min(len(snapshot), max(1, int(committed_segments[-1].end * 16000)))
             session.audio_cursor += advance
@@ -243,9 +361,22 @@ class SpeechController:
         finally:
             session.inference_pending = False
 
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(3.0)
+            if self._link_ready and self.session is None and self.recognizer is not None:
+                self._publish_telemetry(stage="ready", session_id=self._last_ready_session_id)
+
     async def _finalize(self, session: SpeechSession) -> None:
         snapshot = session.audio[session.audio_cursor :]
         succeeded = session.has_output
+        self._publish_telemetry(
+            stage="recognizing",
+            session_id=session.session_id,
+            audio=self._session_audio_payload(session),
+            recognition_busy=True,
+            recognition_mode="final",
+        )
         try:
             segments = await self._recognize(snapshot)
         except Exception as exc:
@@ -255,6 +386,14 @@ class SpeechController:
                 len(snapshot),
             )
             print(f"[speech {session.session_id}] final recognition failed: {exc}")
+            self._publish_telemetry(
+                stage="error",
+                session_id=session.session_id,
+                audio=self._session_audio_payload(session),
+                recognition_busy=False,
+                recognition_mode="final",
+                error=str(exc),
+            )
             self.report_host_status(HostStatus.MODEL_ERROR, 1)
             if not self.once:
                 asyncio.create_task(self._restore_ready())
@@ -265,11 +404,24 @@ class SpeechController:
                     session.injection_enabled = self.injector.type_text(text, session.focus_window)
                     if session.injection_enabled:
                         print(f"[text final] {text}")
+                        self._last_text = {
+                            "text": text,
+                            "final": True,
+                            "time": time.time(),
+                        }
                         succeeded = True
                 except Exception as exc:
                     LOGGER.exception("text insertion failed session=%s", session.session_id)
                     print(f"[text] insertion failed: {exc}")
                     session.injection_enabled = False
+                    self._publish_telemetry(
+                        stage="error",
+                        session_id=session.session_id,
+                        audio=self._session_audio_payload(session),
+                        recognition_busy=False,
+                        recognition_mode="inserting",
+                        error=str(exc),
+                    )
                     status = (
                         HostStatus.PERMISSION_ERROR
                         if "permission" in str(exc).lower()
@@ -287,6 +439,13 @@ class SpeechController:
                 session.injection_enabled,
             )
             print(f"[speech {session.session_id}] finished ({elapsed:.1f}s)")
+            self._publish_telemetry(
+                stage="inserted" if succeeded else "ready",
+                session_id=session.session_id,
+                audio=self._session_audio_payload(session),
+                recognition_busy=False,
+                recognition_mode="complete",
+            )
             if succeeded or not self.once:
                 self.report_host_status(HostStatus.READY)
             elif session.injection_enabled:
@@ -438,6 +597,7 @@ async def run_ble(
                             if not client.is_connected:
                                 raise RuntimeError("Bluetooth disconnected while preparing the model")
                 await write_host_status(HostStatus.READY)
+                controller.mark_ready()
                 delay = 1.0
                 if controller.once:
                     disconnect_task = asyncio.create_task(disconnect_event.wait())
@@ -452,6 +612,7 @@ async def run_ble(
                 else:
                     await disconnect_event.wait()
             controller.abort("Bluetooth disconnected")
+            controller.mark_disconnected("Bluetooth disconnected")
             controller.set_host_status_writer(None)
         except asyncio.CancelledError:
             raise
@@ -477,6 +638,7 @@ async def run_ble(
                 LOGGER.exception("BLE loop failed; retrying in %.0fs", delay)
             print(f"[ble] {detail}; retrying in {delay:.0f}s")
             controller.abort("Bluetooth disconnected")
+            controller.mark_disconnected(detail)
             controller.set_host_status_writer(None)
             if controller.once and controller.completed.is_set():
                 return
@@ -492,11 +654,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         dest="device_id",
         help="cached platform device identifier (Bluetooth address, or CoreBluetooth UUID on macOS)",
     )
-    parser.add_argument("--engine", choices=("auto", "faster-whisper", "mlx"), default="auto")
+    parser.add_argument("--engine", choices=("auto", "faster-whisper", "mlx"), default=None)
     parser.add_argument(
         "--model",
-        default="medium",
-        help="Whisper model name or repository/path (default: medium)",
+        default=None,
+        help="Whisper model name or repository/path (default: configured model, or small)",
     )
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--cpu-threads", type=int, default=max(1, (os.cpu_count() or 4) // 2))
@@ -506,7 +668,38 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def apply_runtime_defaults(args: argparse.Namespace, config: UserConfig | None = None) -> argparse.Namespace:
+    config = config or UserConfig()
+    if args.engine is None:
+        args.engine = str(config.get("engine", DEFAULT_ENGINE))
+    if args.model is None:
+        args.model = str(config.get("model", DEFAULT_MODEL))
+    return args
+
+
+def _create_configured_recognizer(args: argparse.Namespace, config: UserConfig) -> Recognizer:
+    status = model_status(config, args.engine, args.model)
+    resolved_model = runtime_model_name(args.engine, args.model, config)
+    recognizer = create_recognizer(args.engine, resolved_model, args.device, args.cpu_threads)
+    resolved_path = Path(resolved_model).expanduser()
+    source = status.source
+    if source not in {"bundled", "custom", "downloaded"}:
+        source = "custom" if resolved_path.exists() else "downloaded"
+    cache_path = Path(status.cache_dir).expanduser() if status.cache_dir else None
+    record_model_ready(
+        args.engine,
+        args.model,
+        resolved_model,
+        config=config,
+        source=source,
+        cache_path=cache_path,
+    )
+    return recognizer
+
+
 async def async_main(args: argparse.Namespace) -> None:
+    config = UserConfig()
+    args = apply_runtime_defaults(args, config)
     with runtime_logging("run", vars(args)):
         LOGGER.info(
             "runtime options engine=%s model=%s device=%s cpu_threads=%s once=%s",
@@ -530,7 +723,7 @@ async def async_main(args: argparse.Namespace) -> None:
                 controller,
                 args.device_id,
                 adapter,
-                lambda: create_recognizer(args.engine, args.model, args.device, args.cpu_threads),
+                lambda: _create_configured_recognizer(args, config),
                 adapter.validate_runtime,
             )
             if args.once and not controller.test_succeeded:

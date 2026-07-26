@@ -51,6 +51,69 @@ class CliJsonTests(unittest.TestCase):
             ["ble-stt-events.log", "ble-stt-events.log", "ble-stt.log"],
         )
 
+    def test_logs_json_structures_event_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event_log = root / "ble-stt-events.log"
+            service_log = root / "ble-stt.log"
+            error_log = root / "ble-stt-error.log"
+            event_log.write_text(
+                "2026-07-26 11:02:59.140 INFO [47617:asyncio_0] "
+                "ble_stt: stdout: [model] MLX ready\n",
+                encoding="utf-8",
+            )
+            with patch("ble_stt.cli.event_log_paths", return_value=(event_log, service_log, error_log)):
+                with patch("ble_stt.cli.log_dir", return_value=root):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        code = cli.show_logs(["--json", "--lines", "5"])
+
+        payload = json.loads(output.getvalue())
+        entry = payload["logs"]["entries"][0]
+
+        self.assertEqual(code, 0)
+        self.assertEqual(entry["time"], "2026-07-26 11:02:59.140")
+        self.assertEqual(entry["level"], "INFO")
+        self.assertEqual(entry["component"], "stdout")
+        self.assertEqual(entry["context"], "47617:asyncio_0")
+        self.assertEqual(entry["message"], "[model] MLX ready")
+
+    def test_logs_json_keeps_carriage_return_progress_as_one_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            event_log = root / "ble-stt-events.log"
+            service_log = root / "ble-stt.log"
+            error_log = root / "ble-stt-error.log"
+            event_log.write_text(
+                "2026-07-26 11:02:58.932 ERROR [47617:asyncio_0] "
+                "ble_stt: stderr: \rFetching 4 files: 25%\rFetching 4 files: 100%\n",
+                encoding="utf-8",
+            )
+            with patch("ble_stt.cli.event_log_paths", return_value=(event_log, service_log, error_log)):
+                with patch("ble_stt.cli.log_dir", return_value=root):
+                    output = io.StringIO()
+                    with contextlib.redirect_stdout(output):
+                        code = cli.show_logs(["--json", "--lines", "5"])
+
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(code, 0)
+        self.assertEqual(len(payload["logs"]["entries"]), 1)
+        self.assertEqual(payload["logs"]["entries"][0]["component"], "stderr")
+        self.assertEqual(payload["logs"]["entries"][0]["message"], "Fetching 4 files: 25% Fetching 4 files: 100%")
+
+    def test_telemetry_json_reports_runtime_payload(self):
+        with patch("ble_stt.cli.read_telemetry", return_value={"schema": 1, "stage": "listening"}):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = cli.show_telemetry(["--json"])
+
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(code, 0)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["telemetry"]["stage"], "listening")
+
 
 if __name__ == "__main__":
     unittest.main()

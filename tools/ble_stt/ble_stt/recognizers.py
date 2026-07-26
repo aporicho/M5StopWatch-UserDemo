@@ -15,9 +15,28 @@ MLX_MODELS = {
     "base": "mlx-community/whisper-base-mlx",
     "small": "mlx-community/whisper-small-mlx",
     "medium": "mlx-community/whisper-medium-mlx",
+    "large": "mlx-community/whisper-large-v3-mlx",
     "large-v3": "mlx-community/whisper-large-v3-mlx",
     "turbo": "mlx-community/whisper-large-v3-turbo",
 }
+
+FASTER_WHISPER_MODELS = {
+    "tiny": "tiny",
+    "base": "base",
+    "small": "small",
+    "medium": "medium",
+    "large": "large-v3",
+    "large-v3": "large-v3",
+    "turbo": "turbo",
+}
+
+
+def configure_hf_environment() -> None:
+    os.environ.setdefault("HF_HOME", str(model_cache_dir()))
+    # The hf-xet backend can hang inside frozen macOS helpers when a download is
+    # interrupted. Use the standard Hub HTTP path unless the user explicitly
+    # opts back in before launching the app.
+    os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 
 def resolve_engine(
@@ -36,7 +55,9 @@ def resolve_engine(
 
 def resolve_model(engine: str, model_name: str) -> str:
     if engine != "mlx":
-        return model_name
+        if "/" in model_name or model_name.startswith(('.', '/')):
+            return model_name
+        return FASTER_WHISPER_MODELS.get(model_name, model_name)
     if "/" in model_name or model_name.startswith(('.', '/')):
         return model_name
     try:
@@ -149,7 +170,7 @@ class MlxWhisperRecognizer(_SimplifyingRecognizer):
 
 
 def create_recognizer(engine: str, model_name: str, device: str, cpu_threads: int) -> Recognizer:
-    os.environ.setdefault("HF_HOME", str(model_cache_dir()))
+    configure_hf_environment()
     selected = resolve_engine(engine)
     if selected == "mlx":
         return MlxWhisperRecognizer(model_name)

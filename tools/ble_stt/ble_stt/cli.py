@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -12,10 +13,23 @@ from typing import Sequence
 from . import __version__
 from .config import UserConfig, install_dir, log_dir
 from .diagnostics import event_log_paths
+from .models import (
+    DEFAULT_ENGINE,
+    DEFAULT_MODEL,
+    check_updates,
+    delete_model,
+    install_model,
+    list_models,
+    model_status,
+    repair_model,
+    update_model,
+    use_model,
+)
 from .platforms import create_platform
 from .recognizers import prepare_recognizer
 from .service import ServiceManager
 from .status import collect_status, snapshot_to_dict, status_lines
+from .telemetry import read_telemetry
 
 
 COMMANDS = {
@@ -25,14 +39,22 @@ COMMANDS = {
     "test",
     "journey-test",
     "logs",
+    "telemetry",
     "restart",
     "service",
     "upgrade",
     "uninstall",
     "prepare",
+    "models",
     "permissions",
     "help",
 }
+
+LOG_RECORD_RE = re.compile(
+    r"^(?P<time>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s+"
+    r"(?P<level>[A-Z]+)\s+\[(?P<context>[^\]]+)\]\s+"
+    r"(?P<component>[^:]+):\s*(?P<message>.*)$"
+)
 
 
 def _line(ok: bool, label: str, detail: str) -> None:
@@ -72,8 +94,8 @@ def show_status(argv: Sequence[str]) -> int:
 
 def prepare(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(prog="ble-stt prepare", description="Download and verify the STT model")
-    parser.add_argument("--engine", choices=("auto", "faster-whisper", "mlx"), default="auto")
-    parser.add_argument("--model", default="medium")
+    parser.add_argument("--engine", choices=("auto", "faster-whisper", "mlx"), default=DEFAULT_ENGINE)
+    parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--cpu-threads", type=int, default=max(1, (os.cpu_count() or 4) // 2))
     args = parser.parse_args(argv)
@@ -82,19 +104,141 @@ def prepare(argv: Sequence[str]) -> int:
     config.set("engine", args.engine)
     config.set("model", args.model)
     config.set("prepared_model", resolved)
+    from .models import record_model_ready
+
+    record_model_ready(args.engine, args.model, resolved, config=config, source="downloaded")
     return 0
+
+
+def manage_models(argv: Sequence[str]) -> int:
+    values = [value for value in argv if value != "--json"]
+    json_output = len(values) != len(argv)
+    parser = argparse.ArgumentParser(prog="ble-stt models", description="Manage speech recognition models")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+
+    subparsers.add_parser("status")
+    subparsers.add_parser("list")
+    subparsers.add_parser("check-updates")
+
+    for action in ("use", "install", "update", "repair", "delete"):
+        subparser = subparsers.add_parser(action)
+        subparser.add_argument("--engine", choices=("auto", "faster-whisper", "mlx"), default=DEFAULT_ENGINE)
+        subparser.add_argument("--model", default=DEFAULT_MODEL)
+        if action in {"install", "update", "repair"}:
+            subparser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+            subparser.add_argument("--cpu-threads", type=int, default=max(1, (os.cpu_count() or 4) // 2))
+
+    args = parser.parse_args(values)
+    config = UserConfig()
+    payload: dict[str, object]
+    if args.action == "status":
+        status = model_status(config)
+        payload = {"ok": status.installed, "action": args.action, "model": status.to_dict()}
+        code = 0 if status.installed else 1
+    elif args.action == "list":
+        payload = {"ok": True, "action": args.action, "models": list_models(config)}
+        code = 0
+    elif args.action == "check-updates":
+        status = check_updates(config)
+        payload = {"ok": True, "action": args.action, "model": status.to_dict()}
+        code = 0
+    else:
+        try:
+            if args.action == "use":
+                status = use_model(args.model, args.engine, config)
+            elif args.action == "install":
+                status = install_model(args.model, args.engine, args.device, args.cpu_threads, config=config)
+            elif args.action == "update":
+                status = update_model(args.model, args.engine, args.device, args.cpu_threads, config=config)
+            elif args.action == "repair":
+                status = repair_model(args.model, args.engine, args.device, args.cpu_threads, config=config)
+            else:
+                status = delete_model(args.model, args.engine, config=config)
+            payload = {"ok": True, "action": args.action, "model": status.to_dict()}
+            code = 0
+        except Exception as exc:
+            status = model_status(config, getattr(args, "engine", DEFAULT_ENGINE), getattr(args, "model", DEFAULT_MODEL))
+            payload = {
+                "ok": False,
+                "action": args.action,
+                "message": str(exc),
+                "model": status.to_dict(),
+            }
+            code = 1
+
+    if json_output:
+        _print_json(payload)
+    else:
+        if "message" in payload:
+            print(str(payload["message"]))
+        elif "model" in payload:
+            model = payload["model"]
+            if isinstance(model, dict):
+                print(f"{model.get('selected')}: {model.get('message')}")
+        else:
+            print(json.dumps(payload, ensure_ascii=False, indent=2))
+    return code
+
+
+def _display_log_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value.replace("\r", " ")).strip()
+
+
+def _read_log_lines(path: Path) -> list[str]:
+    # splitlines() treats carriage-return progress updates as new records.
+    # The helper logs those as one event; preserve that shape for diagnostics.
+    text = path.read_bytes().decode("utf-8", errors="replace")
+    values = [line.rstrip("\r") for line in text.split("\n")]
+    if values and values[-1] == "":
+        values.pop()
+    return values
+
+
+def _structured_log_entry(source: str, line: str) -> dict[str, str]:
+    match = LOG_RECORD_RE.match(line)
+    if match:
+        message = _display_log_text(match.group("message"))
+        component = match.group("component")
+        for stream in ("stdout", "stderr"):
+            prefix = f"{stream}: "
+            if message.startswith(prefix):
+                component = stream
+                message = message[len(prefix) :]
+                break
+        return {
+            "source": source,
+            "line": line,
+            "time": match.group("time"),
+            "level": match.group("level"),
+            "component": component,
+            "context": match.group("context"),
+            "message": message,
+        }
+
+    level = "ERROR" if source.endswith("error.log") else "INFO"
+    return {
+        "source": source,
+        "line": line,
+        "time": "",
+        "level": level,
+        "component": source,
+        "context": "",
+        "message": _display_log_text(line),
+    }
 
 
 def _read_log_bundle(lines: int) -> dict[str, object]:
     limit = max(0, lines)
     files: list[dict[str, object]] = []
     entries: list[dict[str, str]] = []
+    ordered_entries: list[tuple[str, int, dict[str, str]]] = []
+    sequence = 0
     for path in event_log_paths():
         if not path.exists() or not path.is_file():
             files.append({"name": path.name, "path": str(path), "exists": False, "lines": []})
             continue
         try:
-            values = path.read_text(encoding="utf-8", errors="replace").splitlines()
+            values = _read_log_lines(path)
         except OSError as exc:
             files.append(
                 {
@@ -108,7 +252,13 @@ def _read_log_bundle(lines: int) -> dict[str, object]:
             continue
         tail = values[-limit:] if limit else []
         files.append({"name": path.name, "path": str(path), "exists": True, "lines": tail})
-        entries.extend({"source": path.name, "line": line} for line in tail)
+        for line in tail:
+            if not line:
+                continue
+            entry = _structured_log_entry(path.name, line)
+            ordered_entries.append((entry["time"], sequence, entry))
+            sequence += 1
+    entries = [entry for _, _, entry in sorted(ordered_entries, key=lambda item: (item[0], item[1]))]
     return {
         "directory": str(log_dir()),
         "files": files,
@@ -187,6 +337,25 @@ def show_logs(argv: Sequence[str]) -> int:
                     positions[path] = stream.tell()
     except KeyboardInterrupt:
         return 0
+
+
+def show_telemetry(argv: Sequence[str]) -> int:
+    parser = argparse.ArgumentParser(prog="ble-stt telemetry", description="Show live speech runtime telemetry")
+    parser.add_argument("--json", action="store_true", help="emit machine-readable telemetry")
+    args = parser.parse_args(argv)
+    payload = {"ok": True, "telemetry": read_telemetry()}
+    if args.json:
+        _print_json(payload)
+    else:
+        telemetry = payload["telemetry"]
+        if isinstance(telemetry, dict):
+            audio = telemetry.get("audio", {})
+            print(f"Stage: {telemetry.get('stage', 'unknown')}")
+            if isinstance(audio, dict):
+                print(f"Audio: level={audio.get('level', 0)} peak={audio.get('peak', 0)}")
+            if telemetry.get("stale"):
+                print("Telemetry is stale.")
+    return 0
 
 
 def manage_permissions(argv: Sequence[str]) -> int:
@@ -290,7 +459,9 @@ Commands:
   test         Complete one push-to-talk insertion and exit
   journey-test Run the long end-to-end push-to-talk journey test
   prepare      Download and validate the speech model now
+  models       Select, install, update, repair, and delete speech models
   logs         Show or follow background service logs
+  telemetry    Show live runtime telemetry for the desktop HUD
   restart      Restart the login service
   service      Install, inspect, or remove the login service
   permissions  Open platform permission settings
@@ -337,8 +508,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             code = journey_test(values)
         elif command == "prepare":
             code = prepare(values)
+        elif command == "models":
+            code = manage_models(values)
         elif command == "logs":
             code = show_logs(values)
+        elif command == "telemetry":
+            code = show_telemetry(values)
         elif command == "restart":
             json_output = "--json" in values
             restart_values = [value for value in values if value != "--json"]

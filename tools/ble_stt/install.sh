@@ -2,7 +2,7 @@
 set -eu
 
 REPOSITORY="aporicho/M5StopWatch-UserDemo"
-MODEL="${BLE_STT_MODEL:-medium}"
+MODEL="${BLE_STT_MODEL:-small}"
 ENGINE="${BLE_STT_ENGINE:-auto}"
 MODE="install"
 SKIP_TEST="${BLE_STT_SKIP_TEST:-0}"

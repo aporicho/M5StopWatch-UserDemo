@@ -51,8 +51,10 @@ class RecognizerSelectionTests(unittest.TestCase):
 
     def test_mlx_model_mapping(self):
         self.assertEqual(resolve_model("mlx", "medium"), "mlx-community/whisper-medium-mlx")
+        self.assertEqual(resolve_model("mlx", "large"), "mlx-community/whisper-large-v3-mlx")
         self.assertEqual(resolve_model("mlx", "organization/custom-model"), "organization/custom-model")
         self.assertEqual(resolve_model("faster-whisper", "medium"), "medium")
+        self.assertEqual(resolve_model("faster-whisper", "large"), "large-v3")
 
     def test_mlx_uses_greedy_decoder(self):
         module = Mock()

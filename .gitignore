@@ -65,6 +65,9 @@ bin/
 obj/
 tools/ble_stt/.macos-build/
 tools/ble_stt/dist-macos/
+tools/ble_stt/starter-models/
+tools/ble_stt/desktop/src-tauri/resources/models/*
+!tools/ble_stt/desktop/src-tauri/resources/models/.gitkeep
 
 *.code-workspace
 

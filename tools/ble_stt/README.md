@@ -38,7 +38,7 @@ macOS 安装器只负责安装本身：
 可通过环境变量调整安装行为：
 
 - `BLE_STT_SKIP_TEST=1`：Linux/Windows 跳过交互式 BLE 和语音测试；macOS 安装本身不执行这类测试。
-- `BLE_STT_MODEL=small`：首次使用时准备体积更小、速度更快的模型。
+- `BLE_STT_MODEL=medium`：覆盖默认语音模型；新安装默认使用 `small`。
 - `BLE_STT_ENGINE=auto`：选择识别后端；默认已是 `auto`。
 - `BLE_STT_VERSION=ble-stt-v0.3.3`：固定到指定 Release 标签。
 - `BLE_STT_ASSET_BASE=...`：从可信的内部 Release 镜像下载安装资源。
@@ -59,12 +59,23 @@ macOS 仍以同一个 `curl | sh` 命令作为正式入口。安装脚本先把�
 
 macOS 安装成功后再打开手表上的 **BLE Remote**。后台服务会连接加密特征并触发自动配对；无需提前在蓝牙设置中手动连接，也不需要输入 PIN。Windows / Linux 同样使用 Secure Connections 自动加密配对。
 
-第一次连接时，服务会下载并在当前后台进程中加载默认的 `medium` 模型。手表会保持“正在准备语音模型”，只有模型真正可以识别后才显示“语音输入已就绪”。模型缓存独立于 App 版本，后续升级会复用；后台服务每次重新启动后仍会从本地缓存加载模型，再报告就绪。
+新安装默认使用 `small` 模型。桌面 App 的 Model 面板会显示模型来源、缓存大小和安装状态，并提供 `Small`、`Medium`、`Large`、`Turbo` 四个主选项。模型缓存独立于 App 版本，后续升级会复用；后台服务每次重新启动后会先加载当前配置的模型，再报告就绪。
 
 如果希望在打开手表前预先下载并验证模型，可以运行：
 
 ```bash
-~/.local/bin/ble-stt prepare --engine mlx --model medium
+~/.local/bin/ble-stt prepare --engine mlx --model small
+```
+
+也可以通过模型管理命令查看、切换和维护模型：
+
+```bash
+~/.local/bin/ble-stt models status --json
+~/.local/bin/ble-stt models list --json
+~/.local/bin/ble-stt models use --model medium --engine auto
+~/.local/bin/ble-stt models install --model medium --engine auto
+~/.local/bin/ble-stt models repair --model medium --engine auto
+~/.local/bin/ble-stt models delete --model medium --engine auto
 ```
 
 体验时先聚焦一个空白文本窗口，再按住手表右键说话并松开。手表会显示“正在聆听”和“正在识别”。短按右键仍然发送 Enter；一次语音输入结束后不会自动提交识别出的文字。
@@ -143,6 +154,14 @@ tools\ble_stt\install.ps1
 
 ```bash
 PYTHONPATH=tools/ble_stt python -m unittest discover -s tools/ble_stt/tests -v
+```
+
+桌面 App 发布包如果需要内置 `Small` starter 模型，先准备当前平台模型快照，再要求打包脚本校验模型存在：
+
+```bash
+cd tools/ble_stt/desktop
+npm run prepare-starter-model
+BLE_STT_REQUIRE_STARTER_MODEL=1 npm run build:mac
 ```
 
 发布标签采用 `ble-stt-v<版本>` 格式，例如 `ble-stt-v0.3.3`。标签版本必须与 `tools/ble_stt/pyproject.toml` 中的版本一致。GitHub Actions 会生成 POSIX/Windows 安装器、带 SHA-256 的源码资源、`M5StopWatch-macos-arm64.zip`、App 与维护安装器的 RSA 签名，以及公开签名证书；发布前还必须把长期签名证书指纹注入 macOS 使用的一行安装器，源码和 Release 中都不得包含私钥。签名所需的临时钥匙串只存在于 GitHub Actions 构建机，安装用户不会接触它。

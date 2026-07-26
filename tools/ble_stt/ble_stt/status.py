@@ -6,8 +6,8 @@ from typing import Any
 
 from .config import UserConfig, log_dir
 from .diagnostics import event_log_paths
+from .models import ModelStatus, model_status
 from .platforms import create_platform
-from .recognizers import resolve_engine, resolve_model
 from .service import ServiceManager
 
 
@@ -39,6 +39,7 @@ class StatusSnapshot:
     watch_id: str | None
     engine: str
     model: str
+    model_state: ModelStatus
     input_permission: PermissionStatus
     bluetooth_permission: PermissionStatus
     log_directory: Path
@@ -65,6 +66,7 @@ class StatusSnapshot:
                 self.service_running,
                 self.runtime.ok,
                 self.watch_id,
+                self.model_state.ready,
                 self.effective_input_permission.ok,
                 self.effective_bluetooth_permission.ok,
             )
@@ -82,6 +84,10 @@ def overall_state(snapshot: StatusSnapshot) -> tuple[str, str, bool]:
         return "bluetooth_blocked", "Bluetooth blocked", False
     if not snapshot.effective_input_permission.ok:
         return "input_blocked", "Input blocked", False
+    if not snapshot.model_state.ready:
+        if snapshot.model_state.state == "error":
+            return "model_error", "Model error", False
+        return "model_missing", "Model missing", False
     if snapshot.runtime.ok and snapshot.watch_id:
         latest = (snapshot.latest_event or "").lower()
         if "speech session started" in latest or "] listening" in latest:
@@ -131,6 +137,7 @@ def snapshot_to_dict(snapshot: StatusSnapshot) -> dict[str, Any]:
             "engine": snapshot.engine,
             "model": snapshot.model,
         },
+        "model": snapshot.model_state.to_dict(),
         "permissions": {
             "input": {
                 "ok": input_permission.ok,
@@ -212,15 +219,6 @@ def _service_state(manager: ServiceManager) -> tuple[bool, bool, str | None]:
         return False, False, str(exc)
 
 
-def _model_state(config: UserConfig) -> tuple[str, str]:
-    try:
-        engine = resolve_engine(str(config.get("engine", "auto")))
-        model = resolve_model(engine, str(config.get("model", "medium")))
-    except Exception as exc:
-        return "unknown", str(exc)
-    return engine, model
-
-
 def _runtime_status(service_running: bool, latest_event: str | None) -> RuntimeStatus:
     if not service_running:
         return RuntimeStatus(False, "service is not running")
@@ -271,7 +269,8 @@ def collect_status(
     installed, running, service_error = _service_state(manager)
 
     watch_id = config.get("device_id")
-    engine, model = _model_state(config)
+    model_state_value = model_status(config)
+    engine, model = model_state_value.engine, model_state_value.resolved
 
     if platform_adapter is None:
         try:
@@ -299,6 +298,7 @@ def collect_status(
         watch_id=str(watch_id) if watch_id else None,
         engine=engine,
         model=model,
+        model_state=model_state_value,
         input_permission=input_permission,
         bluetooth_permission=bluetooth_permission,
         log_directory=resolved_log_directory,
@@ -327,7 +327,7 @@ def status_lines(snapshot: StatusSnapshot) -> list[StatusLine]:
             "watch",
             f"cached as {snapshot.watch_id}" if snapshot.watch_id else "not paired yet",
         ),
-        StatusLine(True, "recognition", f"{snapshot.engine} / {snapshot.model}"),
+        StatusLine(snapshot.model_state.ready, "model", snapshot.model_state.message),
         StatusLine(
             snapshot.effective_input_permission.ok,
             "text input",
