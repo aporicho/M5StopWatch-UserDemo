@@ -30,7 +30,7 @@ idf.py flash
 
 开发回归可以构建带测试入口的固件。这个入口只注入按钮和触摸输入，不直接打开应用、不直接改 BLE 状态、不绕过配对，因此测试走的是实际用户路径：从 Launcher 选择应用、打开 **BLE Remote**、等待广播或连接，再按键触发语音链路。
 
-测试固件会把主 console 切到 USB Serial/JTAG，电脑通过同一个 USB 口发送用户输入事件。这个入口只在 `sdkconfig.defaults.test` 里启用，正式固件不启用 `CONFIG_M5_TEST_CONTROL`。
+正式固件保留 USB Serial/JTAG 只读诊断日志。测试固件通过同一个 USB 口额外接收用户输入事件；这个输入入口只在 `sdkconfig.defaults.test` 里启用，正式固件不启用 `CONFIG_M5_TEST_CONTROL`。
 
 ```bash
 . /Users/aporicho/.espressif/v5.5.4/esp-idf/export.sh
@@ -82,18 +82,21 @@ Windows PowerShell：
 irm https://github.com/aporicho/M5StopWatch-UserDemo/releases/latest/download/ble-stt-install.ps1 | iex
 ```
 
-macOS 仍然使用上面同一条一行命令。安装器会校验 Release 签名，把自带运行时的 `M5StopWatch.app` 安装到 `~/Applications`，请求一次文字输入权限，然后注册当前用户的 LaunchAgent。整个过程不安装 Python 或 Homebrew，不要求粘贴路径，不要求手表在线，也不会询问钥匙串密码。
+macOS 安装器会校验 Release 签名，把自带运行时的 `M5StopWatch.app` 原子安装到 `~/Applications`，注册当前用户的 LaunchAgent，然后打开 App 并立即退出。安装阶段不等待权限、不要求手表在线、不安装 Python 或 Homebrew，也不要求钥匙串密码。
 
-语音模型和蓝牙配对属于首次使用流程，不再作为“安装是否成功”的门槛。第一次打开手表上的 **BLE Remote** 时，后台服务会自动配对并准备默认模型；手表会先显示准备中，模型真正加载完成后才显示语音输入就绪。
+蓝牙物理连接由操作系统的 HID 栈负责；后台服务只会附加已经由系统连接的手表，不会扫描、配对或把用户主动断开的设备重新连上。
 
 ### 快速体验
 
-1. 运行一键安装命令。macOS 会打开“系统设置 → 隐私与安全性 → 辅助功能”，启用自动出现的 **M5StopWatch**；安装器会继续等待，不设 120 秒超时，按 `Ctrl-C` 可以取消并恢复旧版本。
-2. 安装成功后，在手表上打开 **BLE Remote**。macOS 会自动触发加密配对，无需提前手动连接，也不需要输入 PIN。第一次使用还会下载并加载语音模型。
-3. 手表显示语音输入就绪后，聚焦一个文本窗口，按住手表右键说话，然后松开。识别结果会写入该应用，但不会自动提交或发送。
-4. macOS 可运行 `~/.local/bin/ble-stt status` 查看状态；Linux 和 Windows 使用 `ble-stt status`。
+1. 运行一键安装命令，等待 App 自动打开；安装器此时已经结束，终端无需继续等待。
+2. 在 App 的“设置 → 权限”中分别点击蓝牙和文本输入授权。系统只会在用户点击后显示授权请求。
+3. 在手表上打开 **BLE Remote**。首次使用时手表显示等待配对；在电脑的系统蓝牙设置中选择 **M5StopWatch HID** 完成连接。
+4. 在桌面 App 安装或选择语音模型。手表显示语音就绪后，聚焦文本窗口，按住手表右键说话并松开。
+5. macOS 可运行 `~/.local/bin/ble-stt status` 查看状态；Linux 和 Windows 使用 `ble-stt status`。
 
-如果旧电脑持续自动重连，请连续轻点手表屏幕三次，选择 **Pair new computer**，并在旧 Linux 电脑上忘记 `M5StopWatch HID`。
+手表只保留一台电脑的 Bond。开机或打开 BLE Remote 时只进行一次有界回连：1.28 秒高占空比定向广播，加上 accept-list 快速广播，总计不超过 5 秒；失败后关闭射频。电脑端主动断开时不会自动回连，需要在手表上点 **Reconnect**。要换电脑时选择 **Pair new computer**：旧 Bond 和隐私身份会立即清除，没有回退槽位，然后由新电脑在系统蓝牙设置中主动连接。广播包在连接前就声明 Mouse Appearance、HID UUID 和名称，因此系统应直接识别为鼠标类 HID。
+
+如果在电脑系统蓝牙设置中点了“忽略 / 删除设备”，电脑侧配对密钥已经消失，手表无法证明再次出现的电脑仍是原主机。此时同样要在手表断开页点 **Pair new** 并确认，再从电脑系统蓝牙设置重新连接；断开页会同时保留 **Reconnect**，供电脑仍持有原密钥时使用。
 
 模型选择、日志、诊断、升级、卸载、平台差异和开发说明见[完整的 BLE STT 中文指南](tools/ble_stt/README.md)。
 

@@ -413,9 +413,6 @@ install_macos_app() {
     MAC_APP_STAGE=""
     app_executable="$MAC_APP/Contents/MacOS/M5StopWatch"
 
-    say "Requesting macOS text input permission"
-    "$app_executable" doctor --request-permissions --wait-forever
-
     say "Registering the login service"
     "$app_executable" service install -- --engine "$ENGINE" --model "$MODEL"
 
@@ -452,8 +449,9 @@ install_macos_app() {
     # rolled back by a signal between the message and the completion flag.
     trap '' HUP INT TERM
     INSTALL_COMPLETE=1
+    /usr/bin/open "$MAC_APP"
     printf '\n[ok] M5StopWatch BLE STT %s is installed and running.\n' "$version"
-    printf '     The service will pair with the watch and prepare the speech model on first use.\n'
+    printf '     The app is open. Grant permissions there, then pair the watch in System Settings.\n'
     printf '     Status: "%s" status\n' "$SHIM"
 }
 

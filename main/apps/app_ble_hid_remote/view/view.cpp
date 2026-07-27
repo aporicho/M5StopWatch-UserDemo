@@ -79,7 +79,7 @@ void PairComputerDialog::init(lv_obj_t* parent)
     _title->align(LV_ALIGN_TOP_MID, 0, 29);
 
     _message = std::make_unique<Label>(_panel->get());
-    _message->setText("The old computer will be disconnected");
+    _message->setText("The old pairing will be erased");
     _message->setTextFont(&lv_font_montserrat_16);
     _message->setTextColor(lv_color_hex(SecondaryTextColor));
     _message->align(LV_ALIGN_TOP_MID, 0, 70);
@@ -113,9 +113,11 @@ void PairComputerDialog::init(lv_obj_t* parent)
 
 void BleHidRemoteView::init(lv_obj_t* parent)
 {
-    _pair_requested = false;
-    _wheel_pending  = 0;
-    _pending_touch_event = model::UserEvent::None;
+    _pair_requested           = false;
+    _reconnect_requested      = false;
+    _cancel_pairing_requested = false;
+    _wheel_pending            = 0;
+    _pending_touch_event      = model::UserEvent::None;
     resetScrollGesture();
 
     _panel = std::make_unique<Container>(parent);
@@ -208,12 +210,33 @@ void BleHidRemoteView::init(lv_obj_t* parent)
     _pair_button->label().setTextFont(&lv_font_montserrat_18);
     _pair_button->label().setTextColor(lv_color_hex(PrimaryTextColor));
     _pair_button->label().align(LV_ALIGN_CENTER, 0, 0);
-    _pair_button->onClick().connect([this]() { showPairDialog(); });
+    _pair_button->onClick().connect([this]() {
+        if (_displayed_state == model::BleHidRemote::State::UnpairedIdle) {
+            _pair_requested = true;
+        } else if (_displayed_state == model::BleHidRemote::State::PairingAdvertising) {
+            _cancel_pairing_requested = true;
+        } else {
+            showPairDialog();
+        }
+    });
+
+    _reconnect_button = std::make_unique<Button>(_controls_layer->get());
+    _reconnect_button->setSize(190, 54);
+    _reconnect_button->align(LV_ALIGN_BOTTOM_MID, -103, -31);
+    _reconnect_button->setRadius(LV_RADIUS_CIRCLE);
+    _reconnect_button->setBorderWidth(0);
+    _reconnect_button->setShadowWidth(0);
+    _reconnect_button->setBgColor(lv_color_hex(SurfaceActiveColor));
+    _reconnect_button->label().setText("Reconnect");
+    _reconnect_button->label().setTextFont(&lv_font_montserrat_18);
+    _reconnect_button->label().setTextColor(lv_color_hex(PrimaryTextColor));
+    _reconnect_button->label().align(LV_ALIGN_CENTER, 0, 0);
+    _reconnect_button->onClick().connect([this]() { _reconnect_requested = true; });
+    _reconnect_button->setHidden(true);
 
     _displayed_state = model::BleHidRemote::State::Stopped;
     _displayed_error = 0;
-    updateStatus(model::BleHidRemote::State::Starting, 0,
-                 model::BleHidRemote::SpeechServiceState::Disconnected, 0);
+    updateStatus(model::BleHidRemote::State::Starting, 0, model::BleHidRemote::SpeechServiceState::Disconnected, 0);
     setControlsVisible(false);
 }
 
@@ -286,6 +309,20 @@ bool BleHidRemoteView::consumePairRequested()
     return requested;
 }
 
+bool BleHidRemoteView::consumeReconnectRequested()
+{
+    const bool requested = _reconnect_requested;
+    _reconnect_requested = false;
+    return requested;
+}
+
+bool BleHidRemoteView::consumeCancelPairingRequested()
+{
+    const bool requested      = _cancel_pairing_requested;
+    _cancel_pairing_requested = false;
+    return requested;
+}
+
 void BleHidRemoteView::showControls()
 {
     setControlsVisible(true);
@@ -307,19 +344,45 @@ void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastEr
     const char* text = "Stopped";
     uint32_t color   = SecondaryTextColor;
     char errorText[40];
+    _pair_button->label().setText("Pair new computer");
+    _pair_button->setSize(210, 54);
+    _pair_button->align(LV_ALIGN_BOTTOM_MID, 0, -31);
+    _reconnect_button->setHidden(true);
 
     switch (state) {
         case model::BleHidRemote::State::Starting:
             text  = "Starting";
             color = StartingColor;
             break;
-        case model::BleHidRemote::State::Advertising:
-            text  = "Waiting for PC";
-            color = AdvertisingColor;
+        case model::BleHidRemote::State::UnpairedIdle:
+            text  = "Not paired";
+            color = SecondaryTextColor;
+            _pair_button->label().setText("Start pairing");
             break;
-        case model::BleHidRemote::State::Pairing:
-            text  = "Connecting";
+        case model::BleHidRemote::State::PairingAdvertising:
+            text  = "Waiting for pairing";
             color = AdvertisingColor;
+            _pair_button->label().setText("Cancel pairing");
+            break;
+        case model::BleHidRemote::State::ReconnectDirected:
+        case model::BleHidRemote::State::ReconnectFiltered:
+            text  = "Connecting last PC";
+            color = AdvertisingColor;
+            _pair_button->label().setText("Pair new computer");
+            break;
+        case model::BleHidRemote::State::Connecting:
+        case model::BleHidRemote::State::Securing:
+            text  = "Securing connection";
+            color = AdvertisingColor;
+            _pair_button->label().setText("Pair new computer");
+            break;
+        case model::BleHidRemote::State::BondedIdle:
+            text  = "Disconnected";
+            color = SecondaryTextColor;
+            _pair_button->setSize(190, 54);
+            _pair_button->align(LV_ALIGN_BOTTOM_MID, 103, -31);
+            _pair_button->label().setText("Pair new");
+            _reconnect_button->setHidden(false);
             break;
         case model::BleHidRemote::State::Connected:
             switch (serviceState) {
@@ -381,6 +444,12 @@ void BleHidRemoteView::updateStatus(model::BleHidRemote::State state, int lastEr
             break;
     }
 
+    if (state != model::BleHidRemote::State::Connected) {
+        setControlsVisible(true);
+    } else if (_displayed_state != model::BleHidRemote::State::Connected) {
+        setControlsVisible(false);
+    }
+
     _status_label->setText(text);
     _status_dot->setBgColor(lv_color_hex(color));
     _displayed_state         = state;
@@ -412,7 +481,7 @@ bool BleHidRemoteView::updateTapGesture()
                 _last_tap_at = now;
 
                 if (_tap_count >= 3) {
-                    _tap_count = 0;
+                    _tap_count           = 0;
                     _pending_touch_event = model::UserEvent::TouchTripleTap;
                     resetScrollGesture();
                     return true;
@@ -422,7 +491,7 @@ bool BleHidRemoteView::updateTapGesture()
             }
         } else if (_tap_count != 0 && now - _last_tap_at > MultiTapTimeoutMs) {
             _pending_touch_event = _tap_count == 1 ? model::UserEvent::TouchTap : model::UserEvent::TouchDoubleTap;
-            _tap_count = 0;
+            _tap_count           = 0;
             return true;
         }
         return false;
@@ -458,7 +527,9 @@ void BleHidRemoteView::setControlsVisible(bool visible)
     } else {
         _controls_layer->addFlag(LV_OBJ_FLAG_HIDDEN);
         _pair_dialog.reset();
-        _pair_requested = false;
+        _pair_requested           = false;
+        _reconnect_requested      = false;
+        _cancel_pairing_requested = false;
     }
 }
 
@@ -475,16 +546,18 @@ void BleHidRemoteView::updateScrollGesture(model::BleHidRemote::State state)
 
     if (!pressed) {
         if (_gesture_pressing) {
-            const int totalX    = _gesture_last.x - _gesture_start.x;
-            const int totalY    = _gesture_last.y - _gesture_start.y;
-            const int absX      = std::abs(totalX);
-            const int absY      = std::abs(totalY);
-            const bool blocked  = _controls_visible && _gesture_start.y >= GestureButtonBoundary;
+            const int totalX   = _gesture_last.x - _gesture_start.x;
+            const int totalY   = _gesture_last.y - _gesture_start.y;
+            const int absX     = std::abs(totalX);
+            const int absY     = std::abs(totalY);
+            const bool blocked = _controls_visible && _gesture_start.y >= GestureButtonBoundary;
             if (!blocked && std::max(absX, absY) >= SwipeMinDistance) {
                 if (absX > absY) {
-                    _pending_touch_event = totalX < 0 ? model::UserEvent::TouchSwipeLeft : model::UserEvent::TouchSwipeRight;
+                    _pending_touch_event =
+                        totalX < 0 ? model::UserEvent::TouchSwipeLeft : model::UserEvent::TouchSwipeRight;
                 } else {
-                    _pending_touch_event = totalY < 0 ? model::UserEvent::TouchSwipeUp : model::UserEvent::TouchSwipeDown;
+                    _pending_touch_event =
+                        totalY < 0 ? model::UserEvent::TouchSwipeUp : model::UserEvent::TouchSwipeDown;
                 }
             }
         }

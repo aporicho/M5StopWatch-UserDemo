@@ -10,14 +10,14 @@ HELPER_ID="com.aporicho.m5stopwatch-ble-stt-helper"
 OLD_CONTROL_APP="/Applications/M5StopWatch Control.app"
 USER_APP_DIR="$HOME/Applications"
 USER_APP_TARGET="$USER_APP_DIR/$APP_NAME"
+SYSTEM_APP_TARGET="/Applications/$APP_NAME"
 USER_OLD_CONTROL_APP="$USER_APP_DIR/M5StopWatch Control.app"
 APP_SOURCE="$DESKTOP_ROOT/src-tauri/target/release/bundle/macos/$APP_NAME"
 OLD_APP_SOURCE="$DESKTOP_ROOT/src-tauri/target/release/bundle/macos/M5StopWatch Control.app"
-APP_TARGET="/Applications/$APP_NAME"
+APP_TARGET="$USER_APP_TARGET"
 HELPER_SOURCE_APP="$BLE_STT_ROOT/dist-macos/M5StopWatch.app"
 HELPER_APP="$APP_TARGET/Contents/Resources/resources/ble-stt-helper/M5StopWatch.app"
 HELPER="$HELPER_APP/Contents/MacOS/M5StopWatch"
-LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
 
 clear_bundle_metadata() {
   local path="$1"
@@ -106,45 +106,6 @@ move_matching_apps() {
   done < <(/usr/bin/find "$root" -maxdepth 1 -name "$pattern" -print)
 }
 
-clean_launchpad_cache() {
-  local launchpad_db
-  local first_page_id
-  local user_dir
-
-  "$LSREGISTER" -u "$OLD_CONTROL_APP" >/dev/null 2>&1 || true
-  "$LSREGISTER" -u "$USER_OLD_CONTROL_APP" >/dev/null 2>&1 || true
-  "$LSREGISTER" -u "$OLD_APP_SOURCE" >/dev/null 2>&1 || true
-  "$LSREGISTER" -kill -r -domain local -domain system -domain user >/dev/null 2>&1 || true
-  "$LSREGISTER" -f -R -trusted "$APP_TARGET" >/dev/null 2>&1 || true
-
-  user_dir="$(/usr/bin/getconf DARWIN_USER_DIR 2>/dev/null || true)"
-  launchpad_db="${user_dir%/}/com.apple.dock.launchpad/db/db"
-  if [ -f "$launchpad_db" ] && command -v sqlite3 >/dev/null 2>&1; then
-    /bin/cp "$launchpad_db" "$launchpad_db.before-m5stopwatch-clean" >/dev/null 2>&1 || true
-    /usr/bin/sqlite3 "$launchpad_db" "delete from items where rowid in (select item_id from apps where title = 'M5StopWatch Control' and bundleid = '$APP_BUNDLE_ID');" >/dev/null 2>&1 || true
-    first_page_id="$(/usr/bin/sqlite3 "$launchpad_db" "select rowid from items where parent_id = (select value from dbinfo where key = 'launchpad_root') and type = 3 and uuid not like 'HOLDINGPAGE%' order by ordering limit 1;" 2>/dev/null || true)"
-    if [ -n "$first_page_id" ]; then
-      /usr/bin/sqlite3 "$launchpad_db" "
-        begin;
-        update dbinfo set value = 1 where key = 'ignore_items_update_triggers';
-        update items
-          set ordering = ordering + 1
-          where parent_id = $first_page_id
-            and rowid not in (select item_id from apps where title = 'M5StopWatch' and bundleid = '$APP_BUNDLE_ID');
-        update items
-          set parent_id = $first_page_id,
-              ordering = 0
-          where rowid in (select item_id from apps where title = 'M5StopWatch' and bundleid = '$APP_BUNDLE_ID');
-        update dbinfo set value = 0 where key = 'ignore_items_update_triggers';
-        commit;
-      " >/dev/null 2>&1 || true
-    fi
-  fi
-
-  /usr/bin/defaults write com.apple.dock ResetLaunchPad -bool true >/dev/null 2>&1 || true
-  /usr/bin/killall Dock >/dev/null 2>&1 || true
-}
-
 if [ -z "${CODESIGN_IDENTITY:-}" ]; then
   printf 'No CODESIGN_IDENTITY set; using stable ad-hoc development requirements.\n' >&2
 fi
@@ -168,8 +129,8 @@ npm run build:mac:app
 
 BACKUP_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/m5stopwatch-install.XXXXXX")"
 move_existing_app "$APP_TARGET" "$APP_NAME"
+move_existing_app "$SYSTEM_APP_TARGET" "System $APP_NAME"
 move_existing_app "$OLD_CONTROL_APP" "M5StopWatch Control.app"
-move_existing_app "$USER_APP_TARGET" "User M5StopWatch.app"
 move_existing_app "$USER_OLD_CONTROL_APP" "User M5StopWatch Control.app"
 move_existing_app "$OLD_APP_SOURCE" "Built M5StopWatch Control.app"
 move_matching_apps "$USER_APP_DIR" "M5StopWatch.app.before-*"
@@ -197,9 +158,6 @@ APP_EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$
 APP_EXEC="$APP_TARGET/Contents/MacOS/$APP_EXECUTABLE_NAME"
 [ -x "$APP_EXEC" ] || { printf 'Missing app executable: %s\n' "$APP_EXEC" >&2; exit 1; }
 
-/usr/bin/tccutil reset Bluetooth com.aporicho.m5stopwatch-control >/dev/null 2>&1 || true
-/usr/bin/tccutil reset Accessibility com.aporicho.m5stopwatch-control >/dev/null 2>&1 || true
-/usr/bin/tccutil reset Bluetooth "$HELPER_ID" >/dev/null 2>&1 || true
 "$APP_EXEC" status --json >/dev/null
 "$APP_EXEC" service install --json
 LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.aporicho.m5stopwatch-ble-stt.plist"
@@ -210,6 +168,5 @@ fi
 /bin/sleep 1
 "$APP_EXEC" service status --json
 
-clean_launchpad_cache
 /usr/bin/open "$APP_TARGET"
 printf 'Installed %s\n' "$APP_TARGET"

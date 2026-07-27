@@ -41,11 +41,17 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertIn("BLE_STT_SERVICE_RUNNER", service)
         self.assertIn("main app service runner", install)
         self.assertIn("<string>service-run</string>", install)
-        self.assertIn("com.aporicho.m5stopwatch-control", install)
-        self.assertIn('tccutil reset Bluetooth "$HELPER_ID"', install)
-        self.assertNotIn('tccutil reset Bluetooth "$APP_BUNDLE_ID"', install)
+        self.assertNotIn("tccutil reset", install)
+        self.assertNotIn("ResetLaunchPad", install)
+        self.assertNotIn("sqlite3", install)
+        self.assertNotIn("lsregister", install)
+        self.assertNotIn("killall Dock", install)
+        self.assertIn('APP_TARGET="$USER_APP_TARGET"', install)
         self.assertIn('"M5StopWatch.app", "Contents", "MacOS", "M5StopWatch"', sidecar)
         self.assertIn('"--noextattr", "--noqtn", sourceApp, targetApp', sidecar)
+
+        public_install = (Path(__file__).resolve().parents[1] / "install.sh").read_text(encoding="utf-8")
+        self.assertNotIn("doctor --request-permissions --wait-forever", public_install)
 
 
 if __name__ == "__main__":

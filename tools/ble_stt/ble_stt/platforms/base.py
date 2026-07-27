@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import Any
 
 from ..config import UserConfig
-from ..protocol import DEVICE_NAME
 from ..types import TextInjector
 
 
@@ -32,24 +31,31 @@ class PlatformAdapter:
         value = self.config.get("device_id")
         return str(value) if value else None
 
+    async def find_connected_device(self, explicit_identifier: str | None):
+        raise NotImplementedError(f"{self.name} cannot query the operating system's connected HID devices")
+
+    async def wait_for_system_connection(self, explicit_identifier: str | None):
+        import asyncio
+
+        announced = False
+        while True:
+            device = await self.find_connected_device(explicit_identifier)
+            if device is not None:
+                return device
+            if not announced:
+                print("[ble] waiting for M5StopWatch HID to be connected by the operating system")
+                announced = True
+            await asyncio.sleep(2)
+
     async def find_device(self, explicit_identifier: str | None):
-        from bleak import BleakScanner
-
-        identifier = explicit_identifier or await self.paired_identifier()
-        if identifier:
-            print(f"[ble] using cached device {identifier}")
-            device = await BleakScanner.find_device_by_address(identifier, timeout=3)
-            return device or identifier
-
-        print(f"[ble] scanning for {DEVICE_NAME}")
-        device = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=10)
-        if device is None:
-            raise RuntimeError(f"{DEVICE_NAME} was not found; open BLE Remote and pair it first")
-        self.config.set("device_id", str(device.address))
-        return device
+        """Compatibility alias used by diagnostics; never scans or initiates a link."""
+        return await self.wait_for_system_connection(explicit_identifier)
 
     async def prepare_client(self, client: Any, device: Any) -> None:
         pass
 
     async def acquire_mtu(self, client: Any) -> int:
         return int(client.mtu_size)
+
+    async def record_connected(self, device: Any) -> None:
+        pass

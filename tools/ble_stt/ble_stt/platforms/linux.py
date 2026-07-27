@@ -28,8 +28,6 @@ HID_TO_WTYPE_KEY = {
     **{0x3A + index: f"F{index + 1}" for index in range(12)},
 }
 MODIFIER_TO_WTYPE = ((0x01, "ctrl"), (0x02, "shift"), (0x04, "alt"), (0x08, "logo"))
-
-
 class LinuxTextInjector:
     def __init__(self) -> None:
         self._warned_no_focus = False
@@ -120,6 +118,47 @@ class LinuxPlatform(PlatformAdapter):
             except subprocess.SubprocessError:
                 pass
         return await super().paired_identifier()
+
+    async def find_connected_device(self, explicit_identifier: str | None):
+        if shutil.which("bluetoothctl") is None:
+            return None
+        candidates: list[str] = []
+        if explicit_identifier:
+            candidates.append(explicit_identifier)
+        cached = await super().paired_identifier()
+        if cached and cached not in candidates:
+            candidates.append(cached)
+        try:
+            paired = subprocess.run(
+                ["bluetoothctl", "devices", "Paired"], check=False, capture_output=True, text=True, timeout=5
+            )
+        except subprocess.SubprocessError:
+            return None
+        for line in paired.stdout.splitlines():
+            parts = line.split(maxsplit=2)
+            if len(parts) == 3 and parts[0] == "Device" and parts[2] == DEVICE_NAME and parts[1] not in candidates:
+                candidates.append(parts[1])
+        for identifier in candidates:
+            try:
+                result = subprocess.run(
+                    ["bluetoothctl", "info", identifier],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+            except subprocess.SubprocessError:
+                continue
+            properties = {
+                key.strip().casefold(): value.strip().casefold()
+                for line in result.stdout.splitlines()
+                if ":" in line
+                for key, value in [line.strip().split(":", 1)]
+            }
+            if properties.get("paired") == "yes" and properties.get("connected") == "yes":
+                self.config.set("device_id", identifier)
+                return identifier
+        return None
 
     async def prepare_client(self, client: Any, device: Any) -> None:
         if not isinstance(device, str):

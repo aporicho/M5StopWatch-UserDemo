@@ -48,6 +48,29 @@ class FakePlatform:
 
 
 class StatusTests(unittest.TestCase):
+    def test_legacy_linux_handover_markers_do_not_pause_the_service(self):
+        snapshot = collect_status(
+            manager=FakeManager(installed=True, active=False),
+            config=FakeConfig(
+                {
+                    "engine": "faster-whisper",
+                    "model": "small",
+                    "linux_relinquished_device_id": "AA:BB:CC:DD:EE:FF",
+                    "linux_relinquished_reason": "Authentication Failed",
+                }
+            ),
+            platform_adapter=FakePlatform(),
+            log_directory=Path("/tmp/logs"),
+            log_paths=(Path("/tmp/missing.log"),),
+        )
+
+        payload = snapshot_to_dict(snapshot)
+
+        self.assertFalse(snapshot.service_paused)
+        self.assertEqual(payload["overall"]["code"], "service_stopped")
+        self.assertFalse(payload["service"]["paused"])
+        self.assertEqual(status_lines(snapshot)[0].detail, "stopped")
+
     def test_collects_ready_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -159,6 +182,40 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(payload["watch"]["id"], "watch-123")
         self.assertFalse(payload["voice"]["ready"])
 
+    def test_attaching_voice_service_is_reported_as_connecting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_snapshot = root / "cache" / "hub" / "models--Systran--faster-whisper-small" / "snapshots" / "revision"
+            model_snapshot.mkdir(parents=True)
+            (model_snapshot / "model.bin").write_text("weights", encoding="utf-8")
+            event_log = root / "ble-stt-events.log"
+            event_log.write_text(
+                "2026-07-25 20:00:00.000 INFO [123:MainThread] ble_stt.runtime: "
+                "attaching speech GATT client to system-connected device=watch-123\n",
+                encoding="utf-8",
+            )
+            with patch("ble_stt.models.model_cache_dir", return_value=root / "cache"):
+                snapshot = collect_status(
+                    manager=FakeManager(installed=True, active=True),
+                    config=FakeConfig(
+                        {
+                            "device_id": "watch-123",
+                            "engine": "faster-whisper",
+                            "model": "small",
+                            "prepared_model": "small",
+                        }
+                    ),
+                    platform_adapter=FakePlatform(),
+                    log_directory=root,
+                    log_paths=(event_log,),
+                )
+
+        payload = snapshot_to_dict(snapshot)
+
+        self.assertEqual(payload["overall"]["code"], "connecting")
+        self.assertTrue(payload["watch"]["connected"])
+        self.assertEqual(payload["watch"]["connection_state"], "attaching")
+
     def test_fresh_runtime_telemetry_overrides_unrelated_latest_event(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -194,6 +251,72 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(payload["overall"]["code"], "voice_ready")
         self.assertTrue(payload["voice"]["ready"])
         self.assertEqual(payload["voice"]["message"], "ready")
+
+    def test_waiting_system_connection_telemetry_is_not_reported_as_voice_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_snapshot = root / "cache" / "hub" / "models--Systran--faster-whisper-small" / "snapshots" / "revision"
+            model_snapshot.mkdir(parents=True)
+            (model_snapshot / "model.bin").write_text("weights", encoding="utf-8")
+            write_telemetry(
+                make_telemetry(stage="waiting_system_connection", session_id=10),
+                root / "ble-stt-runtime.json",
+            )
+            with patch("ble_stt.models.model_cache_dir", return_value=root / "cache"):
+                snapshot = collect_status(
+                    manager=FakeManager(installed=True, active=True),
+                    config=FakeConfig(
+                        {
+                            "device_id": "watch-123",
+                            "engine": "faster-whisper",
+                            "model": "small",
+                            "prepared_model": "small",
+                        }
+                    ),
+                    platform_adapter=FakePlatform(),
+                    log_directory=root,
+                    log_paths=(root / "missing.log",),
+                )
+
+        payload = snapshot_to_dict(snapshot)
+
+        self.assertEqual(payload["overall"]["code"], "waiting_for_watch")
+        self.assertFalse(payload["watch"]["connected"])
+        self.assertEqual(payload["watch"]["connection_state"], "waiting_system_connection")
+        self.assertEqual(payload["voice"]["message"], "waiting for system connection")
+
+    def test_waiting_for_system_owned_hid_log_is_recognized(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model_snapshot = root / "cache" / "hub" / "models--Systran--faster-whisper-small" / "snapshots" / "revision"
+            model_snapshot.mkdir(parents=True)
+            (model_snapshot / "model.bin").write_text("weights", encoding="utf-8")
+            event_log = root / "ble-stt-events.log"
+            event_log.write_text(
+                "2026-07-25 20:00:00.000 INFO [123:MainThread] ble_stt.runtime: "
+                "[ble] waiting for M5StopWatch HID to be connected by the operating system\n",
+                encoding="utf-8",
+            )
+            with patch("ble_stt.models.model_cache_dir", return_value=root / "cache"):
+                snapshot = collect_status(
+                    manager=FakeManager(installed=True, active=True),
+                    config=FakeConfig(
+                        {
+                            "device_id": "watch-123",
+                            "engine": "faster-whisper",
+                            "model": "small",
+                            "prepared_model": "small",
+                        }
+                    ),
+                    platform_adapter=FakePlatform(),
+                    log_directory=root,
+                    log_paths=(event_log,),
+                )
+
+        payload = snapshot_to_dict(snapshot)
+
+        self.assertEqual(payload["overall"]["code"], "waiting_for_watch")
+        self.assertEqual(payload["watch"]["connection_state"], "waiting_system_connection")
 
     def test_service_error_is_reported_as_failed_service_line(self):
         snapshot = collect_status(

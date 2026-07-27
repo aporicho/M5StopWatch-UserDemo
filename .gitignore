@@ -36,10 +36,11 @@
 
 # Build files
 build/
-build-test/
-build-idf*/
+build-*/
 cmake-build-*/
-/components/
+/components/*
+!/components/esp_hid/
+!/components/esp_hid/**
 managed_components/
 test-artifacts/
 

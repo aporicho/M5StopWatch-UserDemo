@@ -1,18 +1,19 @@
+import asyncio
 import os
 import plistlib
 import sys
 import tempfile
 import types
 import unittest
-import asyncio
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, call, patch
 
 from ble_stt.config import UserConfig, config_dir, install_dir, model_cache_dir
 from ble_stt.platforms import create_platform
-from ble_stt.platforms.linux import LinuxTextInjector
+from ble_stt.platforms.linux import LinuxPlatform, LinuxTextInjector
 from ble_stt.platforms.macos import MacOSPlatform, MacOSTextInjector, MacWindowToken
 from ble_stt.platforms.windows import WindowsTextInjector
+from ble_stt.protocol import SERVICE_UUID
 from ble_stt.recognizers import MlxWhisperRecognizer, create_recognizer, resolve_engine, resolve_model
 from ble_stt.service import (
     SERVICE_LABEL,
@@ -125,6 +126,64 @@ class LinuxInjectorTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[-1].args[0], ["wtype", "--", "hello"])
 
 
+class LinuxConnectedDeviceTests(unittest.TestCase):
+    def test_returns_only_a_system_connected_paired_device(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = UserConfig(Path(directory) / "config.json")
+            config.set("device_id", "AA:BB:CC:DD:EE:FF")
+            platform = LinuxPlatform(config)
+            info = "Device AA:BB:CC:DD:EE:FF\n\tPaired: yes\n\tConnected: yes\n"
+            with patch("ble_stt.platforms.linux.shutil.which", return_value="/usr/bin/bluetoothctl"):
+                with patch("ble_stt.platforms.linux.subprocess.run", return_value=Mock(stdout=info)) as run:
+                    device = asyncio.run(platform.find_connected_device(None))
+
+        self.assertEqual(device, "AA:BB:CC:DD:EE:FF")
+        self.assertEqual(run.call_args.args[0], ["bluetoothctl", "info", "AA:BB:CC:DD:EE:FF"])
+        self.assertNotIn("connect", run.call_args.args[0])
+        self.assertNotIn("remove", run.call_args.args[0])
+
+    def test_disconnected_device_is_never_returned_to_bleak(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = UserConfig(Path(directory) / "config.json")
+            config.set("device_id", "AA:BB:CC:DD:EE:FF")
+            platform = LinuxPlatform(config)
+            info = "Device AA:BB:CC:DD:EE:FF\n\tPaired: yes\n\tConnected: no\n"
+            with patch("ble_stt.platforms.linux.shutil.which", return_value="/usr/bin/bluetoothctl"):
+                with patch("ble_stt.platforms.linux.subprocess.run", return_value=Mock(stdout=info)):
+                    self.assertIsNone(asyncio.run(platform.find_connected_device(None)))
+
+    def test_stale_cached_peer_does_not_hide_new_system_connected_peer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = UserConfig(Path(directory) / "config.json")
+            config.set("device_id", "AA:AA:AA:AA:AA:AA")
+            platform = LinuxPlatform(config)
+            paired = Mock(
+                stdout=(
+                    "Device AA:AA:AA:AA:AA:AA M5StopWatch HID\n"
+                    "Device BB:BB:BB:BB:BB:BB M5StopWatch HID\n"
+                )
+            )
+            stale = Mock(stdout="Device AA:AA:AA:AA:AA:AA\n\tPaired: yes\n\tConnected: no\n")
+            connected = Mock(stdout="Device BB:BB:BB:BB:BB:BB\n\tPaired: yes\n\tConnected: yes\n")
+            with patch("ble_stt.platforms.linux.shutil.which", return_value="/usr/bin/bluetoothctl"):
+                with patch(
+                    "ble_stt.platforms.linux.subprocess.run",
+                    side_effect=[paired, stale, connected],
+                ) as run:
+                    device = asyncio.run(platform.find_connected_device(None))
+
+        self.assertEqual(device, "BB:BB:BB:BB:BB:BB")
+        self.assertEqual(config.get("device_id"), "BB:BB:BB:BB:BB:BB")
+        self.assertEqual(
+            [item.args[0] for item in run.call_args_list],
+            [
+                ["bluetoothctl", "devices", "Paired"],
+                ["bluetoothctl", "info", "AA:AA:AA:AA:AA:AA"],
+                ["bluetoothctl", "info", "BB:BB:BB:BB:BB:BB"],
+            ],
+        )
+
+
 class FakeQuartz:
     kCGEventSourceStateCombinedSessionState = 0
     kCGHIDEventTap = 0
@@ -205,7 +264,7 @@ class MacInjectorTests(unittest.TestCase):
         self.assertIn("enable M5StopWatch", message)
         self.assertNotIn(sys.executable, message)
 
-    def test_validate_runtime_requests_permission_once(self):
+    def test_background_runtime_never_requests_permission(self):
         adapter = MacOSPlatform()
         injector = Mock()
         injector.check_accessibility.return_value = False
@@ -216,8 +275,7 @@ class MacInjectorTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     adapter.validate_runtime()
 
-        injector.check_accessibility.assert_any_call(False)
-        self.assertEqual(injector.check_accessibility.call_args_list.count(call(True)), 1)
+        self.assertEqual(injector.check_accessibility.call_args_list, [call(False), call(False)])
 
     def test_bluetooth_permission_allowed(self):
         class FakeCBCentralManager:
@@ -313,51 +371,100 @@ class MacInjectorTests(unittest.TestCase):
 
 
 class MacBLEDiscoveryTests(unittest.TestCase):
-    def test_cache_lookup_timeout_falls_back_to_name_scan(self):
-        class FakeScanner:
-            @staticmethod
-            async def find_device_by_address(identifier, timeout):
+    def test_connected_lookup_queries_vendor_speech_service_not_hid_service(self):
+        uuid_queries = []
+        managers = []
+
+        class FakePeripheral:
+            def name(self):
+                return "M5StopWatch HID"
+
+            def identifier(self):
+                return types.SimpleNamespace(UUIDString=lambda: "watch-123")
+
+        class FakeCentralManager:
+            def retrieveConnectedPeripheralsWithServices_(self, services):
+                self.services = services
+                return [FakePeripheral()]
+
+        class FakeDelegate:
+            def __init__(self):
+                self.central_manager = FakeCentralManager()
+                managers.append(self)
+
+            async def wait_until_ready(self):
                 return None
 
-            @staticmethod
-            async def find_device_by_name(name, timeout):
-                return types.SimpleNamespace(address="fresh-device", name=name)
+        class FakeBLEDevice:
+            def __init__(self, address, name, details):
+                self.address = address
+                self.name = name
+                self.details = details
 
+        class FakeCBUUID:
+            @staticmethod
+            def UUIDWithString_(value):
+                uuid_queries.append(value)
+                return value
+
+        bleak = types.ModuleType("bleak")
+        backends = types.ModuleType("bleak.backends")
+        corebluetooth = types.ModuleType("bleak.backends.corebluetooth")
+        delegate_module = types.ModuleType("bleak.backends.corebluetooth.CentralManagerDelegate")
+        delegate_module.CentralManagerDelegate = FakeDelegate
+        device_module = types.ModuleType("bleak.backends.device")
+        device_module.BLEDevice = FakeBLEDevice
+        core_bluetooth_module = types.ModuleType("CoreBluetooth")
+        core_bluetooth_module.CBUUID = FakeCBUUID
+        foundation_module = types.ModuleType("Foundation")
+        foundation_module.NSArray = types.SimpleNamespace(arrayWithArray_=lambda value: value)
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = UserConfig(Path(directory) / "config.json")
+            adapter = MacOSPlatform(config)
+            with patch.dict(
+                sys.modules,
+                {
+                    "bleak": bleak,
+                    "bleak.backends": backends,
+                    "bleak.backends.corebluetooth": corebluetooth,
+                    "bleak.backends.corebluetooth.CentralManagerDelegate": delegate_module,
+                    "bleak.backends.device": device_module,
+                    "CoreBluetooth": core_bluetooth_module,
+                    "Foundation": foundation_module,
+                },
+            ):
+                device = asyncio.run(adapter._retrieve_system_device(None))
+
+        self.assertEqual(device.address, "watch-123")
+        self.assertEqual(uuid_queries, [SERVICE_UUID])
+        self.assertEqual(managers[0].central_manager.services, [SERVICE_UUID])
+        self.assertNotIn("1812", uuid_queries)
+
+    def test_connected_lookup_timeout_does_not_scan_or_connect(self):
         async def never_returns(identifier):
             await asyncio.Event().wait()
 
         with tempfile.TemporaryDirectory() as directory:
             config = UserConfig(Path(directory) / "config.json")
             adapter = MacOSPlatform(config)
-            with patch.dict(sys.modules, {"bleak": types.SimpleNamespace(BleakScanner=FakeScanner)}):
-                with patch.object(adapter, "_retrieve_system_device", side_effect=never_returns):
-                    with patch("ble_stt.platforms.macos.CORE_BLUETOOTH_CACHE_TIMEOUT_SECONDS", 0.01):
-                        device = asyncio.run(adapter.find_device(None))
+            with patch.object(adapter, "_retrieve_system_device", side_effect=never_returns):
+                with patch("ble_stt.platforms.macos.CORE_BLUETOOTH_CACHE_TIMEOUT_SECONDS", 0.01):
+                    device = asyncio.run(adapter.find_connected_device(None))
 
-        self.assertEqual(device.address, "fresh-device")
-        self.assertEqual(config.get("device_id"), "fresh-device")
+        self.assertIsNone(device)
+        self.assertIsNone(config.get("device_id"))
 
-    def test_address_scan_timeout_falls_back_to_name_scan(self):
-        class FakeScanner:
-            @staticmethod
-            async def find_device_by_address(identifier, timeout):
-                await asyncio.Event().wait()
-
-            @staticmethod
-            async def find_device_by_name(name, timeout):
-                return types.SimpleNamespace(address="fresh-device", name=name)
-
+    def test_cached_identifier_is_only_a_filter_for_connected_hid(self):
         with tempfile.TemporaryDirectory() as directory:
             config = UserConfig(Path(directory) / "config.json")
             config.set("device_id", "stale-device")
             adapter = MacOSPlatform(config)
-            with patch.dict(sys.modules, {"bleak": types.SimpleNamespace(BleakScanner=FakeScanner)}):
-                with patch.object(adapter, "_retrieve_system_device", return_value=None):
-                    with patch("ble_stt.platforms.macos.BLE_ADDRESS_SCAN_TIMEOUT_SECONDS", 0.01):
-                        device = asyncio.run(adapter.find_device(None))
+            with patch.object(adapter, "_retrieve_system_device", return_value=None) as retrieve:
+                device = asyncio.run(adapter.find_connected_device(None))
 
-        self.assertEqual(device.address, "fresh-device")
-        self.assertEqual(config.get("device_id"), "fresh-device")
+        self.assertIsNone(device)
+        retrieve.assert_awaited_once_with("stale-device")
 
 
 class FakeWindowsAPI:

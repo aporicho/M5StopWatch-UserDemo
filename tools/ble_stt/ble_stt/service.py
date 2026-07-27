@@ -9,10 +9,18 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
-from .config import log_dir
+from .config import UserConfig, log_dir
 
 SERVICE_LABEL = "com.aporicho.m5stopwatch-ble-stt"
 WINDOWS_TASK_NAME = "M5StopWatch BLE STT"
+LINUX_RELINQUISHED_DEVICE_KEY = "linux_relinquished_device_id"
+LINUX_RELINQUISHED_REASON_KEY = "linux_relinquished_reason"
+
+
+def clear_linux_relinquished(config: UserConfig | None = None) -> None:
+    config = config or UserConfig()
+    config.set(LINUX_RELINQUISHED_DEVICE_KEY, "")
+    config.set(LINUX_RELINQUISHED_REASON_KEY, "")
 
 
 def _print_json(value: object) -> None:
@@ -146,6 +154,7 @@ class ServiceManager:
         self.logs.mkdir(parents=True, exist_ok=True)
         arguments = service_arguments(extra_args, self.platform_name)
         if self.platform_name == "linux":
+            clear_linux_relinquished()
             runners = (
                 Path(sys.executable).parent / "ble-stt-run-service",
                 Path(__file__).resolve().parent.parent / "run-service.sh",
@@ -266,6 +275,7 @@ class ServiceManager:
         if not self.is_installed():
             return
         if self.platform_name == "linux":
+            clear_linux_relinquished()
             command = ["systemctl", "--user", "start", "m5stopwatch-ble-stt.service"]
             subprocess.run(command, check=True, text=True)
             return
@@ -295,6 +305,7 @@ class ServiceManager:
         if not self.is_installed():
             raise RuntimeError("the login service is not installed")
         if self.platform_name == "linux":
+            clear_linux_relinquished()
             subprocess.run(
                 ["systemctl", "--user", "restart", "m5stopwatch-ble-stt.service"], check=True, text=True
             )

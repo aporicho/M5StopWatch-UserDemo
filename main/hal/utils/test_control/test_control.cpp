@@ -219,7 +219,7 @@ int readInt(const char* line, const char* key, int fallback)
     if (cursor == nullptr) {
         return fallback;
     }
-    char* end = nullptr;
+    char* end        = nullptr;
     const long value = std::strtol(cursor, &end, 10);
     if (end == cursor) {
         return fallback;
@@ -311,6 +311,12 @@ void printBleSnapshotObject()
         printNumberField(first, "host_error", snapshot.hostError);
         printBoolField(first, "speech_ready", snapshot.speechReady);
         printBoolField(first, "speech_active", snapshot.speechActive);
+        printStringField(first, "advertising_mode", snapshot.advertisingMode);
+        printBoolField(first, "pairing_open", snapshot.pairingOpen);
+        printNumberField(first, "bond_count", snapshot.bondCount);
+        printNumberField(first, "rejected_peer_count", snapshot.rejectedPeerCount);
+        printNumberField(first, "last_disconnect_reason", snapshot.lastDisconnectReason);
+        printNumberField(first, "advertising_remaining_ms", snapshot.advertisingRemainingMs);
         std::printf("}");
         return;
     }
@@ -472,9 +478,8 @@ void serialTask(void*)
         if (length == 0) {
             continue;
         }
-        while (command.line[0] != '\0' &&
-               (command.line[std::strlen(command.line) - 1] == '\n' ||
-                command.line[std::strlen(command.line) - 1] == '\r')) {
+        while (command.line[0] != '\0' && (command.line[std::strlen(command.line) - 1] == '\n' ||
+                                           command.line[std::strlen(command.line) - 1] == '\r')) {
             command.line[std::strlen(command.line) - 1] = '\0';
         }
         if (command.line[0] == '\0') {

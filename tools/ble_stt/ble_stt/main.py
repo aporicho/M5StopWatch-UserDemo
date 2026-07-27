@@ -201,6 +201,14 @@ class SpeechController:
         if self.session is None:
             self._publish_telemetry(stage="error", session_id=self._last_ready_session_id, error=reason)
 
+    def mark_waiting_for_system_connection(self) -> None:
+        self._link_ready = False
+        if self.session is None:
+            self._publish_telemetry(
+                stage="waiting_system_connection",
+                session_id=self._last_ready_session_id,
+            )
+
     def _session_audio_payload(
         self,
         session: SpeechSession,
@@ -635,28 +643,11 @@ async def use_cached_bluez_device(
     await (adapter or create_platform()).prepare_client(client, device)
 
 
-def _clear_cached_device_after_timeout(adapter: PlatformAdapter, explicit_identifier: str | None) -> str | None:
-    if explicit_identifier is not None:
-        return None
-    cached = adapter.config.get("device_id")
-    if not cached:
-        return None
-    adapter.config.set("device_id", "")
-    return str(cached)
-
-
-def _is_device_unavailable(exc: Exception) -> bool:
-    return " was not found" in str(exc)
-
-
 def _ensure_bluetooth_permission(adapter: PlatformAdapter) -> None:
     check_permission = getattr(adapter, "check_bluetooth_permission", None)
     if not callable(check_permission):
         return
     passed, message = check_permission(False)
-    if not passed and not getattr(adapter, "_bluetooth_permission_prompted", False):
-        setattr(adapter, "_bluetooth_permission_prompted", True)
-        passed, message = check_permission(True)
     if not passed:
         raise RuntimeError(str(message))
 
@@ -664,11 +655,6 @@ def _ensure_bluetooth_permission(adapter: PlatformAdapter) -> None:
 def _is_bluetooth_permission_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return "bluetooth permission" in message or "bluetooth access" in message
-
-
-def _is_pairing_removed_error(exc: Exception) -> bool:
-    message = str(exc).lower()
-    return "peer removed pairing information" in message or "cberrordomain code=14" in message
 
 
 async def _mapping_sync_loop(client: Any, characteristic: Any) -> None:
@@ -699,14 +685,16 @@ async def run_ble(
 ) -> None:
     from bleak import BleakClient
 
-    delay = 1.0
     while True:
         disconnect_event = asyncio.Event()
+        device: Any = None
         try:
             _ensure_bluetooth_permission(adapter)
-            device = await adapter.find_device(identifier)
-            LOGGER.info("connecting to device=%r", device)
-            print(f"[ble] connecting to {device}")
+            LOGGER.info("waiting for operating-system HID connection")
+            controller.mark_waiting_for_system_connection()
+            device = await adapter.wait_for_system_connection(identifier)
+            LOGGER.info("attaching speech GATT client to system-connected device=%r", device)
+            print(f"[ble] attaching voice service to {device}")
             client = BleakClient(device, disconnected_callback=lambda _: disconnect_event.set(), timeout=60)
             await adapter.prepare_client(client, device)
             async with client:
@@ -723,6 +711,7 @@ async def run_ble(
                 mtu = await adapter.acquire_mtu(client)
                 if mtu < 185:
                     raise RuntimeError(f"negotiated MTU {mtu} is too small for speech audio (need 185)")
+                await adapter.record_connected(device)
                 LOGGER.info(
                     "connected mtu=%s control_service=%s services=%s",
                     mtu,
@@ -815,7 +804,6 @@ async def run_ble(
                                     raise RuntimeError("Bluetooth disconnected while preparing the model")
                     await write_host_status(HostStatus.READY)
                     controller.mark_ready()
-                    delay = 1.0
                     if controller.once:
                         disconnect_task = asyncio.create_task(disconnect_event.wait())
                         complete_task = asyncio.create_task(controller.completed.wait())
@@ -843,33 +831,20 @@ async def run_ble(
             raise
         except Exception as exc:
             detail = str(exc) or exc.__class__.__name__
-            if isinstance(exc, TimeoutError):
-                LOGGER.warning("BLE connect timed out; retrying in %.0fs", delay)
-                cleared = _clear_cached_device_after_timeout(adapter, identifier)
-                if cleared:
-                    LOGGER.info("cleared cached BLE device after connect timeout device_id=%s", cleared)
-                    print("[ble] cleared cached device; next retry will scan by name")
-            elif _is_device_unavailable(exc):
-                LOGGER.warning("BLE device unavailable: %s; retrying in %.0fs", detail, delay)
-            elif _is_bluetooth_permission_error(exc):
-                LOGGER.warning("Bluetooth permission not ready: %s; retrying in %.0fs", detail, delay)
-            elif _is_pairing_removed_error(exc):
-                LOGGER.warning("BLE pairing is stale: %s; retrying in %.0fs", detail, delay)
-                cleared = _clear_cached_device_after_timeout(adapter, identifier)
-                if cleared:
-                    LOGGER.info("cleared cached BLE device after stale pairing device_id=%s", cleared)
-                    print("[ble] cleared cached device; next retry will scan by name")
+            if _is_bluetooth_permission_error(exc):
+                LOGGER.warning("Bluetooth permission not ready: %s", detail)
+            elif device is None:
+                LOGGER.warning("system-connected watch lookup failed: %s", detail)
             else:
-                LOGGER.exception("BLE loop failed; retrying in %.0fs", delay)
-            print(f"[ble] {detail}; retrying in {delay:.0f}s")
+                LOGGER.warning("speech GATT attachment ended: %s", detail)
+            print(f"[ble] {detail}; returning to system connection wait")
             controller.abort("Bluetooth disconnected")
             controller.mark_disconnected(detail)
             controller.set_host_status_writer(None)
             controller.set_action_writer(None)
             if controller.once and controller.completed.is_set():
                 return
-            await asyncio.sleep(delay)
-            delay = min(delay * 2, 10.0)
+            await asyncio.sleep(2)
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:

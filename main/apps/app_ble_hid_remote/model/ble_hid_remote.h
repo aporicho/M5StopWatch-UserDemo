@@ -5,6 +5,7 @@
  */
 #pragma once
 
+#include "ble_connection_policy.h"
 #include "user_event_mapping.h"
 
 #include <array>
@@ -25,14 +26,8 @@ namespace model {
 
 class BleHidRemote {
 public:
-    enum class State : uint8_t {
-        Stopped,
-        Starting,
-        Advertising,
-        Pairing,
-        Connected,
-        Error,
-    };
+    using State           = BleConnectionState;
+    using AdvertisingMode = BleAdvertisingMode;
 
     enum class HostStatus : uint8_t {
         Waiting = 0,
@@ -68,6 +63,9 @@ public:
     bool sendMouseClick(uint8_t buttons);
     bool sendMediaControl(uint16_t usage);
     bool pairNewComputer();
+    bool reconnect();
+    bool cancelPairing();
+    void poll();
     bool startSpeech();
     void stopSpeech(bool abort = false);
     bool isSpeechReady() const;
@@ -110,6 +108,33 @@ public:
         return _state.load() == State::Connected;
     }
 
+    AdvertisingMode advertisingMode() const
+    {
+        return _advertising_mode.load();
+    }
+
+    bool pairingOpen() const
+    {
+        return _pairing_open.load();
+    }
+
+    uint8_t bondCount() const
+    {
+        return _bond_count.load();
+    }
+
+    uint32_t rejectedPeerCount() const
+    {
+        return _rejected_peer_count.load();
+    }
+
+    uint8_t lastDisconnectReason() const
+    {
+        return _last_disconnect_reason.load();
+    }
+
+    uint32_t advertisingRemainingMs() const;
+
 private:
     enum class CommandType : uint8_t {
         KeyTap,
@@ -139,6 +164,10 @@ private:
     std::atomic<bool> _speech_subscribed{false};
     std::atomic<bool> _user_event_subscribed{false};
     std::atomic<bool> _pairing_open{false};
+    std::atomic<AdvertisingMode> _advertising_mode{AdvertisingMode::None};
+    std::atomic<uint8_t> _bond_count{0};
+    std::atomic<uint8_t> _last_disconnect_reason{0};
+    std::atomic<uint32_t> _rejected_peer_count{0};
     std::atomic<HostStatus> _host_status{HostStatus::Waiting};
     std::atomic<uint16_t> _host_error{0};
     std::atomic<uint16_t> _connection_handle{InvalidConnectionHandle};
@@ -156,23 +185,32 @@ private:
     uint16_t _speech_session         = 0;
     uint16_t _speech_sequence        = 0;
     uint16_t _user_event_sequence    = 0;
-    std::array<uint8_t, 6> _pairing_blocked_peer_address{};
-    uint8_t _pairing_blocked_peer_type = 0;
-    bool _pairing_blocked_peer_valid   = false;
-    std::array<uint8_t, 6> _last_peer_address{};
-    uint8_t _last_peer_type      = 0;
-    bool _last_peer_valid        = false;
-    bool _controller_initialized = false;
-    bool _controller_enabled     = false;
-    bool _nimble_initialized     = false;
+    BleConnectionPolicy _policy;
+    uint32_t _advertising_started_at = 0;
+    int32_t _advertising_duration_ms = 0;
+    uint32_t _last_battery_poll_at   = 0;
+    uint32_t _connected_at           = 0;
+    uint8_t _last_battery_level      = 0xFF;
+    bool _pairing_after_disconnect   = false;
+    bool _controller_initialized     = false;
+    bool _controller_enabled         = false;
+    bool _nimble_initialized         = false;
 
     bool initializeBluetooth();
     bool registerSpeechService();
     bool registerControlService();
     void cleanupBluetooth();
     bool startAdvertising();
-    bool preparePairingWindow();
+    bool startPolicyAdvertising();
+    bool startPairingWindow();
+    bool eraseAllBonds();
+    bool refreshSingleBond();
     bool isAllowedPeer(uint16_t connectionHandle);
+    bool commitConnectedPeer(uint16_t connectionHandle);
+    void enterState(State state);
+    void enterIdleState();
+    void handleDisconnected(uint8_t reason);
+    void updateBatteryLevel(bool force = false);
     void handleHidEvent(int32_t eventId, void* eventData);
     int handleGapEvent(struct ble_gap_event* event);
     void runReportWorker();
@@ -180,6 +218,7 @@ private:
     void sendMouseWheelReport(int8_t delta);
     void sendMouseClickReport(uint8_t buttons);
     void configureConnection(uint16_t connectionHandle);
+    void requestLowLatencyConnection(uint16_t connectionHandle);
     void runSpeechWorker();
     std::array<uint8_t, 12> buildSpeechStatusPacket(uint8_t event, uint16_t error = 0) const;
     bool sendSpeechStatus(uint8_t event, uint16_t error = 0);

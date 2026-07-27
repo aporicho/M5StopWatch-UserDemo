@@ -242,7 +242,15 @@ def wait_for_ble_remote_open(control: FirmwareControl) -> dict[str, Any]:
         state = remote.get("state")
         if state == "Bluetooth error":
             raise HilError(f"BLE Remote failed: {json.dumps(remote, ensure_ascii=False)}")
-        return state in ("Waiting for computer", "Pairing...", "Connected")
+        return state in (
+            "Waiting for pairing",
+            "Reconnecting (directed)",
+            "Reconnecting (filtered)",
+            "Securing",
+            "Connected",
+            "Bonded idle",
+            "Unpaired idle",
+        )
 
     return wait_for(
         "BLE Remote advertising or connected",

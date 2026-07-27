@@ -36,6 +36,8 @@ class StatusSnapshot:
     service_installed: bool
     service_running: bool
     service_error: str | None
+    service_paused: bool
+    service_pause_reason: str | None
     runtime: RuntimeStatus
     watch_id: str | None
     engine: str
@@ -79,6 +81,8 @@ def overall_state(snapshot: StatusSnapshot) -> tuple[str, str, bool]:
         return "error", "Service error", False
     if not snapshot.service_installed:
         return "service_stopped", "Service not installed", False
+    if snapshot.service_paused:
+        return "service_paused", "Released to another computer", False
     if not snapshot.service_running:
         return "service_stopped", "Service stopped", False
     if not snapshot.effective_bluetooth_permission.ok:
@@ -96,10 +100,18 @@ def overall_state(snapshot: StatusSnapshot) -> tuple[str, str, bool]:
         return "voice_ready", "Voice ready", True
     runtime = snapshot.runtime.message.lower()
     latest = (snapshot.latest_event or "").lower()
+    if (
+        "waiting for system connection" in runtime
+        or "waiting for operating-system hid connection" in latest
+        or "waiting for the operating system to connect" in runtime
+        or "waiting for " in latest
+        and " to be connected by the operating system" in latest
+    ):
+        return "waiting_for_watch", "Waiting for system connection", False
+    if "connecting" in runtime or "connecting" in latest or "attaching" in runtime or "attaching" in latest:
+        return "connecting", "Connecting watch", False
     if not snapshot.watch_id or "watch was not found" in runtime or " was not found" in latest:
         return "waiting_for_watch", "Waiting for watch", False
-    if "connecting" in runtime or "connecting" in latest:
-        return "connecting", "Connecting watch", False
     if "connected" in runtime or "connected, mtu" in latest:
         return "watch_connected", "Watch connected", False
     if "model" in runtime:
@@ -112,6 +124,15 @@ def snapshot_to_dict(snapshot: StatusSnapshot) -> dict[str, Any]:
     lines = status_lines(snapshot)
     input_permission = snapshot.effective_input_permission
     bluetooth_permission = snapshot.effective_bluetooth_permission
+    runtime_message = snapshot.runtime.message.lower()
+    if snapshot.runtime.ok:
+        connection_state = "ready"
+    elif code in {"connecting", "watch_connected"} or "attaching" in runtime_message or "connecting" in runtime_message:
+        connection_state = "attaching"
+    elif code == "waiting_for_watch" or "waiting for system connection" in runtime_message:
+        connection_state = "waiting_system_connection"
+    else:
+        connection_state = "offline"
     return {
         "schema": 1,
         "overall": {
@@ -123,6 +144,8 @@ def snapshot_to_dict(snapshot: StatusSnapshot) -> dict[str, Any]:
             "installed": snapshot.service_installed,
             "running": snapshot.service_running,
             "error": snapshot.service_error,
+            "paused": snapshot.service_paused,
+            "pause_reason": snapshot.service_pause_reason,
         },
         "voice": {
             "ready": snapshot.ready_for_voice,
@@ -131,6 +154,8 @@ def snapshot_to_dict(snapshot: StatusSnapshot) -> dict[str, Any]:
         },
         "watch": {
             "paired": bool(snapshot.watch_id),
+            "connected": connection_state in {"attaching", "ready"},
+            "connection_state": connection_state,
             "id": snapshot.watch_id,
             "label": "Paired" if snapshot.watch_id else "Not paired",
         },
@@ -228,6 +253,8 @@ def _runtime_status_from_telemetry(telemetry: dict[str, Any] | None) -> RuntimeS
     error = telemetry.get("error")
     if stage == "error":
         return RuntimeStatus(False, str(error) if error else "runtime error")
+    if stage == "waiting_system_connection":
+        return RuntimeStatus(False, "waiting for system connection")
     if stage in {"ready", "inserted"}:
         return RuntimeStatus(True, "ready")
     if stage in {"listening", "recognizing"}:
@@ -277,6 +304,15 @@ def _runtime_status(
         return RuntimeStatus(False, "BLE connection is not ready")
     if "startup component=run" in value or "runtime options" in value:
         return RuntimeStatus(False, "starting")
+    if (
+        "waiting for operating-system hid connection" in value
+        or "waiting for the operating system to connect" in value
+        or "waiting for " in value
+        and " to be connected by the operating system" in value
+    ):
+        return RuntimeStatus(False, "waiting for system connection")
+    if "attaching speech gatt client" in value or "attaching voice service" in value:
+        return RuntimeStatus(False, "attaching voice service")
     if "[ble] connecting" in value or "connecting to device=" in value:
         return RuntimeStatus(False, "connecting")
     return RuntimeStatus(False, "waiting for voice service")
@@ -294,6 +330,10 @@ def collect_status(
     manager = manager or ServiceManager(platform_name)
     config = config or UserConfig()
     installed, running, service_error = _service_state(manager)
+    # Retain the schema fields for older desktop clients, but handover pause is
+    # gone: the helper always waits passively for an OS-owned HID connection.
+    service_paused = False
+    service_pause_reason = None
 
     watch_id = config.get("device_id")
     model_state_value = model_status(config)
@@ -322,6 +362,8 @@ def collect_status(
         service_installed=installed,
         service_running=running,
         service_error=service_error,
+        service_paused=service_paused,
+        service_pause_reason=service_pause_reason,
         runtime=_runtime_status(running, latest_event, runtime_telemetry),
         watch_id=str(watch_id) if watch_id else None,
         engine=engine,
@@ -344,7 +386,11 @@ def status_lines(snapshot: StatusSnapshot) -> list[StatusLine]:
         service_detail = (
             "running"
             if snapshot.service_running
-            else ("stopped" if snapshot.service_installed else "not installed")
+            else (
+                "released to another computer; start the service to reclaim it"
+                if snapshot.service_paused
+                else ("stopped" if snapshot.service_installed else "not installed")
+            )
         )
 
     return [

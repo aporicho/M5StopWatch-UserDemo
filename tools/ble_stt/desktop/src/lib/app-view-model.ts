@@ -25,9 +25,11 @@ export type DailyStateKey =
   | "listening"
   | "recognizing"
   | "inserted"
+  | "connecting"
   | "waiting_watch"
   | "preparing_voice"
   | "service_paused"
+  | "released"
   | "needs_attention"
 
 export type DailyState = {
@@ -693,12 +695,34 @@ export function deriveDailyState(
     return DEFAULT_DAILY_STATE
   }
 
+  if (status.service.error) {
+    return {
+      key: "needs_attention",
+      label: "Service error",
+      title: "Voice service needs a restart",
+      description: status.service.error,
+      badgeVariant: "destructive",
+      action: "diagnostics",
+    }
+  }
+
+  if (!status.service.running) {
+    return {
+      key: "service_paused",
+      label: "Stopped",
+      title: "Voice input is paused",
+      description: "Start voice input when you want the watch to send speech to this computer.",
+      badgeVariant: "secondary",
+      action: "start",
+    }
+  }
+
   if (!status.permissions.bluetooth.ok) {
     return {
       key: "needs_attention",
       label: "Bluetooth blocked",
       title: "Bluetooth access is needed",
-      description: "Allow Bluetooth so the app can stay connected to the watch.",
+      description: "Allow Bluetooth so the helper can attach voice input after the system connects the watch.",
       badgeVariant: "destructive",
       action: "request-bluetooth",
     }
@@ -726,34 +750,22 @@ export function deriveDailyState(
     }
   }
 
-  if (status.service.error) {
+  if (status.overall.code === "connecting") {
     return {
-      key: "needs_attention",
-      label: "Service error",
-      title: "Voice service needs a restart",
-      description: status.service.error,
-      badgeVariant: "destructive",
-      action: "diagnostics",
-    }
-  }
-
-  if (!status.service.running) {
-    return {
-      key: "service_paused",
-      label: "Stopped",
-      title: "Voice input is paused",
-      description: "Start voice input when you want the watch to send speech to this computer.",
+      key: "connecting",
+      label: "Connecting",
+      title: "Connecting to watch",
+      description: "The operating system connected the HID. The helper is attaching the voice service.",
       badgeVariant: "secondary",
-      action: "start",
     }
   }
 
-  if (!status.watch.paired) {
+  if (status.overall.code === "waiting_for_watch" || status.watch.connected === false || !status.watch.paired) {
     return {
       key: "waiting_watch",
       label: "Waiting",
       title: "Waiting for watch",
-      description: "Keep the watch nearby. M5StopWatch will reconnect automatically.",
+      description: "Connect M5StopWatch HID in Bluetooth Settings, or tap Reconnect on the watch.",
       badgeVariant: "secondary",
       action: "retry",
     }
@@ -863,22 +875,22 @@ function activityFromEntry(entry: StructuredLogEntry): ActivityItem | null {
     }
   }
 
-  if (lower.includes("connecting to")) {
+  if (lower.includes("attaching speech gatt") || lower.includes("attaching voice service")) {
     return {
       key: `connecting-${entry.time}`,
       time: entry.time,
       label: "Connecting",
-      detail: "Trying to reach the watch.",
+      detail: "Attaching voice input to the system-owned HID connection.",
       variant: "secondary",
     }
   }
 
   if (lower.includes("disconnect")) {
     return {
-      key: `reconnecting-${entry.time}`,
+      key: `disconnected-${entry.time}`,
       time: entry.time,
-      label: "Reconnecting",
-      detail: "The watch connection changed.",
+      label: "Disconnected",
+      detail: "Waiting for the operating system to connect the watch.",
       variant: "secondary",
     }
   }
@@ -926,7 +938,10 @@ export function diagnosticDetail(status: StatusPayload | null, key: DiagnosticKe
     case "service":
       return status.service.running ? "running" : status.service.error || "stopped"
     case "watch":
-      return status.watch.paired ? `paired as ${status.watch.id}` : status.watch.label
+      if (status.watch.connected) {
+        return `connected as ${status.watch.id}`
+      }
+      return status.watch.paired ? `paired as ${status.watch.id}; waiting for system connection` : status.watch.label
     case "voice":
       return status.voice.message
     case "model":
@@ -950,7 +965,7 @@ export function diagnosticOk(status: StatusPayload | null, key: DiagnosticKey) {
     case "service":
       return status.service.running && !status.service.error
     case "watch":
-      return status.watch.paired
+      return status.watch.connected ?? false
     case "voice":
       return status.voice.ready
     case "model":

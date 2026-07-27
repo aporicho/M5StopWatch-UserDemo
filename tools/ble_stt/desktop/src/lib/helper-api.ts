@@ -48,6 +48,8 @@ export type StatusPayload = {
     installed: boolean
     running: boolean
     error: string | null
+    paused: boolean
+    pause_reason: string | null
   }
   voice: {
     ready: boolean
@@ -56,6 +58,8 @@ export type StatusPayload = {
   }
   watch: {
     paired: boolean
+    connected?: boolean
+    connection_state?: "offline" | "waiting_system_connection" | "attaching" | "ready"
     id: string | null
     label: string
   }

@@ -54,8 +54,12 @@ function ReadinessTable({ status, t }: { status: StatusPayload | null; t: Transl
     },
     {
       label: t("home.watch", "Watch"),
-      ok: status.watch.paired,
-      detail: status.watch.paired ? t("status.connected", "connected") : status.watch.label,
+      ok: status.watch.connected ?? false,
+      detail: status.watch.connected
+        ? t("status.connected", "connected")
+        : status.watch.connection_state === "waiting_system_connection"
+          ? t("status.waiting_system_connection", "waiting for system connection")
+          : status.watch.label,
     },
     {
       label: t("home.voice", "Voice"),

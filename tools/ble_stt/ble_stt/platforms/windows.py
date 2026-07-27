@@ -196,19 +196,48 @@ class WindowsPlatform(PlatformAdapter):
             print(f"[ble] Windows paired-device lookup failed: {exc}")
         return None
 
-    async def find_device(self, explicit_identifier: str | None):
-        from bleak import BleakScanner
+    async def find_connected_device(self, explicit_identifier: str | None):
         from bleak.backends.device import BLEDevice
+        from winrt.windows.devices.bluetooth import BluetoothConnectionStatus, BluetoothLEDevice
+        from winrt.windows.devices.enumeration import DeviceInformation
 
-        identifier = explicit_identifier or await self.paired_identifier()
+        connected = getattr(
+            BluetoothConnectionStatus,
+            "CONNECTED",
+            getattr(BluetoothConnectionStatus, "connected", 1),
+        )
+        try:
+            selector = BluetoothLEDevice.get_device_selector_from_pairing_state(True)
+            devices = await DeviceInformation.find_all_async(selector)
+            matches = [info for info in devices if str(info.name) == DEVICE_NAME]
+            for info in matches:
+                system_device = await BluetoothLEDevice.from_id_async(info.id)
+                if system_device is None:
+                    continue
+                try:
+                    if system_device.connection_status != connected:
+                        continue
+                    raw_address = int(system_device.bluetooth_address)
+                    identifier = ":".join(f"{value:02X}" for value in raw_address.to_bytes(6, byteorder="big"))
+                    self.config.set("device_id", identifier)
+                    return BLEDevice(identifier, DEVICE_NAME, None)
+                finally:
+                    system_device.close()
+        except Exception as exc:
+            print(f"[ble] Windows connected-device lookup failed: {exc}")
+        # Explicit identifiers remain useful for diagnostics, but are still
+        # gated by ConnectionStatus and never handed to Bleak while offline.
+        identifier = explicit_identifier
         if identifier:
-            print(f"[ble] using cached Windows device {identifier}")
-            device = await BleakScanner.find_device_by_address(identifier, timeout=3)
-            if device is not None:
-                return device
-            # A BLE HID peripheral normally stops advertising after Windows
-            # connects it. Passing a BLEDevice makes Bleak's WinRT backend use
-            # BluetoothLEDevice.FromBluetoothAddressAsync and the system cache
-            # instead of starting a second advertisement scan.
-            return BLEDevice(identifier, DEVICE_NAME, None)
-        return await super().find_device(None)
+            try:
+                raw_address = int(identifier.replace(":", ""), 16)
+                system_device = await BluetoothLEDevice.from_bluetooth_address_async(raw_address)
+                if system_device is not None:
+                    try:
+                        if system_device.connection_status == connected:
+                            return BLEDevice(identifier, DEVICE_NAME, None)
+                    finally:
+                        system_device.close()
+            except Exception:
+                pass
+        return None

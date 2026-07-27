@@ -40,12 +40,14 @@ private:
 class BleHidRemoteView {
 public:
     void init(lv_obj_t* parent);
-    void update(model::BleHidRemote::State state, int lastError,
-                model::BleHidRemote::SpeechServiceState serviceState, uint16_t hostError);
+    void update(model::BleHidRemote::State state, int lastError, model::BleHidRemote::SpeechServiceState serviceState,
+                uint16_t hostError);
     void flashKey(bool leftKey);
     int8_t consumeWheelDelta();
     model::UserEvent consumeTouchEvent();
     bool consumePairRequested();
+    bool consumeReconnectRequested();
+    bool consumeCancelPairingRequested();
     void showControls();
     void hideControls();
     void toggleControls();
@@ -72,32 +74,35 @@ private:
     std::unique_ptr<uitk::lvgl_cpp::Label> _right_hint_label;
     std::unique_ptr<uitk::lvgl_cpp::Label> _gesture_label;
     std::unique_ptr<uitk::lvgl_cpp::Button> _pair_button;
+    std::unique_ptr<uitk::lvgl_cpp::Button> _reconnect_button;
     std::unique_ptr<PairComputerDialog> _pair_dialog;
 
-    model::BleHidRemote::State _displayed_state            = model::BleHidRemote::State::Stopped;
-    int _displayed_error                                   = 0;
+    model::BleHidRemote::State _displayed_state = model::BleHidRemote::State::Stopped;
+    int _displayed_error                        = 0;
     model::BleHidRemote::SpeechServiceState _displayed_service_state =
         model::BleHidRemote::SpeechServiceState::Disconnected;
-    uint16_t _displayed_host_error                         = 0;
-    uint32_t _left_flash_until                             = 0;
-    uint32_t _right_flash_until                            = 0;
-    uint32_t _tap_started_at                               = 0;
-    uint32_t _last_tap_at                                  = 0;
-    uint8_t _tap_count                                     = 0;
-    bool _pair_requested                                   = false;
-    bool _controls_visible                                 = false;
-    bool _tap_pressing                                     = false;
-    bool _tap_moved                                        = false;
-    bool _tap_hold_sent                                    = false;
-    bool _gesture_pressing                                 = false;
-    bool _gesture_locked                                   = false;
-    bool _gesture_rejected                                 = false;
+    uint16_t _displayed_host_error = 0;
+    uint32_t _left_flash_until     = 0;
+    uint32_t _right_flash_until    = 0;
+    uint32_t _tap_started_at       = 0;
+    uint32_t _last_tap_at          = 0;
+    uint8_t _tap_count             = 0;
+    bool _pair_requested           = false;
+    bool _reconnect_requested      = false;
+    bool _cancel_pairing_requested = false;
+    bool _controls_visible         = false;
+    bool _tap_pressing             = false;
+    bool _tap_moved                = false;
+    bool _tap_hold_sent            = false;
+    bool _gesture_pressing         = false;
+    bool _gesture_locked           = false;
+    bool _gesture_rejected         = false;
     lv_point_t _gesture_start{};
     lv_point_t _gesture_last{};
     lv_point_t _tap_start{};
     model::UserEvent _pending_touch_event = model::UserEvent::None;
-    int _gesture_remainder = 0;
-    int _wheel_pending     = 0;
+    int _gesture_remainder                = 0;
+    int _wheel_pending                    = 0;
 };
 
 }  // namespace view

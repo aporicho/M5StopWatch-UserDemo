@@ -26,9 +26,9 @@ AppBleHidRemote::AppBleHidRemote()
 
 namespace {
 
-constexpr const char* LogTag      = "BLE-REMOTE-APP";
-constexpr const char* LogFileName = "ble_remote.log";
-constexpr size_t MaxLogBytes      = 48 * 1024;
+constexpr const char* LogTag         = "BLE-REMOTE-APP";
+constexpr const char* LogFileName    = "ble_remote.log";
+constexpr size_t MaxLogBytes         = 48 * 1024;
 constexpr uint32_t SpeechHoldMs      = 500;
 constexpr uint32_t VibrationSettleMs = 70;
 
@@ -92,7 +92,7 @@ void rotateLogIfNeeded()
     char path[96];
     buildLogPath(path, sizeof(path));
 
-    struct stat fileStat {};
+    struct stat fileStat{};
     if (stat(path, &fileStat) != 0 || fileStat.st_size < static_cast<off_t>(MaxLogBytes)) {
         return;
     }
@@ -138,18 +138,17 @@ void AppBleHidRemote::logRemoteSnapshot(const char* reason)
         return;
     }
 
-    const auto state       = _remote->state();
-    const int error        = _remote->lastError();
-    const bool speechReady = _remote->isSpeechReady();
+    const auto state        = _remote->state();
+    const int error         = _remote->lastError();
+    const bool speechReady  = _remote->isSpeechReady();
     const bool speechActive = _remote->isSpeechActive();
     const auto serviceState = _remote->speechServiceState();
-    const auto hostStatus  = _remote->hostStatus();
-    const uint16_t hostErr = _remote->hostError();
+    const auto hostStatus   = _remote->hostStatus();
+    const uint16_t hostErr  = _remote->hostError();
 
     if (_remote_snapshot_valid && state == _logged_state && error == _logged_error &&
         serviceState == _logged_service_state && speechReady == _logged_speech_ready &&
-        speechActive == _logged_speech_active &&
-        hostStatus == _logged_host_status && hostErr == _logged_host_error) {
+        speechActive == _logged_speech_active && hostStatus == _logged_host_status && hostErr == _logged_host_error) {
         return;
     }
 
@@ -157,14 +156,14 @@ void AppBleHidRemote::logRemoteSnapshot(const char* reason)
              model::bleHidStateToString(state), error, model::speechServiceStateToString(serviceState),
              speechReady ? 1 : 0, speechActive ? 1 : 0, hostStatusToString(hostStatus), hostErr);
 
-    _remote_snapshot_valid  = true;
-    _logged_state           = state;
-    _logged_error           = error;
-    _logged_service_state   = serviceState;
-    _logged_speech_ready    = speechReady;
-    _logged_speech_active   = speechActive;
-    _logged_host_status     = hostStatus;
-    _logged_host_error      = hostErr;
+    _remote_snapshot_valid = true;
+    _logged_state          = state;
+    _logged_error          = error;
+    _logged_service_state  = serviceState;
+    _logged_speech_ready   = speechReady;
+    _logged_speech_active  = speechActive;
+    _logged_host_status    = hostStatus;
+    _logged_host_error     = hostErr;
 }
 
 #ifdef CONFIG_M5_TEST_CONTROL
@@ -174,15 +173,21 @@ AppBleHidRemote::TestSnapshot AppBleHidRemote::testSnapshot() const
     if (!_remote) {
         return snapshot;
     }
-    snapshot.hasRemote      = true;
-    snapshot.state          = model::bleHidStateToString(_remote->state());
-    snapshot.lastError      = _remote->lastError();
-    snapshot.lastErrorStage = _remote->lastErrorStage();
-    snapshot.speechService  = model::speechServiceStateToString(_remote->speechServiceState());
-    snapshot.hostStatus     = hostStatusToString(_remote->hostStatus());
-    snapshot.hostError      = _remote->hostError();
-    snapshot.speechReady    = _remote->isSpeechReady();
-    snapshot.speechActive   = _remote->isSpeechActive();
+    snapshot.hasRemote              = true;
+    snapshot.state                  = model::bleHidStateToString(_remote->state());
+    snapshot.lastError              = _remote->lastError();
+    snapshot.lastErrorStage         = _remote->lastErrorStage();
+    snapshot.speechService          = model::speechServiceStateToString(_remote->speechServiceState());
+    snapshot.hostStatus             = hostStatusToString(_remote->hostStatus());
+    snapshot.hostError              = _remote->hostError();
+    snapshot.speechReady            = _remote->isSpeechReady();
+    snapshot.speechActive           = _remote->isSpeechActive();
+    snapshot.advertisingMode        = model::bleAdvertisingModeToString(_remote->advertisingMode());
+    snapshot.pairingOpen            = _remote->pairingOpen();
+    snapshot.bondCount              = _remote->bondCount();
+    snapshot.rejectedPeerCount      = _remote->rejectedPeerCount();
+    snapshot.lastDisconnectReason   = _remote->lastDisconnectReason();
+    snapshot.advertisingRemainingMs = _remote->advertisingRemainingMs();
     return snapshot;
 }
 #endif
@@ -325,13 +330,13 @@ void AppBleHidRemote::onOpen()
     }
 
     _remote->start();
-    _left_long_latched       = false;
-    _right_long_latched      = false;
-    _speech_start_pending    = false;
-    _speech_end_feedback     = false;
-    _home_latched            = false;
-    _remote_snapshot_valid   = false;
-    _last_wheel_log_at       = 0;
+    _left_long_latched     = false;
+    _right_long_latched    = false;
+    _speech_start_pending  = false;
+    _speech_end_feedback   = false;
+    _home_latched          = false;
+    _remote_snapshot_valid = false;
+    _last_wheel_log_at     = 0;
     logRemoteSnapshot("after start");
 }
 
@@ -355,14 +360,13 @@ bool AppBleHidRemote::handleHomeCombo()
 
 void AppBleHidRemote::handleButtonPressAndHold(bool leftButton)
 {
-    auto& hal   = GetHAL();
-    auto& button = leftButton ? hal.btnA : hal.btnB;
-    bool& latch = leftButton ? _left_long_latched : _right_long_latched;
-    const auto holdEvent =
-        leftButton ? model::UserEvent::ButtonLeftHold : model::UserEvent::ButtonRightHold;
+    auto& hal            = GetHAL();
+    auto& button         = leftButton ? hal.btnA : hal.btnB;
+    bool& latch          = leftButton ? _left_long_latched : _right_long_latched;
+    const auto holdEvent = leftButton ? model::UserEvent::ButtonLeftHold : model::UserEvent::ButtonRightHold;
 
     if (button.wasPressed()) {
-        latch = false;
+        latch                 = false;
         _speech_start_pending = false;
     }
     if (_remote && button.isPressed() && !latch && button.pressedFor(SpeechHoldMs)) {
@@ -373,11 +377,11 @@ void AppBleHidRemote::handleButtonPressAndHold(bool leftButton)
 
 void AppBleHidRemote::handleButtonRelease(bool leftButton)
 {
-    auto& hal   = GetHAL();
+    auto& hal    = GetHAL();
     auto& button = leftButton ? hal.btnA : hal.btnB;
-    bool& latch = leftButton ? _left_long_latched : _right_long_latched;
-    const auto releaseAfterHoldEvent = leftButton ? model::UserEvent::ButtonLeftReleaseAfterHold
-                                                  : model::UserEvent::ButtonRightReleaseAfterHold;
+    bool& latch  = leftButton ? _left_long_latched : _right_long_latched;
+    const auto releaseAfterHoldEvent =
+        leftButton ? model::UserEvent::ButtonLeftReleaseAfterHold : model::UserEvent::ButtonRightReleaseAfterHold;
     const auto tapEvent = leftButton ? model::UserEvent::ButtonLeftTap : model::UserEvent::ButtonRightTap;
 
     if (!_remote || !button.wasReleased()) {
@@ -428,21 +432,33 @@ void AppBleHidRemote::handleViewEvents(uint32_t now)
 
     logRemoteSnapshot("state change");
 
-    int8_t wheelDelta = 0;
-    bool pairComputer = false;
+    int8_t wheelDelta           = 0;
+    bool pairComputer           = false;
+    bool reconnectComputer      = false;
+    bool cancelPairing          = false;
     model::UserEvent touchEvent = model::UserEvent::None;
     if (_view) {
         LvglLockGuard lock;
         _view->update(_remote->state(), _remote->lastError(), _remote->speechServiceState(), _remote->hostError());
-        wheelDelta   = _view->consumeWheelDelta();
-        touchEvent   = _view->consumeTouchEvent();
-        pairComputer = _view->consumePairRequested();
+        wheelDelta        = _view->consumeWheelDelta();
+        touchEvent        = _view->consumeTouchEvent();
+        pairComputer      = _view->consumePairRequested();
+        reconnectComputer = _view->consumeReconnectRequested();
+        cancelPairing     = _view->consumeCancelPairingRequested();
     }
 
     if (pairComputer) {
         const bool started = _remote->pairNewComputer();
         logEvent("pair new computer requested result=%d", started ? 1 : 0);
         logRemoteSnapshot("after pair request");
+    } else if (reconnectComputer) {
+        const bool started = _remote->reconnect();
+        logEvent("reconnect requested result=%d", started ? 1 : 0);
+        logRemoteSnapshot("after reconnect request");
+    } else if (cancelPairing) {
+        const bool cancelled = _remote->cancelPairing();
+        logEvent("cancel pairing requested result=%d", cancelled ? 1 : 0);
+        logRemoteSnapshot("after cancel pairing");
     } else if (wheelDelta != 0) {
         if (_last_wheel_log_at == 0 || now - _last_wheel_log_at >= 1000) {
             logEvent("wheel delta=%d", static_cast<int>(wheelDelta));
@@ -460,6 +476,9 @@ void AppBleHidRemote::onRunning()
     auto& hal = GetHAL();
     hal.updateButtonStates(false);
     const uint32_t now = hal.millis();
+    if (_remote) {
+        _remote->poll();
+    }
 
     if (handleHomeCombo()) {
         return;

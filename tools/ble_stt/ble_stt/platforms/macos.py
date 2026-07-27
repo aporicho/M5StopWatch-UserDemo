@@ -16,8 +16,6 @@ ACCESSIBILITY_SETTINGS_URL = (
 )
 BLUETOOTH_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth"
 CORE_BLUETOOTH_CACHE_TIMEOUT_SECONDS = 5.0
-BLE_ADDRESS_SCAN_TIMEOUT_SECONDS = 5.0
-BLE_NAME_SCAN_TIMEOUT_SECONDS = 12.0
 _BLUETOOTH_PERMISSION_MANAGER: Any | None = None
 HID_TO_MAC_KEY = {
     **{0x04 + index: value for index, value in enumerate((0x00, 0x0B, 0x08, 0x02, 0x0E, 0x03, 0x05, 0x04,
@@ -217,9 +215,6 @@ class MacOSPlatform(PlatformAdapter):
             raise RuntimeError("the macOS MLX backend requires Apple Silicon")
         injector = self.create_text_injector()
         if not injector.check_accessibility(False):
-            if not getattr(self, "_input_permission_prompted", False):
-                self._input_permission_prompted = True
-                injector.check_accessibility(True)
             raise RuntimeError(
                 "Accessibility permission is required; enable M5StopWatch in System Settings > "
                 "Privacy & Security > Accessibility"
@@ -280,68 +275,43 @@ class MacOSPlatform(PlatformAdapter):
         from bleak.backends.corebluetooth.CentralManagerDelegate import CentralManagerDelegate
         from bleak.backends.device import BLEDevice
         from CoreBluetooth import CBUUID
-        from Foundation import NSArray, NSUUID
+        from Foundation import NSArray
 
         manager = CentralManagerDelegate()
         await manager.wait_until_ready()
-        if identifier:
-            uuid = NSUUID.alloc().initWithUUIDString_(identifier)
-            if uuid is None:
-                return None
-            identifiers = NSArray.arrayWithArray_([uuid])
-            peripherals = manager.central_manager.retrievePeripheralsWithIdentifiers_(identifiers)
-        else:
-            services = NSArray.arrayWithArray_([CBUUID.UUIDWithString_(SERVICE_UUID)])
-            peripherals = manager.central_manager.retrieveConnectedPeripheralsWithServices_(services)
+        # A HID link owned by macOS is not returned when CoreBluetooth is
+        # queried for 0x1812.  The same already-connected peripheral *is*
+        # returned for our vendor speech service, which lets the helper attach
+        # GATT without scanning or waking a disconnected watch.
+        # retrievePeripheralsWithIdentifiers_ only means "known to the cache"
+        # and would let Bleak initiate a physical reconnect, so it is never used.
+        services = NSArray.arrayWithArray_([CBUUID.UUIDWithString_(SERVICE_UUID)])
+        peripherals = manager.central_manager.retrieveConnectedPeripheralsWithServices_(services)
+        named_match = None
         for peripheral in peripherals:
-            if identifier is None and str(peripheral.name()) != DEVICE_NAME:
-                continue
             device_id = str(peripheral.identifier().UUIDString())
-            self.config.set("device_id", device_id)
-            return BLEDevice(device_id, str(peripheral.name()), (peripheral, manager))
-        return None
+            if str(peripheral.name()) != DEVICE_NAME:
+                continue
+            device = BLEDevice(device_id, str(peripheral.name()), (peripheral, manager))
+            if identifier and device_id.casefold() == identifier.casefold():
+                self.config.set("device_id", device_id)
+                return device
+            named_match = named_match or device
+        if named_match is not None:
+            # Pair New rotates the watch identity, so a stale CoreBluetooth UUID
+            # must never hide a newly system-connected M5StopWatch HID.
+            self.config.set("device_id", str(named_match.address))
+        return named_match
 
-    async def find_device(self, explicit_identifier: str | None):
-        from bleak import BleakScanner
-
+    async def find_connected_device(self, explicit_identifier: str | None):
         identifier = explicit_identifier or await self.paired_identifier()
         try:
-            device = await asyncio.wait_for(
-                self._retrieve_system_device(identifier),
-                timeout=CORE_BLUETOOTH_CACHE_TIMEOUT_SECONDS,
+            return await asyncio.wait_for(
+                self._retrieve_system_device(identifier), timeout=CORE_BLUETOOTH_CACHE_TIMEOUT_SECONDS
             )
         except TimeoutError:
-            print("[ble] CoreBluetooth cache lookup timed out")
-            device = None
+            print("[ble] CoreBluetooth connected-device lookup timed out")
+            return None
         except Exception as exc:
-            print(f"[ble] CoreBluetooth cache lookup failed: {exc}")
-            device = None
-        if device is not None:
-            print(f"[ble] using CoreBluetooth cached device {device.address}")
-            return device
-        if identifier:
-            try:
-                device = await asyncio.wait_for(
-                    BleakScanner.find_device_by_address(identifier, timeout=3),
-                    timeout=BLE_ADDRESS_SCAN_TIMEOUT_SECONDS,
-                )
-            except TimeoutError:
-                print("[ble] cached address scan timed out")
-                device = None
-            if device is not None:
-                return device
-        print(f"[ble] scanning for {DEVICE_NAME}")
-        try:
-            device = await asyncio.wait_for(
-                BleakScanner.find_device_by_name(DEVICE_NAME, timeout=10),
-                timeout=BLE_NAME_SCAN_TIMEOUT_SECONDS,
-            )
-        except TimeoutError:
-            print("[ble] device name scan timed out")
-            device = None
-        if device is None:
-            raise RuntimeError(
-                f"{DEVICE_NAME} was not found; reopen BLE Remote or forget the stale pairing and try again"
-            )
-        self.config.set("device_id", str(device.address))
-        return device
+            print(f"[ble] CoreBluetooth connected-device lookup failed: {exc}")
+            return None
