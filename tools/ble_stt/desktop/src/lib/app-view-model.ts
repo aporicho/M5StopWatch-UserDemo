@@ -523,14 +523,20 @@ function dictationFromLogEntry(entry: StructuredLogEntry): DictationHistoryItem 
   }
 }
 
+function logEntryEpoch(entry: StructuredLogEntry) {
+  const value = Date.parse(entry.time.replace(" ", "T"))
+  return Number.isFinite(value) ? value / 1000 : 0
+}
+
 export function dictationHistory(
   entries: StructuredLogEntry[],
-  telemetry: RuntimeTelemetry | null
+  telemetry: RuntimeTelemetry | null,
+  clearedAt = 0
 ): DictationHistoryItem[] {
   const history: DictationHistoryItem[] = []
   const latestTelemetryText = telemetry?.last_text?.text?.trim() ?? ""
 
-  if (telemetry?.last_text?.text) {
+  if (telemetry?.last_text?.text && telemetry.last_text.time > clearedAt) {
     history.push({
       key: `dictation:telemetry:${telemetry.last_text.time}:${telemetry.last_text.text}`,
       text: telemetry.last_text.text,
@@ -540,6 +546,9 @@ export function dictationHistory(
   }
 
   for (const entry of entries.slice().reverse()) {
+    if (logEntryEpoch(entry) <= clearedAt) {
+      continue
+    }
     const item = dictationFromLogEntry(entry)
     if (!item || item.text === latestTelemetryText) {
       continue
@@ -598,12 +607,13 @@ function commandHistoryFromLogEntry(entry: StructuredLogEntry): CommandHistoryIt
 
 export function commandHistory(
   entries: StructuredLogEntry[],
-  telemetry: RuntimeTelemetry | null
+  telemetry: RuntimeTelemetry | null,
+  clearedAt = 0
 ): CommandHistoryItem[] {
   const history: CommandHistoryItem[] = []
   const latestCommand = telemetry?.last_command ?? null
 
-  if (latestCommand) {
+  if (latestCommand && latestCommand.time > clearedAt) {
     history.push({
       key: `command:telemetry:${latestCommand.time}:${latestCommand.text}:${latestCommand.reason}`,
       time: formatUnixTime(latestCommand.time),
@@ -618,6 +628,9 @@ export function commandHistory(
   }
 
   for (const entry of entries.slice().reverse()) {
+    if (logEntryEpoch(entry) <= clearedAt) {
+      continue
+    }
     const item = commandHistoryFromLogEntry(entry)
     if (!item) {
       continue

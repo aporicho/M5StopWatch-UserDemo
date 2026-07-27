@@ -1,5 +1,6 @@
 import {
   AlertCircleIcon,
+  BookOpenIcon,
   CheckCircle2Icon,
   DownloadIcon,
   PlayIcon,
@@ -7,6 +8,9 @@ import {
   RotateCcwIcon,
   SquareIcon,
   Trash2Icon,
+  SaveIcon,
+  SparklesIcon,
+  KeyboardIcon,
   WrenchIcon,
 } from "lucide-react"
 
@@ -40,6 +44,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select"
+import { Slider } from "@/components/ui/slider"
+import { Textarea } from "@/components/ui/textarea"
+import { Toggle } from "@/components/ui/toggle"
 import {
   Sheet,
   SheetContent,
@@ -49,7 +56,16 @@ import {
 } from "@/components/ui/sheet"
 import { PermissionPanel } from "@/features/settings/permission-panel"
 import { modelDisplayLabel, readinessVariant } from "@/lib/app-view-model"
-import { formatBytes, type ModelAction, type PermissionKind, type ServiceAction, type StatusPayload } from "@/lib/helper-api"
+import {
+  formatBytes,
+  type CorrectionModelAction,
+  type CorrectionModelStatus,
+  type ModelAction,
+  type PermissionKind,
+  type ServiceAction,
+  type StatusPayload,
+  type VoicePreferences,
+} from "@/lib/helper-api"
 import type { LanguageCode, Translator } from "@/lib/i18n"
 
 type SelectItemOption = {
@@ -74,6 +90,9 @@ type SettingsSheetProps = {
   repairModelDisabled: boolean
   useModelDisabled: boolean
   deleteModelDisabled: boolean
+  voicePreferences: VoicePreferences | null
+  correctionModel: CorrectionModelStatus | null
+  voiceSettingsTouched: boolean
   onOpenChange: (open: boolean) => void
   onLanguageChange: (language: LanguageCode) => void
   onModelChange: (model: string) => void
@@ -81,6 +100,9 @@ type SettingsSheetProps = {
   onRunServiceAction: (action: ServiceAction) => void
   onRequestPermission: (kind: PermissionKind) => void
   onRequestDeleteModel: () => void
+  onVoicePreferencesChange: (preferences: VoicePreferences) => void
+  onSaveVoiceSettings: () => void
+  onRunCorrectionModelAction: (action: CorrectionModelAction) => void
   t: Translator
 }
 
@@ -101,6 +123,9 @@ export function SettingsSheet({
   repairModelDisabled,
   useModelDisabled,
   deleteModelDisabled,
+  voicePreferences,
+  correctionModel,
+  voiceSettingsTouched,
   onOpenChange,
   onLanguageChange,
   onModelChange,
@@ -108,6 +133,9 @@ export function SettingsSheet({
   onRunServiceAction,
   onRequestPermission,
   onRequestDeleteModel,
+  onVoicePreferencesChange,
+  onSaveVoiceSettings,
+  onRunCorrectionModelAction,
   t,
 }: SettingsSheetProps) {
   return (
@@ -159,6 +187,240 @@ export function SettingsSheet({
                 </FieldGroup>
               </CardContent>
             </Card>
+
+            {voicePreferences && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <SparklesIcon className="size-4" />
+                    {t("settings.smart_correction", "Smart correction")}
+                  </CardTitle>
+                  <CardDescription>
+                    {t(
+                      "settings.smart_correction_description",
+                      "Conservative local correction for Simplified Chinese and English."
+                    )}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <FieldGroup>
+                    <Field orientation="horizontal">
+                      <FieldContent>
+                        <FieldTitle>{t("settings.enable_correction", "Enable smart correction")}</FieldTitle>
+                        <FieldDescription>
+                          {t("settings.enable_correction_description", "Runs locally after recognition and keeps numbers, English, and personal terms unchanged.")}
+                        </FieldDescription>
+                      </FieldContent>
+                      <Toggle
+                        variant="outline"
+                        pressed={voicePreferences.correction.enabled}
+                        onPressedChange={(pressed) =>
+                          onVoicePreferencesChange({
+                            ...voicePreferences,
+                            correction: { ...voicePreferences.correction, enabled: pressed },
+                          })
+                        }
+                      >
+                        {voicePreferences.correction.enabled ? t("common.on", "On") : t("common.off", "Off")}
+                      </Toggle>
+                    </Field>
+
+                    <Field orientation="horizontal">
+                      <FieldContent>
+                        <FieldTitle className="flex items-center gap-2">
+                          <BookOpenIcon className="size-4" />
+                          {t("settings.standard_lexicon", "Built-in word packs")}
+                        </FieldTitle>
+                        <FieldDescription>
+                          {t("settings.standard_lexicon_description", "Bias recognition toward common computing and M5StopWatch terms without forcing replacements.")}
+                        </FieldDescription>
+                      </FieldContent>
+                      <Toggle
+                        variant="outline"
+                        pressed={voicePreferences.correction.standard_lexicon_enabled}
+                        onPressedChange={(pressed) =>
+                          onVoicePreferencesChange({
+                            ...voicePreferences,
+                            correction: {
+                              ...voicePreferences.correction,
+                              standard_lexicon_enabled: pressed,
+                            },
+                          })
+                        }
+                      >
+                        {voicePreferences.correction.standard_lexicon_enabled ? t("common.on", "On") : t("common.off", "Off")}
+                      </Toggle>
+                    </Field>
+
+                    <Field>
+                      <FieldLabel htmlFor="personal-glossary">
+                        {t("settings.personal_glossary", "Personal glossary")}
+                      </FieldLabel>
+                      <Textarea
+                        id="personal-glossary"
+                        rows={4}
+                        value={voicePreferences.correction.glossary.join("\n")}
+                        placeholder={t("settings.personal_glossary_placeholder", "One name or term per line")}
+                        onChange={(event) =>
+                          onVoicePreferencesChange({
+                            ...voicePreferences,
+                            correction: {
+                              ...voicePreferences.correction,
+                              glossary: event.currentTarget.value.split(/\r?\n/),
+                            },
+                          })
+                        }
+                      />
+                      <FieldDescription>
+                        {t("settings.personal_glossary_description", "Personal terms take priority and are protected during correction. Up to 128 terms.")}
+                      </FieldDescription>
+                    </Field>
+
+                    <Field orientation="horizontal">
+                      <FieldContent>
+                        <FieldTitle>{t("settings.correction_model", "Correction model")}</FieldTitle>
+                        <FieldDescription>
+                          {correctionModel?.message ?? t("common.loading", "Loading")} · {formatBytes(correctionModel?.disk_bytes ?? 0)}
+                        </FieldDescription>
+                      </FieldContent>
+                      <Badge variant={readinessVariant(Boolean(correctionModel?.ready))}>
+                        {correctionModel?.state ?? "unknown"}
+                      </Badge>
+                    </Field>
+
+                    {correctionModel && !correctionModel.runtime_available && (
+                      <Alert>
+                        <AlertCircleIcon />
+                        <AlertTitle>{t("settings.correction_runtime_missing", "Correction runtime missing")}</AlertTitle>
+                        <AlertDescription>
+                          {t("settings.correction_runtime_missing_description", "This build does not include llama-server, so recognition will safely fall back to uncorrected text.")}
+                        </AlertDescription>
+                      </Alert>
+                    )}
+                  </FieldGroup>
+                </CardContent>
+                <CardFooter className="flex flex-wrap gap-2">
+                  <Button onClick={onSaveVoiceSettings} disabled={controlsDisabled || !voiceSettingsTouched}>
+                    <SpinnerOrIcon busy={busyAction === "voice-settings:save"} icon={SaveIcon} />
+                    {t("common.save", "Save")}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => onRunCorrectionModelAction("install-model")}
+                    disabled={controlsDisabled || Boolean(correctionModel?.installed)}
+                  >
+                    <SpinnerOrIcon busy={busyAction === "correction-model:install-model"} icon={DownloadIcon} />
+                    {t("settings.install_model", "Install model")}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => onRunCorrectionModelAction("update-model")}
+                    disabled={controlsDisabled || !correctionModel?.installed}
+                  >
+                    <SpinnerOrIcon busy={busyAction === "correction-model:update-model"} icon={RefreshCwIcon} />
+                    {t("settings.update", "Update")}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => onRunCorrectionModelAction("repair-model")}
+                    disabled={controlsDisabled || !correctionModel?.installed}
+                  >
+                    <SpinnerOrIcon busy={busyAction === "correction-model:repair-model"} icon={WrenchIcon} />
+                    {t("settings.repair", "Repair")}
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    onClick={() => onRunCorrectionModelAction("delete-model")}
+                    disabled={controlsDisabled || !correctionModel?.installed}
+                  >
+                    <Trash2Icon data-icon="inline-start" />
+                    {t("settings.delete", "Delete")}
+                  </Button>
+                </CardFooter>
+              </Card>
+            )}
+
+            {voicePreferences && (
+              <Card>
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <KeyboardIcon className="size-4" />
+                    {t("settings.typing_effect", "Typing effect")}
+                  </CardTitle>
+                  <CardDescription>
+                    {t("settings.typing_effect_description", "Show live recognition as a natural typing animation in the target app.")}
+                  </CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <FieldGroup>
+                    <Field orientation="horizontal">
+                      <FieldContent>
+                        <FieldTitle>{t("settings.enable_typing_effect", "Animate inserted text")}</FieldTitle>
+                        <FieldDescription>{t("settings.enable_typing_effect_description", "Disable to insert each recognized chunk immediately.")}</FieldDescription>
+                      </FieldContent>
+                      <Toggle
+                        variant="outline"
+                        pressed={voicePreferences.typing.enabled}
+                        onPressedChange={(pressed) =>
+                          onVoicePreferencesChange({
+                            ...voicePreferences,
+                            typing: { ...voicePreferences.typing, enabled: pressed },
+                          })
+                        }
+                      >
+                        {voicePreferences.typing.enabled ? t("common.on", "On") : t("common.off", "Off")}
+                      </Toggle>
+                    </Field>
+                    <Field>
+                      <div className="flex items-center justify-between gap-4">
+                        <FieldLabel>{t("settings.typing_speed", "Typing speed")}</FieldLabel>
+                        <Badge variant="outline">{voicePreferences.typing.characters_per_second} {t("settings.characters_per_second", "chars/s")}</Badge>
+                      </div>
+                      <Slider
+                        min={10}
+                        max={100}
+                        step={5}
+                        value={[voicePreferences.typing.characters_per_second]}
+                        disabled={!voicePreferences.typing.enabled}
+                        onValueChange={(value) => {
+                          const speed = Array.isArray(value) ? value[0] : value
+                          if (typeof speed !== "number") return
+                          onVoicePreferencesChange({
+                            ...voicePreferences,
+                            typing: { ...voicePreferences.typing, characters_per_second: speed },
+                          })
+                        }}
+                      />
+                    </Field>
+                    <Field orientation="horizontal">
+                      <FieldContent>
+                        <FieldTitle>{t("settings.auto_accelerate", "Auto accelerate")}</FieldTitle>
+                        <FieldDescription>{t("settings.auto_accelerate_description", "Speed up smoothly when recognized text is waiting, up to 120 chars/s.")}</FieldDescription>
+                      </FieldContent>
+                      <Toggle
+                        variant="outline"
+                        pressed={voicePreferences.typing.auto_accelerate}
+                        disabled={!voicePreferences.typing.enabled}
+                        onPressedChange={(pressed) =>
+                          onVoicePreferencesChange({
+                            ...voicePreferences,
+                            typing: { ...voicePreferences.typing, auto_accelerate: pressed },
+                          })
+                        }
+                      >
+                        {voicePreferences.typing.auto_accelerate ? t("common.on", "On") : t("common.off", "Off")}
+                      </Toggle>
+                    </Field>
+                  </FieldGroup>
+                </CardContent>
+                <CardFooter>
+                  <Button onClick={onSaveVoiceSettings} disabled={controlsDisabled || !voiceSettingsTouched}>
+                    <SpinnerOrIcon busy={busyAction === "voice-settings:save"} icon={SaveIcon} />
+                    {t("common.save", "Save")}
+                  </Button>
+                </CardFooter>
+              </Card>
+            )}
 
           <Card>
             <CardHeader>

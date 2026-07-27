@@ -69,6 +69,7 @@ type CommandPageProps = {
   onRefresh: () => void
   onSaveEntries: (entries: CommandEntry[]) => Promise<boolean>
   onReset: () => void
+  onClearHistory: () => void
   t: Translator
 }
 
@@ -98,6 +99,7 @@ export function CommandPage({
   onRefresh,
   onSaveEntries,
   onReset,
+  onClearHistory,
   t,
 }: CommandPageProps) {
   const [draftCommand, setDraftCommand] = useState<CommandEntry | null>(null)
@@ -274,8 +276,16 @@ export function CommandPage({
 
       <Card className="min-h-0 md:flex md:h-full md:flex-col">
         <CardHeader>
-          <CardTitle>{t("commands.last_result", "Command history")}</CardTitle>
-          <CardDescription>{t("commands.last_result_description", "Recent command-mode recognition results.")}</CardDescription>
+          <div>
+            <CardTitle>{t("commands.last_result", "Command history")}</CardTitle>
+            <CardDescription>{t("commands.last_result_description", "Recent command-mode recognition results.")}</CardDescription>
+          </div>
+          <CardAction>
+            <Button size="sm" variant="ghost" onClick={onClearHistory} disabled={!history.length}>
+              <Trash2Icon data-icon="inline-start" />
+              {t("common.clear", "Clear")}
+            </Button>
+          </CardAction>
         </CardHeader>
         <CardContent className="min-h-0 md:flex-1">
           {history.length ? (

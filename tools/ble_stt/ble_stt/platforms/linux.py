@@ -7,6 +7,7 @@ import subprocess
 from typing import Any
 
 from ..protocol import AUDIO_UUID, DEVICE_NAME
+from ..types import TextReplacementResult
 from .base import PlatformAdapter
 
 HID_TO_WTYPE_KEY = {
@@ -63,6 +64,77 @@ class LinuxTextInjector:
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"wtype failed with exit code {exc.returncode}") from exc
         return True
+
+    @staticmethod
+    def _focused_accessible() -> tuple[Any, Any] | tuple[None, None]:
+        try:
+            import pyatspi
+        except ImportError:
+            return None, None
+        try:
+            root = pyatspi.Registry.getDesktop(0)
+            pending = [root]
+            visited = 0
+            while pending and visited < 4096:
+                node = pending.pop()
+                visited += 1
+                try:
+                    if node.getState().contains(pyatspi.STATE_FOCUSED):
+                        try:
+                            return node, node.queryText()
+                        except Exception:
+                            pass
+                    count = int(getattr(node, "childCount", 0))
+                    pending.extend(node.getChildAtIndex(index) for index in range(count))
+                except Exception:
+                    continue
+        except Exception:
+            return None, None
+        return None, None
+
+    def replace_verified_suffix(
+        self,
+        expected_suffix: str,
+        replacement: str,
+        expected_window: object | None,
+    ) -> TextReplacementResult:
+        if not expected_suffix:
+            return TextReplacementResult(False, "empty_suffix")
+        if expected_window and self.active_window() != expected_window:
+            return TextReplacementResult(False, "focus_changed")
+        _element, text = self._focused_accessible()
+        if text is None:
+            return TextReplacementResult(False, "unsupported")
+        try:
+            caret = int(text.caretOffset)
+            selection_count = int(text.nSelections)
+            if selection_count:
+                start, end = text.getSelection(0)
+                if int(start) != int(end) or int(end) != caret:
+                    return TextReplacementResult(False, "selection_changed")
+            start = caret - len(expected_suffix)
+            if start < 0 or str(text.getText(start, caret)) != expected_suffix:
+                return TextReplacementResult(False, "text_mismatch")
+            selected = (
+                text.setSelection(0, start, caret)
+                if selection_count
+                else text.addSelection(start, caret)
+            )
+            if selected is False:
+                return TextReplacementResult(False, "selection_failed")
+        except Exception:
+            return TextReplacementResult(False, "unsupported")
+        if expected_window and self.active_window() != expected_window:
+            return TextReplacementResult(False, "focus_changed")
+        try:
+            subprocess.run(["wtype", "--", replacement], check=True, env=os.environ.copy())
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            try:
+                text.setSelection(0, caret, caret)
+            except Exception:
+                pass
+            return TextReplacementResult(False, "insertion_failed")
+        return TextReplacementResult(True, "replaced")
 
     def tap_key(self, key_code: int, modifiers: int, expected_window: object | None) -> bool:
         current = self.active_window()

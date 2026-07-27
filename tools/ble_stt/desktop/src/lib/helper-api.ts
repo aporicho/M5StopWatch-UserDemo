@@ -38,6 +38,41 @@ export type ModelStatus = {
   message: string
 }
 
+export type VoicePreferences = {
+  correction: {
+    enabled: boolean
+    mode: "conservative"
+    languages: string[]
+    repository: string
+    filename: string
+    glossary: string[]
+    standard_lexicon_enabled: boolean
+    lexicon_packs: string[]
+    timeout_seconds: number
+  }
+  typing: {
+    enabled: boolean
+    characters_per_second: number
+    auto_accelerate: boolean
+    max_characters_per_second: number
+  }
+}
+
+export type CorrectionModelStatus = {
+  repository: string
+  filename: string
+  state: string
+  installed: boolean
+  ready: boolean
+  disk_bytes: number
+  path: string
+  revision: string | null
+  sha256: string | null
+  runtime_available: boolean
+  runtime_path: string | null
+  message: string
+}
+
 export type StatusPayload = {
   overall: {
     code: string
@@ -68,6 +103,8 @@ export type StatusPayload = {
     model: string
   }
   model: ModelStatus
+  preferences: VoicePreferences
+  correction_model: CorrectionModelStatus
   permissions: {
     input: PermissionStatus
     bluetooth: PermissionStatus
@@ -128,8 +165,18 @@ export type RuntimeTelemetry = {
   }
   last_text: {
     text: string
+    raw_text?: string
+    corrected_text?: string
     final: boolean
     time: number
+    replacement?: string
+    correction?: {
+      state: string
+      changed: boolean
+      reason: string
+      latency_ms: number
+      model?: string | null
+    }
   } | null
   last_command: {
     text: string
@@ -154,6 +201,7 @@ export type TelemetryEnvelope = {
 
 export type ServiceAction = "install" | "start" | "stop" | "restart"
 export type ModelAction = "use" | "install" | "update" | "repair" | "delete"
+export type CorrectionModelAction = "install-model" | "update-model" | "repair-model" | "delete-model"
 export type PermissionKind = "bluetooth" | "input"
 
 export type MappingDefinition = {
@@ -196,6 +244,14 @@ export type ModelEnvelope = {
   action: string
   message?: string
   model: ModelStatus
+}
+
+export type VoiceSettingsEnvelope = {
+  ok: boolean
+  action: string
+  message?: string
+  settings: VoicePreferences
+  correction_model: CorrectionModelStatus
 }
 
 export type MappingEnvelope = {
@@ -407,6 +463,18 @@ export async function invokeServiceAction(action: ServiceAction) {
 export async function invokeModelAction(action: ModelAction, model: string) {
   const result = await invoke<HelperResult>("model_action", { action, model })
   return parseHelperJson<ModelEnvelope>(result)
+}
+
+export async function saveVoiceSettings(settings: VoicePreferences) {
+  const result = await invoke<HelperResult>("voice_settings_save", {
+    payload: JSON.stringify(settings),
+  })
+  return parseHelperJson<VoiceSettingsEnvelope>(result)
+}
+
+export async function invokeCorrectionModelAction(action: CorrectionModelAction) {
+  const result = await invoke<HelperResult>("correction_model_action", { action })
+  return parseHelperJson<VoiceSettingsEnvelope>(result)
 }
 
 export async function openPermissionPanel(kind: PermissionKind) {

@@ -133,6 +133,12 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: tools/ble_stt/macos/requirements-build.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: tools/ble_stt/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
       - name: Import signing identity, build, and verify App
         shell: bash
         run: |
@@ -205,13 +211,31 @@ jobs:
           CODESIGN_IDENTITY="${SIGNING_IDENTITY}" PYTHON=python3.12 \
             bash tools/ble_stt/macos/build-app.sh
 
-          APP="tools/ble_stt/dist-macos/M5StopWatch.app"
-          EXECUTABLE="${APP}/Contents/MacOS/M5StopWatch"
+          pushd tools/ble_stt/desktop
+          npm ci
+          BLE_STT_SKIP_LLAMA_RUNTIME=1 npm run build:mac:app
+          popd
+
+          HELPER_SOURCE="tools/ble_stt/dist-macos/M5StopWatch.app"
+          APP="tools/ble_stt/desktop/src-tauri/target/release/bundle/macos/M5StopWatch.app"
+          NESTED_HELPER="${APP}/Contents/Resources/resources/ble-stt-helper/M5StopWatch.app"
+          test -d "${APP}"
+          test -x "${HELPER_SOURCE}/Contents/MacOS/M5StopWatch"
+          rm -rf "${NESTED_HELPER}"
+          mkdir -p "$(dirname "${NESTED_HELPER}")"
+          ditto --noextattr --noqtn "${HELPER_SOURCE}" "${NESTED_HELPER}"
+          xattr -cr "${APP}" || true
+          codesign --force --deep --timestamp=none --sign "${SIGNING_IDENTITY}" "${APP}"
+
+          EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "${APP}/Contents/Info.plist")"
+          EXECUTABLE="${APP}/Contents/MacOS/${EXECUTABLE_NAME}"
           test -x "${EXECUTABLE}"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${APP}/Contents/Info.plist")" \
             = "com.aporicho.m5stopwatch-ble-stt"
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "${APP}/Contents/Info.plist")" \
             = "15.0"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${NESTED_HELPER}/Contents/Info.plist")" \
+            = "com.aporicho.m5stopwatch-ble-stt-helper"
           test "$(lipo -archs "${EXECUTABLE}")" = arm64
           codesign --verify --deep --strict --verbose=2 "${APP}"
 
@@ -249,16 +273,19 @@ jobs:
           # download exercises Hugging Face and Metal availability on this
           # disposable runner, but the downloaded cache is not part of the
           # App. Verify the frozen ML runtime and data files directly instead.
-          test -d "${APP}/Contents/Frameworks/bleak"
-          test -d "${APP}/Contents/Frameworks/huggingface_hub"
-          test -d "${APP}/Contents/Frameworks/numpy"
-          test -d "${APP}/Contents/Resources/mlx"
-          test -d "${APP}/Contents/Resources/mlx_whisper"
-          test -s "${APP}/Contents/Resources/mlx_whisper/assets/mel_filters.npz"
-          test -d "${APP}/Contents/Resources/opencc"
-          test -s "${APP}/Contents/Frameworks/hf_xet/hf_xet.abi3.so"
-          test -s "${APP}/Contents/Frameworks/mlx/lib/libmlx.dylib"
-          test "$(xcrun lipo -archs "${APP}/Contents/Frameworks/mlx/lib/libmlx.dylib")" = arm64
+          test -d "${NESTED_HELPER}/Contents/Frameworks/bleak"
+          test -d "${NESTED_HELPER}/Contents/Frameworks/huggingface_hub"
+          test -d "${NESTED_HELPER}/Contents/Frameworks/numpy"
+          test -d "${NESTED_HELPER}/Contents/Resources/mlx"
+          test -d "${NESTED_HELPER}/Contents/Resources/mlx_whisper"
+          test -s "${NESTED_HELPER}/Contents/Resources/mlx_whisper/assets/mel_filters.npz"
+          test -d "${NESTED_HELPER}/Contents/Resources/opencc"
+          test -s "${NESTED_HELPER}/Contents/Frameworks/hf_xet/hf_xet.abi3.so"
+          test -s "${NESTED_HELPER}/Contents/Frameworks/mlx/lib/libmlx.dylib"
+          test "$(xcrun lipo -archs "${NESTED_HELPER}/Contents/Frameworks/mlx/lib/libmlx.dylib")" = arm64
+          test -x "${NESTED_HELPER}/Contents/Resources/llama/llama-server"
+          test -s "${NESTED_HELPER}/Contents/Resources/llama/runtime.json"
+          "${NESTED_HELPER}/Contents/Resources/llama/llama-server" --version
 
           ditto -c -k --sequesterRsrc --keepParent \
             "${APP}" M5StopWatch-macos-arm64.zip

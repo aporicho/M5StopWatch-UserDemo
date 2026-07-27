@@ -21,6 +21,18 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertIn("--identifier \"$HELPER_BUNDLE_ID\"", value)
         self.assertIn("=designated => identifier \\\"$HELPER_BUNDLE_ID\\\"", value)
 
+    def test_correction_runtime_is_pinned_and_hash_verified(self):
+        root = Path(__file__).resolve().parents[1]
+        script = (root / "desktop" / "scripts" / "prepare-llama-runtime.mjs").read_text(
+            encoding="utf-8"
+        )
+        build = (root / "macos" / "build-app.sh").read_text(encoding="utf-8")
+
+        self.assertIn('const LLAMA_VERSION = "b9000"', script)
+        self.assertIn('createHash("sha256")', script)
+        self.assertIn("llama-b9000-bin-macos-arm64.tar.gz", script)
+        self.assertIn('Contents/Resources/llama/llama-server', build)
+
     def test_desktop_control_uses_single_product_identity(self):
         root = Path(__file__).resolve().parents[1] / "desktop"
         service = (Path(__file__).resolve().parents[1] / "ble_stt" / "service.py").read_text(encoding="utf-8")
@@ -47,11 +59,22 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertNotIn("lsregister", install)
         self.assertNotIn("killall Dock", install)
         self.assertIn('APP_TARGET="$USER_APP_TARGET"', install)
+        self.assertIn("BLE_STT_SKIP_LLAMA_RUNTIME=1 npm run build:mac:app", install)
+        self.assertIn('"minimumSystemVersion": "15.0"', config)
         self.assertIn('"M5StopWatch.app", "Contents", "MacOS", "M5StopWatch"', sidecar)
         self.assertIn('"--noextattr", "--noqtn", sourceApp, targetApp', sidecar)
 
         public_install = (Path(__file__).resolve().parents[1] / "install.sh").read_text(encoding="utf-8")
         self.assertNotIn("doctor --request-permissions --wait-forever", public_install)
+
+    def test_release_packages_outer_desktop_app_with_signed_nested_helper(self):
+        workflow = (
+            Path(__file__).resolve().parents[3] / ".github" / "workflows" / "ble-stt-release.yml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("npm run build:mac:app", workflow)
+        self.assertIn("src-tauri/target/release/bundle/macos/M5StopWatch.app", workflow)
+        self.assertIn("resources/ble-stt-helper/M5StopWatch.app", workflow)
 
 
 if __name__ == "__main__":

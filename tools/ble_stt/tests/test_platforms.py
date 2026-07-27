@@ -125,6 +125,41 @@ class LinuxInjectorTests(unittest.TestCase):
         self.assertTrue(injector.type_text("hello", "0xabc"))
         self.assertEqual(run.call_args_list[-1].args[0], ["wtype", "--", "hello"])
 
+    @patch("ble_stt.platforms.linux.subprocess.run")
+    def test_verified_replacement_requires_exact_suffix(self, run: Mock):
+        class FakeText:
+            caretOffset = 5
+            nSelections = 0
+
+            def getText(self, start, end):
+                return "hello"[start:end]
+
+            def addSelection(self, start, end):
+                self.selection = (start, end)
+                return True
+
+        run.return_value = Mock(stdout='{"address":"0xabc"}')
+        injector = LinuxTextInjector()
+        text = FakeText()
+        with patch.object(injector, "_focused_accessible", return_value=(object(), text)):
+            result = injector.replace_verified_suffix("lo", "p!", "0xabc")
+
+        self.assertTrue(result.replaced)
+        self.assertEqual(text.selection, (3, 5))
+        self.assertEqual(run.call_args_list[-1].args[0], ["wtype", "--", "p!"])
+
+    @patch("ble_stt.platforms.linux.subprocess.run")
+    def test_verified_replacement_rejects_mismatched_text(self, run: Mock):
+        text = Mock(caretOffset=5, nSelections=0)
+        text.getText.return_value = "xx"
+        run.return_value = Mock(stdout='{"address":"0xabc"}')
+        injector = LinuxTextInjector()
+        with patch.object(injector, "_focused_accessible", return_value=(object(), text)):
+            result = injector.replace_verified_suffix("lo", "p!", "0xabc")
+
+        self.assertFalse(result.replaced)
+        self.assertEqual(result.reason, "text_mismatch")
+
 
 class LinuxConnectedDeviceTests(unittest.TestCase):
     def test_returns_only_a_system_connected_paired_device(self):
@@ -210,6 +245,47 @@ class FakeQuartz:
 
     def CGEventPost(self, tap, event):
         self.posts.append(event)
+
+
+class FakeAXQuartz(FakeQuartz):
+    kAXFocusedUIElementAttribute = "focused"
+    kAXValueAttribute = "value"
+    kAXSelectedTextRangeAttribute = "selection"
+    kAXValueCFRangeType = "range"
+
+    def __init__(self):
+        super().__init__()
+        self.element = object()
+        self.value = "今天天汽"
+        self.selection = (4, 0)
+
+    def AXUIElementCreateSystemWide(self):
+        return "system"
+
+    def AXUIElementCopyAttributeValue(self, element, attribute, _output):
+        if element == "system" and attribute == self.kAXFocusedUIElementAttribute:
+            return 0, self.element
+        if element is self.element and attribute == self.kAXValueAttribute:
+            return 0, self.value
+        if element is self.element and attribute == self.kAXSelectedTextRangeAttribute:
+            return 0, self.selection
+        return -1, None
+
+    def AXValueGetValue(self, value, range_type, _output):
+        return value
+
+    def CFRangeMake(self, location, length):
+        return location, length
+
+    def AXValueCreate(self, range_type, value):
+        return value
+
+    def AXUIElementSetAttributeValue(self, element, attribute, value):
+        self.selection = value
+        return 0
+
+    def CFEqual(self, left, right):
+        return left is right
 
 
 class FakeApplication:
@@ -369,6 +445,17 @@ class MacInjectorTests(unittest.TestCase):
         finally:
             FakeWorkspace.pid = 42
 
+    def test_verified_replacement_selects_exact_utf16_suffix(self):
+        quartz = FakeAXQuartz()
+        injector = MacOSTextInjector(quartz, FakeAppKit)
+        expected = injector.active_window()
+
+        result = injector.replace_verified_suffix("汽", "气", expected)
+
+        self.assertTrue(result.replaced)
+        self.assertEqual(quartz.selection, (3, 1))
+        self.assertEqual([event.get("text") for event in quartz.posts], ["气", None])
+
 
 class MacBLEDiscoveryTests(unittest.TestCase):
     def test_connected_lookup_queries_vendor_speech_service_not_hid_service(self):
@@ -487,6 +574,25 @@ class WindowsInjectorTests(unittest.TestCase):
         self.assertEqual(api.values, ["你好"])
         api.window = 101
         self.assertFalse(injector.type_text("blocked", 100))
+
+    def test_verified_replacement_types_only_after_selector_succeeds(self):
+        api = FakeWindowsAPI()
+        injector = WindowsTextInjector(api, selector=lambda value: "selected")
+
+        result = injector.replace_verified_suffix("old", "new", 100)
+
+        self.assertTrue(result.replaced)
+        self.assertEqual(api.values, ["new"])
+
+    def test_verified_replacement_preserves_text_on_mismatch(self):
+        api = FakeWindowsAPI()
+        injector = WindowsTextInjector(api, selector=lambda value: "text_mismatch")
+
+        result = injector.replace_verified_suffix("old", "new", 100)
+
+        self.assertFalse(result.replaced)
+        self.assertEqual(result.reason, "text_mismatch")
+        self.assertEqual(api.values, [])
 
 
 class ServiceRenderingTests(unittest.TestCase):

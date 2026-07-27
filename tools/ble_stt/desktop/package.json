@@ -1,13 +1,14 @@
 {
   "name": "m5stopwatch",
   "private": true,
-  "version": "0.3.4",
+  "version": "0.4.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "prepare-sidecar": "node scripts/prepare-sidecar.mjs",
+    "prepare-llama-runtime": "node scripts/prepare-llama-runtime.mjs",
     "prepare-starter-model": "node scripts/prepare-starter-model.mjs",
     "build:mac": "tauri build",
     "build:mac:app": "tauri build --bundles app",

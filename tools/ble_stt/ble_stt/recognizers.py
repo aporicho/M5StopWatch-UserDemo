@@ -84,11 +84,19 @@ class _SimplifyingRecognizer:
         return result
 
 
-def _command_prompt(context: RecognitionContext | None) -> str | None:
-    if context is None or context.mode != "command" or not context.command_phrases:
+def _initial_prompt(context: RecognitionContext | None) -> str | None:
+    if context is None:
         return None
-    phrases = "、".join(context.command_phrases[:24])
-    return f"以下是可能的中文短指令：{phrases}。请只转写用户说出的短指令。"
+    if context.mode == "command" and context.command_phrases:
+        phrases = "、".join(context.command_phrases[:24])
+        return f"以下是可能的中文短指令：{phrases}。请只转写用户说出的短指令。"
+    if context.mode != "dictation":
+        return None
+    prefix = "以下语音主要为简体中文和英文混合内容。请保持英文原文，不要翻译。"
+    if not context.prompt_terms:
+        return prefix
+    terms = "、".join(context.prompt_terms[:64])
+    return f"{prefix}可能出现以下专名：{terms}。"
 
 
 class FasterWhisperRecognizer(_SimplifyingRecognizer):
@@ -136,7 +144,7 @@ class FasterWhisperRecognizer(_SimplifyingRecognizer):
             "vad_filter": True,
             "vad_parameters": {"min_silence_duration_ms": 300},
         }
-        prompt = _command_prompt(context)
+        prompt = _initial_prompt(context)
         if prompt:
             kwargs["initial_prompt"] = prompt
         try:
@@ -179,7 +187,7 @@ class MlxWhisperRecognizer(_SimplifyingRecognizer):
             "condition_on_previous_text": context.mode != "command" if context else True,
             "verbose": None,
         }
-        prompt = _command_prompt(context)
+        prompt = _initial_prompt(context)
         if prompt:
             kwargs["initial_prompt"] = prompt
         try:

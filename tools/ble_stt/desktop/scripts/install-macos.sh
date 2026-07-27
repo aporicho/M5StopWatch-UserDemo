@@ -116,7 +116,7 @@ if [ "${BLE_STT_SKIP_HELPER_BUILD:-0}" = "1" ]; then
 else
   "$BLE_STT_ROOT/macos/build-app.sh"
 fi
-npm run build:mac:app
+BLE_STT_SKIP_LLAMA_RUNTIME=1 npm run build:mac:app
 
 [ -d "$APP_SOURCE" ] || { printf 'Missing built app: %s\n' "$APP_SOURCE" >&2; exit 1; }
 [ -x "$HELPER_SOURCE_APP/Contents/MacOS/M5StopWatch" ] || { printf 'Missing helper source app: %s\n' "$HELPER_SOURCE_APP" >&2; exit 1; }

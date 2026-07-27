@@ -1,4 +1,4 @@
-# Exact macOS 15 arm64 build lock for the 0.3.4 release. mlx-whisper also
+# Exact macOS 15 arm64 build lock for the 0.4.0 release. mlx-whisper also
 # declares Torch for model conversion, which the live MLX transcription path
 # does not use; build-app.sh installs mlx-whisper itself with --no-deps.
 altgraph==0.17.5

@@ -43,6 +43,10 @@ unset BLE_STT_CODESIGN_IDENTITY
 
 APP="$DIST_ROOT/M5StopWatch.app"
 [ -x "$APP/Contents/MacOS/M5StopWatch" ] || { printf 'App build failed.\n' >&2; exit 1; }
+BLE_STT_LLAMA_OUTPUT="$APP/Contents/Resources/llama" \
+    node "$SOURCE_ROOT/desktop/scripts/prepare-llama-runtime.mjs"
+[ -x "$APP/Contents/Resources/llama/llama-server" ] \
+    || { printf 'llama-server packaging failed.\n' >&2; exit 1; }
 # Finder/FileProvider metadata inherited from a build directory is not part of
 # the program and makes codesign reject an otherwise valid bundle. Sign and
 # verify a clean temporary copy; this also works when the repository itself is
@@ -96,4 +100,5 @@ while IFS= read -r link; do
 done < <(find "$FINAL_VERIFY_APP" -type l)
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$FINAL_VERIFY_APP"
 "$SIGNING_APP/Contents/MacOS/M5StopWatch" --version
+"$SIGNING_APP/Contents/Resources/llama/llama-server" --version
 printf 'Built %s\n' "$APP"

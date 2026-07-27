@@ -44,7 +44,7 @@ fn helper_cli_args() -> Option<Vec<String>> {
     }
     match args[0].as_str() {
         "run" | "status" | "logs" | "telemetry" | "service" | "permissions" | "prepare"
-        | "models" | "mappings" | "commands" | "doctor" | "test" | "journey-test" | "restart" | "upgrade"
+        | "models" | "mappings" | "commands" | "voice-settings" | "doctor" | "test" | "journey-test" | "restart" | "upgrade"
         | "uninstall" | "help" | "--version" | "-h" | "--help" => Some(args),
         _ => None,
     }
@@ -482,6 +482,13 @@ fn validate_command_action(action: &str) -> Result<(), String> {
     }
 }
 
+fn validate_correction_model_action(action: &str) -> Result<(), String> {
+    match action {
+        "install-model" | "update-model" | "repair-model" | "delete-model" => Ok(()),
+        _ => Err(format!("unsupported correction model action: {action}")),
+    }
+}
+
 #[tauri::command]
 fn service_action(app: tauri::AppHandle, action: String) -> Result<HelperResult, String> {
     validate_service_action(action.as_str())?;
@@ -543,6 +550,27 @@ fn command_save(app: tauri::AppHandle, payload: String) -> Result<HelperResult, 
 fn command_reset(app: tauri::AppHandle) -> Result<HelperResult, String> {
     validate_command_action("reset")?;
     run_helper(Some(&app), ["commands", "reset", "--json"])
+}
+
+#[tauri::command]
+fn voice_settings_save(app: tauri::AppHandle, payload: String) -> Result<HelperResult, String> {
+    run_helper(
+        Some(&app),
+        ["voice-settings", "save", "--json", "--payload", payload.as_str()],
+    )
+}
+
+#[tauri::command]
+async fn correction_model_action(
+    app: tauri::AppHandle,
+    action: String,
+) -> Result<HelperResult, String> {
+    validate_correction_model_action(action.as_str())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        run_helper(Some(&app), ["voice-settings", action.as_str(), "--json"])
+    })
+    .await
+    .map_err(|error| format!("correction model action failed to join: {error}"))?
 }
 
 #[tauri::command]
@@ -611,6 +639,8 @@ pub fn run() {
             command_status,
             command_save,
             command_reset,
+            voice_settings_save,
+            correction_model_action,
             open_permission,
             open_logs
         ])
@@ -652,5 +682,12 @@ mod tests {
     fn rejects_unknown_command_action() {
         let error = validate_command_action("wipe").unwrap_err();
         assert!(error.contains("unsupported command action"));
+    }
+
+
+    #[test]
+    fn rejects_unknown_correction_model_action() {
+        let error = validate_correction_model_action("wipe").unwrap_err();
+        assert!(error.contains("unsupported correction model action"));
     }
 }

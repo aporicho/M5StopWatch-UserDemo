@@ -5,9 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from .config import UserConfig, log_dir
+from .correction_models import correction_model_status
 from .diagnostics import event_log_paths
 from .models import ModelStatus, model_status
 from .platforms import create_platform
+from .preferences import read_voice_preferences
 from .service import ServiceManager
 from .telemetry import TELEMETRY_FILE_NAME, read_telemetry
 
@@ -133,6 +135,7 @@ def snapshot_to_dict(snapshot: StatusSnapshot) -> dict[str, Any]:
         connection_state = "waiting_system_connection"
     else:
         connection_state = "offline"
+    config = UserConfig()
     return {
         "schema": 1,
         "overall": {
@@ -164,6 +167,8 @@ def snapshot_to_dict(snapshot: StatusSnapshot) -> dict[str, Any]:
             "model": snapshot.model,
         },
         "model": snapshot.model_state.to_dict(),
+        "preferences": read_voice_preferences(config).to_dict(),
+        "correction_model": correction_model_status(config).to_dict(),
         "permissions": {
             "input": {
                 "ok": input_permission.ok,

@@ -481,7 +481,13 @@ find_python() {
 }
 
 PYTHON="$(find_python || true)"
-if [ "$platform" = "Linux" ] && { [ -z "$PYTHON" ] || [ -n "$LINUX_MISSING" ]; }; then
+LINUX_NEEDS_PYATSPI=0
+if [ "$platform" = "Linux" ]; then
+    if [ -z "$PYTHON" ] || ! "$PYTHON" -c 'import pyatspi' >/dev/null 2>&1; then
+        LINUX_NEEDS_PYATSPI=1
+    fi
+fi
+if [ "$platform" = "Linux" ] && { [ -z "$PYTHON" ] || [ -n "$LINUX_MISSING" ] || [ "$LINUX_NEEDS_PYATSPI" = "1" ]; }; then
     say "Installing missing Linux system packages"
     if [ "$(id -u)" -eq 0 ]; then
         SUDO=""
@@ -491,13 +497,13 @@ if [ "$platform" = "Linux" ] && { [ -z "$PYTHON" ] || [ -n "$LINUX_MISSING" ]; }
     fi
     if command -v apt-get >/dev/null 2>&1; then
         $SUDO apt-get update
-        $SUDO apt-get install -y python3 python3-venv bluez wtype
+        $SUDO apt-get install -y python3 python3-venv python3-pyatspi bluez wtype
     elif command -v dnf >/dev/null 2>&1; then
-        $SUDO dnf install -y python3 bluez wtype
+        $SUDO dnf install -y python3 python3-pyatspi bluez wtype
     elif command -v pacman >/dev/null 2>&1; then
-        $SUDO pacman -S --needed --noconfirm python bluez wtype
+        $SUDO pacman -S --needed --noconfirm python python-atspi bluez wtype
     elif command -v zypper >/dev/null 2>&1; then
-        $SUDO zypper --non-interactive install python3 bluez wtype
+        $SUDO zypper --non-interactive install python3 python3-atspi bluez wtype
     else
         fail "install Python 3.10+, BlueZ, and wtype with this distribution's package manager"
     fi
@@ -507,6 +513,8 @@ if [ "$platform" = "Linux" ] && { [ -z "$PYTHON" ] || [ -n "$LINUX_MISSING" ]; }
         command -v "$command_name" >/dev/null 2>&1 || LINUX_MISSING="$LINUX_MISSING $command_name"
     done
     [ -z "$LINUX_MISSING" ] || fail "system package installation did not provide:$LINUX_MISSING"
+    "$PYTHON" -c 'import pyatspi' >/dev/null 2>&1 \
+        || fail "system package installation did not provide Python AT-SPI bindings"
 fi
 if [ -z "$PYTHON" ] && [ "$platform" = "Darwin" ]; then
     command -v brew >/dev/null 2>&1 || fail "Python 3.10+ is missing. Install Homebrew, then rerun this command"
@@ -577,7 +585,11 @@ else
     tar -xf "$source_copy" -C "$TARGET/source"
 
     say "Installing platform components"
-    "$PYTHON" -m venv "$VENV"
+    if [ "$platform" = "Linux" ]; then
+        "$PYTHON" -m venv --system-site-packages "$VENV"
+    else
+        "$PYTHON" -m venv "$VENV"
+    fi
     "$VENV/bin/python" -m pip install --upgrade pip
     "$VENV/bin/python" -m pip install "$TARGET/source"
     if [ "$platform" = "Linux" ]; then

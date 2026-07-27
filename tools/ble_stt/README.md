@@ -1,11 +1,11 @@
 # M5StopWatch BLE 语音输入服务
 
-手表上的 **BLE Remote** 应用会把按住说话时的音频传给电脑，由常驻的本地服务完成语音识别，并把稳定的识别片段输入到录音开始时聚焦的窗口。音频和识别过程均保留在电脑本机。
+手表上的 **BLE Remote** 应用会把按住说话时的音频传给电脑，由常驻的本地服务完成语音识别，并把稳定片段以模拟打字效果输入到录音开始时聚焦的窗口。可选的 Qwen 本地模型会在松开按键后进行一次保守纠错。音频、词典和识别过程均保留在电脑本机。
 
 | 平台 | 蓝牙 | 文字输入 | 语音识别 | 登录服务 |
 | --- | --- | --- | --- | --- |
-| Linux / Hyprland | BlueZ / Bleak | `hyprctl` + `wtype` | faster-whisper | systemd 用户服务 |
-| Apple Silicon macOS 15.0+ | CoreBluetooth / Bleak | `M5StopWatch.app` PostEvent 权限 + Quartz | MLX Whisper | App 固定路径 + LaunchAgent |
+| Linux / Hyprland | BlueZ / Bleak | `hyprctl` + `wtype`，AT-SPI 安全核对 | faster-whisper | systemd 用户服务 |
+| Apple Silicon macOS 15.0+ | CoreBluetooth / Bleak | `M5StopWatch.app` PostEvent 权限 + Quartz，AX 安全核对 | MLX Whisper | App 固定路径 + LaunchAgent |
 | Windows 11 | WinRT / Bleak | `GetForegroundWindow` + `SendInput` | faster-whisper | 计划任务 |
 
 ## 一键安装
@@ -39,7 +39,7 @@ macOS 安装器只负责安装本身：
 - `BLE_STT_SKIP_TEST=1`：Linux/Windows 跳过交互式 BLE 和语音测试；macOS 安装本身不执行这类测试。
 - `BLE_STT_MODEL=medium`：覆盖默认语音模型；新安装默认使用 `small`。
 - `BLE_STT_ENGINE=auto`：选择识别后端；默认已是 `auto`。
-- `BLE_STT_VERSION=ble-stt-v0.3.4`：固定到指定 Release 标签。
+- `BLE_STT_VERSION=ble-stt-v0.4.0`：固定到指定 Release 标签。
 - `BLE_STT_ASSET_BASE=...`：从可信的内部 Release 镜像下载安装资源。
 
 ## macOS 安装与授权边界
@@ -50,7 +50,7 @@ macOS 仍以同一个 `curl | sh` 命令作为正式入口。安装脚本先把�
 
 安装完成后，在 App 的“设置 → 权限”中点击按钮发起授权。文字输入使用 `CGRequestPostEventAccess` 请求专门的键盘事件发送权限，而不是读取完整的 Accessibility 窗口树；macOS 仍把它显示在“辅助功能”页面。蓝牙权限同样只在用户点击后请求。安装器和后台服务都不会主动弹权限窗口。列表中显示 **M5StopWatch**，无需点击 `+`、粘贴 Python 路径或输入钥匙串密码。
 
-由于不再读取 AX 窗口对象，服务用前台应用 PID 防止识别期间把文字输到另一个应用。按住说话期间不要在同一个应用内切换文档窗口；如果切换到了另一个应用，本次文字输入会被取消。
+日常逐字输入只使用 Quartz PostEvent，并用前台应用 PID 防止文字泄漏到另一个应用。启用智能纠错后，服务在最终替换前会通过 AX 读取当前聚焦文本框的值和选区，仅当光标前的后缀与本次已经输入的内容逐字一致时才选中并替换；读不到、选区变化或内容不一致都会放弃覆盖，只追加尚未提交的尾音。服务不会遍历窗口、读取其他控件或复制文本内容。按住说话期间如果切换到另一个应用，本次文字输入会被取消。
 
 当前包使用项目持有的长期自签证书，而不是 Apple Developer ID，并且未经过 Apple 公证。固定证书与 Release RSA 签名可以阻止错误签名或被替换的 App 被静默升级，但不等同于 Apple 对开发者身份的背书。首次执行 `curl | sh` 的信任起点仍是 GitHub HTTPS。本版本支持上述终端一键安装，不承诺从浏览器下载后双击 App 时没有 Gatekeeper 提示；面向普通用户公开分发前应改用 Developer ID 签名与公证。
 
@@ -88,6 +88,46 @@ macOS 安装成功后，在手表上打开 **BLE Remote**，再到“系统设�
 ```
 
 体验时先聚焦一个空白文本窗口，再按住手表右键说话并松开。手表会显示“正在聆听”和“正在识别”。短按右键仍然发送 Enter；一次语音输入结束后不会自动提交识别出的文字。
+
+## 智能纠错、词典与模拟打字
+
+设置页提供三层语言信息：Whisper/Qwen 自带的语言知识、默认开启的精简常用词包，以及用户自己的个人词典。内置词包覆盖常见计算机词、固件/烧录/蓝牙等中文词和 M5StopWatch 产品名，只作为识别偏置，不会强制替换；个人词典优先级最高，并在最终纠错中受到严格保护。系统不会把大型通用词典整体塞进 Whisper 提示词，每次最多发送少量词条，避免拖慢识别或挤占音频上下文。
+
+智能纠错默认关闭。开启前在“设置 → 智能纠错”按需安装官方 `Qwen3-4B-Q4_K_M.gguf`，下载约 2.50 GB。推理通过只监听 `127.0.0.1`、带随机 API 密钥的 `llama-server` 完成；运行时固定为经过 SHA-256 校验的 llama.cpp `b9000`，macOS 包直接内置，Linux/Windows 首次安装纠错模型时自动下载。模型会结合整句修正能够唯一判断的同音、近音、漏字、重复字和语义离群词；数字、日期、金额、URL、邮箱、路径、英文片段和个人词条必须保持不变。程序还会拒绝超过 20% 编辑距离、异常语言或过长输出，超时或校验失败时原文照常使用。
+
+模拟打字默认开启，速度为每秒 40 个字符。可在设置页调整到每秒 10–100 个字符，并开启积压自动加速（最高每秒 120 个字符）。应用会按 Unicode 字素簇输入，因此 emoji、组合重音和中文不会被拆成半个字符。转写历史与指令历史各自带“清空”按钮；清空只影响界面历史并持久化清空时间，诊断日志仍保留。
+
+命令行也可管理这些设置和模型：
+
+```bash
+~/.local/bin/ble-stt voice-settings status --json
+~/.local/bin/ble-stt voice-settings save --json --payload '{"correction":{"enabled":true,"glossary":["M5StopWatch"]},"typing":{"characters_per_second":40}}'
+~/.local/bin/ble-stt voice-settings install-model --json
+~/.local/bin/ble-stt voice-settings repair-model --json
+~/.local/bin/ble-stt voice-settings delete-model --json
+```
+
+删除纠错模型会保留已校验的轻量运行时，后续重新安装无需再次下载它；普通升级和卸载仍沿用现有的模型缓存保留规则。
+
+### 纠错质量评测
+
+仓库内置 `270` 条显式输入与期望结果，覆盖语义完全无关的错词、同音/近音、漏字、重复字、中英混输、数字/日期/URL/路径保护、正常句防误改、标点、提示注入和个人词条。默认单元测试会逐条检查语料结构、保护规则和最终安全校验，但不会在 CI 下载大模型。
+
+本机安装模型后可运行真实推理评测：
+
+```bash
+PYTHONPATH=tools/ble_stt python3 tools/ble_stt/scripts/evaluate_correction.py
+```
+
+评测会报告总精确率、应纠正准确率、应保持准确率、误改数、分类结果以及 mean/p50/p95/max 延迟。比较候选 GGUF 时无需覆盖当前模型：
+
+```bash
+PYTHONPATH=tools/ble_stt python3 tools/ble_stt/scripts/evaluate_correction.py \
+  --model-path /path/to/candidate.gguf \
+  --minimum-accuracy 0.75 --minimum-preservation 0.95
+```
+
+如需把完整真实模型评测接入本机 `unittest`，设置 `BLE_STT_RUN_CORRECTION_EVAL=1`；未设置时该项会明确显示为跳过。
 
 ## 日常使用与管理
 
@@ -173,4 +213,6 @@ npm run prepare-starter-model
 BLE_STT_REQUIRE_STARTER_MODEL=1 npm run build:mac
 ```
 
-发布标签采用 `ble-stt-v<版本>` 格式，例如 `ble-stt-v0.3.4`。标签版本必须与 `tools/ble_stt/pyproject.toml` 中的版本一致。GitHub Actions 会生成 POSIX/Windows 安装器、带 SHA-256 的源码资源、`M5StopWatch-macos-arm64.zip`、App 与维护安装器的 RSA 签名，以及公开签名证书；发布前还必须把长期签名证书指纹注入 macOS 使用的一行安装器，源码和 Release 中都不得包含私钥。签名所需的临时钥匙串只存在于 GitHub Actions 构建机，安装用户不会接触它。
+发布标签采用 `ble-stt-v<版本>` 格式，例如 `ble-stt-v0.4.0`。标签版本必须与 `tools/ble_stt/pyproject.toml` 中的版本一致。GitHub Actions 会生成 POSIX/Windows 安装器、带 SHA-256 的源码资源、`M5StopWatch-macos-arm64.zip`、App 与维护安装器的 RSA 签名，以及公开签名证书；发布前还必须把长期签名证书指纹注入 macOS 使用的一行安装器，源码和 Release 中都不得包含私钥。签名所需的临时钥匙串只存在于 GitHub Actions 构建机，安装用户不会接触它。
+
+桌面/Helper 打包还会下载固定的 llama.cpp 官方二进制并核对仓库中记录的 SHA-256。不要直接改成 `latest`：较新的官方 macOS 产物可能使用比产品最低版本更高的 SDK 构建，当前固定的 `b9000` 已在 macOS 15 实机启动验证。

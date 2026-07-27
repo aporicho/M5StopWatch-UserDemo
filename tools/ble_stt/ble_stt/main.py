@@ -13,7 +13,9 @@ from typing import Any, Awaitable, Callable, Sequence
 from .agreement import common_prefix
 from .commands import encode_command_action, match_command, read_commands
 from .config import UserConfig
+from .correction import ConservativeCorrector, graphemes, normalize_transcript
 from .diagnostics import runtime_logging
+from .lexicon import merge_prompt_terms
 from .mapping import encode_mapping, parse_user_event_packet, read_mapping
 from .models import DEFAULT_ENGINE, DEFAULT_MODEL, model_status, record_model_ready, runtime_model_name
 from .platforms import PlatformAdapter, create_platform
@@ -35,6 +37,8 @@ from .protocol import (
 )
 from .recognizers import FasterWhisperRecognizer, create_recognizer
 from .telemetry import audio_metrics, make_telemetry, write_telemetry
+from .preferences import VoicePreferences, read_voice_preferences
+from .typing_output import AnimatedTextWriter
 from .types import RecognitionContext, Recognizer, TextInjector, TranscriptSegment
 
 # Compatibility name for code that imported the old recognizer directly.
@@ -56,6 +60,8 @@ class SpeechSession:
     has_output: bool = False
     injection_enabled: bool = True
     inference_pending: bool = False
+    preferences: VoicePreferences | None = None
+    output_writer: AnimatedTextWriter | None = None
 
 
 def canonical_text(segments: list[TranscriptSegment]) -> str:
@@ -74,6 +80,15 @@ def output_text(segments: list[TranscriptSegment], has_output: bool) -> str:
     return stripped
 
 
+def common_grapheme_prefix(left: str, right: str) -> str:
+    result: list[str] = []
+    for left_value, right_value in zip(graphemes(left), graphemes(right)):
+        if left_value != right_value:
+            break
+        result.append(left_value)
+    return "".join(result)
+
+
 class SpeechController:
     def __init__(
         self,
@@ -82,6 +97,8 @@ class SpeechController:
         interval: float,
         stable_lag: float,
         once: bool = False,
+        config: UserConfig | None = None,
+        corrector: ConservativeCorrector | None = None,
     ) -> None:
         self.recognizer = recognizer
         self.interval = interval
@@ -89,6 +106,8 @@ class SpeechController:
         self.injector = injector
         self.session: SpeechSession | None = None
         self.once = once
+        self.config = config or UserConfig()
+        self.corrector = corrector or ConservativeCorrector()
         self.completed = asyncio.Event()
         self.test_succeeded = False
         self._host_status_writer: Callable[[HostStatus, int], Awaitable[None]] | None = None
@@ -239,7 +258,10 @@ class SpeechController:
                 await self._heartbeat_task
             except asyncio.CancelledError:
                 pass
+        session = self.session
         self.abort("helper stopped")
+        if session is not None and session.output_writer is not None:
+            await session.output_writer.close(cancel=True)
 
     def receive_status(self, raw: bytes) -> None:
         try:
@@ -257,11 +279,20 @@ class SpeechController:
             if self.session is not None:
                 self.abort("new speech session started")
             mode = self._consume_pending_speech_mode()
+            preferences = read_voice_preferences(self.config)
+            focus_window = self.injector.active_window()
+            writer = (
+                AnimatedTextWriter(self.injector, focus_window, preferences.typing)
+                if mode != "command"
+                else None
+            )
             self.session = SpeechSession(
                 status.session_id,
-                self.injector.active_window(),
+                focus_window,
                 mode=mode,
                 injection_enabled=mode != "command",
+                preferences=preferences,
+                output_writer=writer,
             )
             self._last_audio_telemetry_at = 0.0
             LOGGER.info("speech session started session=%s mode=%s", status.session_id, mode)
@@ -336,6 +367,7 @@ class SpeechController:
 
     def abort(self, reason: str) -> None:
         if self.session is not None:
+            writer = self.session.output_writer
             LOGGER.warning("speech session aborted session=%s reason=%s", self.session.session_id, reason)
             print(f"[speech {self.session.session_id}] aborted: {reason}")
             self._publish_telemetry(
@@ -345,6 +377,8 @@ class SpeechController:
                 error=reason,
             )
             self.session = None
+            if writer is not None:
+                asyncio.create_task(writer.close(cancel=True))
 
     async def _rolling_loop(self) -> None:
         while True:
@@ -371,8 +405,15 @@ class SpeechController:
 
     def _recognition_context(self, session: SpeechSession) -> RecognitionContext:
         if session.mode != "command":
-            return RecognitionContext(mode="dictation")
-        commands = read_commands(UserConfig()).get("entries", [])
+            preferences = session.preferences or read_voice_preferences(self.config)
+            packs = (
+                preferences.correction.lexicon_packs
+                if preferences.correction.standard_lexicon_enabled
+                else ()
+            )
+            terms = merge_prompt_terms(preferences.correction.glossary, packs)
+            return RecognitionContext(mode="dictation", prompt_terms=terms)
+        commands = read_commands(self.config).get("entries", [])
         phrases: list[str] = []
         for command in commands:
             phrases.append(str(command.get("phrase", "")))
@@ -414,11 +455,18 @@ class SpeechController:
             committed_segments = stable[:commit_count]
             text = output_text(committed_segments, session.has_output)
             if session.injection_enabled and text:
-                session.injection_enabled = self.injector.type_text(text, session.focus_window)
+                if session.output_writer is not None:
+                    session.injection_enabled = session.output_writer.enqueue(text)
+                else:
+                    session.injection_enabled = self.injector.type_text(text, session.focus_window)
                 if session.injection_enabled:
                     print(f"[text] {text}")
                     self._last_text = {
-                        "text": text,
+                        "text": (
+                            session.output_writer.emitted_text + session.output_writer.pending_text
+                            if session.output_writer is not None
+                            else text
+                        ),
                         "final": False,
                         "time": time.time(),
                     }
@@ -455,8 +503,15 @@ class SpeechController:
                 self._publish_telemetry(stage="ready", session_id=self._last_ready_session_id)
 
     async def _finalize(self, session: SpeechSession) -> None:
-        snapshot = session.audio[session.audio_cursor :]
-        succeeded = session.has_output
+        tail_snapshot = session.audio[session.audio_cursor :]
+        snapshot = tail_snapshot if session.mode == "command" else session.audio
+        if session.output_writer is not None:
+            await session.output_writer.cancel_pending()
+        succeeded = (
+            bool(session.output_writer.emitted_text)
+            if session.output_writer is not None
+            else session.has_output
+        )
         self._publish_telemetry(
             stage="recognizing",
             session_id=session.session_id,
@@ -487,7 +542,7 @@ class SpeechController:
         else:
             if session.mode == "command":
                 text = output_text(segments, False)
-                commands = read_commands(UserConfig()).get("entries", [])
+                commands = read_commands(self.config).get("entries", [])
                 result = match_command(text, commands)
                 self._last_command = {
                     "text": text,
@@ -569,17 +624,61 @@ class SpeechController:
                     self.completed.set()
                 return
 
-            text = output_text(segments, session.has_output)
+            raw_text = normalize_transcript(output_text(segments, False))
+            preferences = session.preferences or read_voice_preferences(self.config)
+            correction = await asyncio.to_thread(
+                self.corrector.correct,
+                raw_text,
+                preferences.correction,
+            )
+            text = correction.text
+            writer = session.output_writer
+            emitted = writer.emitted_text if writer is not None else ""
+            replacement_reason = "not_needed"
+            inserted_text = emitted
             if session.injection_enabled and text:
                 try:
-                    session.injection_enabled = self.injector.type_text(text, session.focus_window)
-                    if session.injection_enabled:
-                        print(f"[text final] {text}")
-                        self._last_text = {
-                            "text": text,
-                            "final": True,
-                            "time": time.time(),
-                        }
+                    if writer is None:
+                        session.injection_enabled = self.injector.type_text(text, session.focus_window)
+                        inserted_text = text if session.injection_enabled else ""
+                    elif text.startswith(emitted):
+                        writer.enqueue(text[len(emitted) :])
+                        session.injection_enabled = await writer.drain()
+                        inserted_text = writer.emitted_text
+                    else:
+                        prefix = common_grapheme_prefix(emitted, text)
+                        expected_suffix = emitted[len(prefix) :]
+                        replacement = text[len(prefix) :]
+                        replace_suffix = getattr(self.injector, "replace_verified_suffix", None)
+                        result = (
+                            replace_suffix(expected_suffix, replacement, session.focus_window)
+                            if expected_suffix and callable(replace_suffix)
+                            else None
+                        )
+                        if result is not None and result.replaced:
+                            inserted_text = text
+                            replacement_reason = result.reason
+                        else:
+                            replacement_reason = result.reason if result is not None else "unsupported"
+                            if replacement_reason in {"unsupported", "text_mismatch", "selection_changed"}:
+                                # Never delete text unless the platform verified the exact
+                                # suffix. On unsupported fields, append only audio that was
+                                # not already committed by rolling recognition.
+                                tail_segments = (
+                                    await self._recognize(tail_snapshot, self._recognition_context(session))
+                                    if tail_snapshot
+                                    else []
+                                )
+                                tail_text = output_text(tail_segments, bool(emitted))
+                                writer.enqueue(tail_text)
+                                session.injection_enabled = await writer.drain()
+                                inserted_text = writer.emitted_text
+                            else:
+                                # A focus or insertion failure may have happened after a
+                                # suffix was selected. Do not send any more keystrokes.
+                                session.injection_enabled = False
+                    if session.injection_enabled and inserted_text:
+                        print(f"[text final] {inserted_text}")
                         succeeded = True
                 except Exception as exc:
                     LOGGER.exception("text insertion failed session=%s", session.session_id)
@@ -601,6 +700,17 @@ class SpeechController:
                     self.report_host_status(status, 1)
                     if not self.once:
                         asyncio.create_task(self._restore_ready(10.0))
+            if writer is not None:
+                await writer.close(cancel=not session.injection_enabled)
+            self._last_text = {
+                "text": inserted_text,
+                "raw_text": correction.raw_text,
+                "corrected_text": text,
+                "final": True,
+                "correction": correction.to_dict(),
+                "replacement": replacement_reason,
+                "time": time.time(),
+            }
             elapsed = len(session.audio) / 16000.0
             LOGGER.info(
                 "speech session finalized session=%s elapsed=%.1fs text_inserted=%s injection_enabled=%s",
@@ -917,6 +1027,7 @@ async def async_main(args: argparse.Namespace) -> None:
             args.interval,
             args.stable_lag,
             once=args.once,
+            config=config,
         )
         controller.start()
         try:

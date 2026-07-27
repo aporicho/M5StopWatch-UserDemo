@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..config import UserConfig
-from ..types import TextInjector
+from ..types import TextInjector, TextReplacementResult
 
 
 class PlatformAdapter:
@@ -59,3 +59,7 @@ class PlatformAdapter:
 
     async def record_connected(self, device: Any) -> None:
         pass
+
+
+def unsupported_text_replacement() -> TextReplacementResult:
+    return TextReplacementResult(False, "unsupported")

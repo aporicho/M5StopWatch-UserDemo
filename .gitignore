@@ -70,6 +70,8 @@ tools/ble_stt/dist-macos/
 tools/ble_stt/starter-models/
 tools/ble_stt/desktop/src-tauri/resources/models/*
 !tools/ble_stt/desktop/src-tauri/resources/models/.gitkeep
+tools/ble_stt/desktop/src-tauri/resources/llama/*
+!tools/ble_stt/desktop/src-tauri/resources/llama/.gitkeep
 
 *.code-workspace
 

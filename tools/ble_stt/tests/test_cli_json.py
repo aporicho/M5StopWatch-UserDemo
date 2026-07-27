@@ -147,6 +147,39 @@ class CliJsonTests(unittest.TestCase):
         self.assertEqual(payload["commands"]["entries"][0]["phrase"], "清空")
         self.assertTrue(any(action["id"] == "hid.keyboard.tap" for action in payload["actions"]))
 
+    def test_voice_settings_json_saves_dictionary_and_typing_preferences(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "ble-stt.json"
+            settings = {
+                "correction": {
+                    "enabled": True,
+                    "standard_lexicon_enabled": True,
+                    "glossary": ["M5StopWatch", "专有名词"],
+                },
+                "typing": {"enabled": True, "characters_per_second": 55},
+            }
+            with patch("ble_stt.cli.UserConfig", return_value=UserConfig(config_path)):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    with self.assertRaises(SystemExit) as raised:
+                        cli.main(
+                            [
+                                "voice-settings",
+                                "save",
+                                "--json",
+                                "--payload",
+                                json.dumps(settings, ensure_ascii=False),
+                            ]
+                        )
+
+        payload = json.loads(output.getvalue())
+
+        self.assertEqual(raised.exception.code, 0)
+        self.assertTrue(payload["settings"]["correction"]["enabled"])
+        self.assertEqual(payload["settings"]["correction"]["glossary"], ["M5StopWatch", "专有名词"])
+        self.assertEqual(payload["settings"]["typing"]["characters_per_second"], 55)
+        self.assertIn("correction_model", payload)
+
 
 if __name__ == "__main__":
     unittest.main()

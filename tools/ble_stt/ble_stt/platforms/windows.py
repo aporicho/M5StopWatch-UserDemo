@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import base64
+import subprocess
 from typing import Any
 
 from ..protocol import DEVICE_NAME
+from ..types import TextReplacementResult
 from .base import PlatformAdapter
 
 HID_TO_WINDOWS_VK = {
@@ -122,8 +125,9 @@ class _WindowsAPI:
 
 
 class WindowsTextInjector:
-    def __init__(self, api: Any | None = None) -> None:
+    def __init__(self, api: Any | None = None, selector: Any | None = None) -> None:
         self.api = api or _WindowsAPI()
+        self.selector = selector or self._select_verified_suffix
 
     def active_window(self) -> int | None:
         return self.api.foreground_window()
@@ -138,6 +142,71 @@ class WindowsTextInjector:
         for offset in range(0, len(text), 64):
             self.api.send_unicode(text[offset : offset + 64])
         return True
+
+    @staticmethod
+    def _select_verified_suffix(expected_suffix: str) -> str:
+        encoded_expected = base64.b64encode(expected_suffix.encode("utf-8")).decode("ascii")
+        script = f"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName UIAutomationClient
+$expected = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('{encoded_expected}'))
+$focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+if ($null -eq $focused) {{ Write-Output 'unsupported'; exit 0 }}
+$pattern = $null
+if (-not $focused.TryGetCurrentPattern([System.Windows.Automation.TextPattern]::Pattern, [ref]$pattern)) {{
+  Write-Output 'unsupported'; exit 0
+}}
+$selections = $pattern.GetSelection()
+if ($selections.Count -ne 1 -or $selections[0].GetText(-1).Length -ne 0) {{
+  Write-Output 'selection_changed'; exit 0
+}}
+$range = $selections[0].Clone()
+$moved = $range.MoveEndpointByUnit(
+  [System.Windows.Automation.TextPatternRangeEndpoint]::Start,
+  [System.Windows.Automation.TextUnit]::Character,
+  -$expected.Length
+)
+if ($moved -ne -$expected.Length -or $range.GetText(-1) -cne $expected) {{
+  Write-Output 'text_mismatch'; exit 0
+}}
+$range.Select()
+Write-Output 'selected'
+"""
+        encoded_script = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        try:
+            result = subprocess.run(
+                ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded_script],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError):
+            return "unsupported"
+        values = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        return values[-1] if values else "unsupported"
+
+    def replace_verified_suffix(
+        self,
+        expected_suffix: str,
+        replacement: str,
+        expected_window: object | None,
+    ) -> TextReplacementResult:
+        if not expected_suffix:
+            return TextReplacementResult(False, "empty_suffix")
+        current = self.active_window()
+        if expected_window is not None and current != expected_window:
+            return TextReplacementResult(False, "focus_changed")
+        reason = str(self.selector(expected_suffix))
+        if reason != "selected":
+            return TextReplacementResult(False, reason)
+        if expected_window is not None and self.active_window() != expected_window:
+            return TextReplacementResult(False, "focus_changed")
+        try:
+            self.api.send_unicode(replacement)
+        except Exception:
+            return TextReplacementResult(False, "insertion_failed")
+        return TextReplacementResult(True, "replaced")
 
     def tap_key(self, key_code: int, modifiers: int, expected_window: object | None) -> bool:
         current = self.active_window()

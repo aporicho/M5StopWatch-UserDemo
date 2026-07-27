@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..protocol import DEVICE_NAME, SERVICE_UUID
+from ..types import TextReplacementResult
 from .base import PlatformAdapter
 
 
@@ -94,6 +95,7 @@ def _request_bluetooth_authorization(central_manager_type: Any) -> None:
 @dataclass(frozen=True)
 class MacWindowToken:
     pid: int
+    focused_element: Any | None = None
 
 
 class MacOSTextInjector:
@@ -114,9 +116,9 @@ class MacOSTextInjector:
         self.appkit = appkit
 
     def check_accessibility(self, prompt: bool = False) -> bool:
-        # Text insertion only needs the narrowly scoped PostEvent privilege.
-        # Requesting full AX access made setup less reliable and exposed APIs
-        # the product does not otherwise need.
+        # The visible permission request is driven by the narrowly scoped
+        # PostEvent API. Final correction may use AX on the currently focused
+        # field only, but it never prompts from the background process.
         if prompt:
             return bool(self.quartz.CGRequestPostEventAccess())
         return bool(self.quartz.CGPreflightPostEventAccess())
@@ -126,13 +128,75 @@ class MacOSTextInjector:
         if application is None:
             return None
         pid = int(application.processIdentifier())
-        return MacWindowToken(pid)
+        return MacWindowToken(pid, self._focused_element())
 
     def _same_window(self, expected: MacWindowToken, current: MacWindowToken) -> bool:
         # NSWorkspace is available without Accessibility permission. Guarding
         # by the frontmost application prevents text from leaking into a
         # different app while keeping the permission request minimal.
         return expected.pid == current.pid
+
+    def _same_element(self, expected: Any, current: Any) -> bool:
+        compare = getattr(self.quartz, "CFEqual", None)
+        try:
+            return bool(compare(expected, current)) if callable(compare) else bool(expected == current)
+        except Exception:
+            return False
+
+    def _ax_copy(self, element: Any, attribute: Any) -> tuple[int, Any | None]:
+        function = getattr(self.quartz, "AXUIElementCopyAttributeValue", None)
+        if not callable(function):
+            return -1, None
+        try:
+            result = function(element, attribute, None)
+        except Exception:
+            return -1, None
+        if isinstance(result, tuple) and len(result) == 2:
+            return int(result[0]), result[1]
+        return 0, result
+
+    def _focused_element(self) -> Any | None:
+        creator = getattr(self.quartz, "AXUIElementCreateSystemWide", None)
+        attribute = getattr(self.quartz, "kAXFocusedUIElementAttribute", None)
+        if not callable(creator) or attribute is None:
+            return None
+        error, value = self._ax_copy(creator(), attribute)
+        return value if error == 0 else None
+
+    def _selected_range(self, value: Any) -> tuple[int, int] | None:
+        getter = getattr(self.quartz, "AXValueGetValue", None)
+        range_type = getattr(self.quartz, "kAXValueCFRangeType", None)
+        if not callable(getter) or range_type is None:
+            return None
+        try:
+            result = getter(value, range_type, None)
+        except Exception:
+            return None
+        if isinstance(result, tuple) and len(result) == 2 and isinstance(result[0], bool):
+            if not result[0]:
+                return None
+            result = result[1]
+        if isinstance(result, tuple) and len(result) == 2:
+            return int(result[0]), int(result[1])
+        location = getattr(result, "location", None)
+        length = getattr(result, "length", None)
+        if location is None or length is None:
+            return None
+        return int(location), int(length)
+
+    def _range_value(self, location: int, length: int) -> Any | None:
+        creator = getattr(self.quartz, "AXValueCreate", None)
+        range_type = getattr(self.quartz, "kAXValueCFRangeType", None)
+        if not callable(creator) or range_type is None:
+            return None
+        raw_range: Any = (location, length)
+        make_range = getattr(self.quartz, "CFRangeMake", None)
+        if callable(make_range):
+            raw_range = make_range(location, length)
+        try:
+            return creator(range_type, raw_range)
+        except Exception:
+            return None
 
     def _post_unicode(self, text: str) -> None:
         source = self.quartz.CGEventSourceCreate(self.quartz.kCGEventSourceStateCombinedSessionState)
@@ -202,6 +266,70 @@ class MacOSTextInjector:
                 return False
         self._post_key(key_code, modifiers)
         return True
+
+    def replace_verified_suffix(
+        self,
+        expected_suffix: str,
+        replacement: str,
+        expected_window: object | None,
+    ) -> TextReplacementResult:
+        if not expected_suffix:
+            return TextReplacementResult(False, "empty_suffix")
+        current = self.active_window()
+        if isinstance(expected_window, MacWindowToken):
+            if current is None or not self._same_window(expected_window, current):
+                return TextReplacementResult(False, "focus_changed")
+            if (
+                expected_window.focused_element is not None
+                and current.focused_element is not None
+                and not self._same_element(expected_window.focused_element, current.focused_element)
+            ):
+                return TextReplacementResult(False, "focus_changed")
+            element = current.focused_element
+        else:
+            element = self._focused_element()
+        if element is None:
+            return TextReplacementResult(False, "unsupported")
+
+        value_attribute = getattr(self.quartz, "kAXValueAttribute", None)
+        selection_attribute = getattr(self.quartz, "kAXSelectedTextRangeAttribute", None)
+        setter = getattr(self.quartz, "AXUIElementSetAttributeValue", None)
+        if value_attribute is None or selection_attribute is None or not callable(setter):
+            return TextReplacementResult(False, "unsupported")
+        value_error, value = self._ax_copy(element, value_attribute)
+        range_error, range_value = self._ax_copy(element, selection_attribute)
+        selected = self._selected_range(range_value) if range_error == 0 else None
+        if value_error != 0 or not isinstance(value, str) or selected is None:
+            return TextReplacementResult(False, "unsupported")
+        location, length = selected
+        if length != 0:
+            return TextReplacementResult(False, "selection_changed")
+
+        encoded = value.encode("utf-16-le")
+        suffix = expected_suffix.encode("utf-16-le")
+        caret = location * 2
+        if caret < len(suffix) or encoded[caret - len(suffix) : caret] != suffix:
+            return TextReplacementResult(False, "text_mismatch")
+        replacement_range = self._range_value(location - len(suffix) // 2, len(suffix) // 2)
+        if replacement_range is None:
+            return TextReplacementResult(False, "unsupported")
+        try:
+            error = int(setter(element, selection_attribute, replacement_range))
+        except Exception:
+            return TextReplacementResult(False, "selection_failed")
+        if error != 0:
+            return TextReplacementResult(False, "selection_failed")
+        try:
+            self._post_unicode(replacement)
+        except Exception:
+            original_range = self._range_value(location, 0)
+            if original_range is not None:
+                try:
+                    setter(element, selection_attribute, original_range)
+                except Exception:
+                    pass
+            return TextReplacementResult(False, "insertion_failed")
+        return TextReplacementResult(True, "replaced")
 
 
 class MacOSPlatform(PlatformAdapter):

@@ -1,4 +1,4 @@
-import { AlertCircleIcon, CheckCircle2Icon, FileTextIcon, PlayIcon, SettingsIcon } from "lucide-react"
+import { AlertCircleIcon, CheckCircle2Icon, FileTextIcon, PlayIcon, SettingsIcon, Trash2Icon } from "lucide-react"
 
 import { StatusBadge } from "@/components/common/status-badge"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
@@ -146,10 +146,12 @@ function StatusCard({
 function DictationHistoryCard({
   dictations,
   className,
+  onClear,
   t,
 }: {
   dictations: DictationHistoryItem[]
   className?: string
+  onClear: () => void
   t: Translator
 }) {
   const latest = dictations[0] ?? null
@@ -159,9 +161,15 @@ function DictationHistoryCard({
       <CardHeader>
         <CardTitle>{t("home.transcript", "Dictation history")}</CardTitle>
         <CardAction>
-          <Badge variant={latest?.final ? "default" : "outline"}>
-            {latest?.final ? t("home.final", "Final") : t("home.live", "Live")}
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Badge variant={latest?.final ? "default" : "outline"}>
+              {latest?.final ? t("home.final", "Final") : t("home.live", "Live")}
+            </Badge>
+            <Button size="sm" variant="ghost" onClick={onClear} disabled={!dictations.length}>
+              <Trash2Icon data-icon="inline-start" />
+              {t("common.clear", "Clear")}
+            </Button>
+          </div>
         </CardAction>
       </CardHeader>
       <CardContent className="min-h-0 md:flex-1">
@@ -320,6 +328,7 @@ type HomePageProps = {
   primaryActionLabel: PrimaryActionLabel
   onDailyAction: () => void
   onOpenSettings: () => void
+  onClearDictationHistory: () => void
   t: Translator
 }
 
@@ -334,6 +343,7 @@ export function HomePage({
   primaryActionLabel,
   onDailyAction,
   onOpenSettings,
+  onClearDictationHistory,
   t,
 }: HomePageProps) {
   return (
@@ -348,7 +358,7 @@ export function HomePage({
           primaryActionLabel={primaryActionLabel}
           t={t}
         />
-        <DictationHistoryCard dictations={dictations} className="md:flex-1" t={t} />
+        <DictationHistoryCard dictations={dictations} className="md:flex-1" onClear={onClearDictationHistory} t={t} />
       </div>
 
       <ScrollArea className="min-h-0 md:h-full">

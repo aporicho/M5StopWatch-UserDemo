@@ -13,6 +13,13 @@ from typing import Sequence
 from . import __version__
 from .commands import command_payload, read_commands, reset_commands, save_commands
 from .config import UserConfig, install_dir, log_dir
+from .correction_models import (
+    correction_model_status,
+    delete_correction_model,
+    install_correction_model,
+    repair_correction_model,
+    update_correction_model,
+)
 from .diagnostics import event_log_paths
 from .mapping import mapping_payload, read_mapping, reset_mapping, save_mapping
 from .models import (
@@ -28,6 +35,7 @@ from .models import (
     use_model,
 )
 from .platforms import create_platform
+from .preferences import read_voice_preferences, save_voice_preferences
 from .recognizers import prepare_recognizer
 from .service import ServiceManager
 from .status import collect_status, snapshot_to_dict, status_lines
@@ -50,6 +58,7 @@ COMMANDS = {
     "models",
     "mappings",
     "commands",
+    "voice-settings",
     "permissions",
     "help",
 }
@@ -248,6 +257,65 @@ def manage_commands(argv: Sequence[str]) -> int:
         commands = read_commands(config)
         print(f"[ok] {len(commands['entries'])} command(s), revision {commands['revision']}")
     return 0
+
+
+def manage_voice_settings(argv: Sequence[str]) -> int:
+    values = [value for value in argv if value != "--json"]
+    json_output = len(values) != len(argv)
+    parser = argparse.ArgumentParser(
+        prog="ble-stt voice-settings",
+        description="Manage correction, glossary, typing, and correction-model settings",
+    )
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    subparsers.add_parser("status")
+    save_parser = subparsers.add_parser("save")
+    save_parser.add_argument("--payload", required=True, help="JSON settings payload")
+    for action in ("install-model", "update-model", "repair-model", "delete-model"):
+        subparsers.add_parser(action)
+
+    args = parser.parse_args(values)
+    config = UserConfig()
+    try:
+        if args.action == "save":
+            raw = json.loads(args.payload)
+            if not isinstance(raw, dict):
+                raise ValueError("settings payload must be an object")
+            settings = save_voice_preferences(raw, config)
+        else:
+            settings = read_voice_preferences(config)
+
+        if args.action == "install-model":
+            model = install_correction_model(config)
+        elif args.action == "update-model":
+            model = update_correction_model(config)
+        elif args.action == "repair-model":
+            model = repair_correction_model(config)
+        elif args.action == "delete-model":
+            model = delete_correction_model(config)
+        else:
+            model = correction_model_status(config)
+        payload: dict[str, object] = {
+            "ok": True,
+            "action": args.action,
+            "settings": settings.to_dict(),
+            "correction_model": model.to_dict(),
+        }
+        code = 0
+    except Exception as exc:
+        payload = {
+            "ok": False,
+            "action": args.action,
+            "message": str(exc),
+            "settings": read_voice_preferences(config).to_dict(),
+            "correction_model": correction_model_status(config).to_dict(),
+        }
+        code = 1
+
+    if json_output:
+        _print_json(payload)
+    else:
+        print(str(payload.get("message") or payload["correction_model"]))
+    return code
 
 
 def _display_log_text(value: str) -> str:
@@ -532,6 +600,7 @@ Commands:
   models       Select, install, update, repair, and delete speech models
   mappings     Configure watch event-to-action mappings
   commands     Configure speech command-to-action mappings
+  voice-settings Configure correction, dictionaries, typing, and its local model
   logs         Show or follow background service logs
   telemetry    Show live runtime telemetry for the desktop HUD
   restart      Restart the login service
@@ -586,6 +655,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             code = manage_mappings(values)
         elif command == "commands":
             code = manage_commands(values)
+        elif command == "voice-settings":
+            code = manage_voice_settings(values)
         elif command == "logs":
             code = show_logs(values)
         elif command == "telemetry":

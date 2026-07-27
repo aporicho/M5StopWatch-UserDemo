@@ -30,6 +30,7 @@ import {
   helperMappings,
   helperStatus,
   helperTelemetry,
+  invokeCorrectionModelAction,
   invokeModelAction,
   invokeServiceAction,
   LOG_LINES,
@@ -41,6 +42,7 @@ import {
   POLL_MS,
   resetCommands,
   resetMappings,
+  saveVoiceSettings,
   saveCommands,
   saveMappings,
   serviceNeedsInputPermissionRestart,
@@ -49,6 +51,7 @@ import {
   structuredLogEntry,
   TELEMETRY_POLL_MS,
   type CommandEntry,
+  type CorrectionModelAction,
   type CommandEnvelope,
   type LogsEnvelope,
   type MappingEntry,
@@ -58,6 +61,7 @@ import {
   type ServiceAction,
   type StatusEnvelope,
   type TelemetryEnvelope,
+  type VoicePreferences,
 } from "@/lib/helper-api"
 import {
   LANGUAGE_OPTIONS,
@@ -66,6 +70,14 @@ import {
   persistLanguage,
   type LanguageCode,
 } from "@/lib/i18n"
+
+const DICTATION_HISTORY_CUTOFF_KEY = "m5stopwatch.history.dictation.clearedAt"
+const COMMAND_HISTORY_CUTOFF_KEY = "m5stopwatch.history.command.clearedAt"
+
+function historyCutoff(key: string) {
+  const value = Number(window.localStorage.getItem(key) ?? 0)
+  return Number.isFinite(value) ? value : 0
+}
 
 function App() {
   useSystemTheme()
@@ -92,6 +104,14 @@ function App() {
   const [commandEnvelope, setCommandEnvelope] = useState<CommandEnvelope | null>(null)
   const [commandEntries, setCommandEntries] = useState<CommandEntry[]>([])
   const [commandRefreshing, setCommandRefreshing] = useState(false)
+  const [voicePreferences, setVoicePreferences] = useState<VoicePreferences | null>(null)
+  const [voiceSettingsTouched, setVoiceSettingsTouched] = useState(false)
+  const [dictationHistoryClearedAt, setDictationHistoryClearedAt] = useState(() =>
+    historyCutoff(DICTATION_HISTORY_CUTOFF_KEY)
+  )
+  const [commandHistoryClearedAt, setCommandHistoryClearedAt] = useState(() =>
+    historyCutoff(COMMAND_HISTORY_CUTOFF_KEY)
+  )
 
   const latestStatusRef = useRef<StatusEnvelope | null>(null)
   const latestLogsRef = useRef<LogsEnvelope | null>(null)
@@ -125,8 +145,14 @@ function App() {
   )
   const dailyState = useMemo(() => localizedDailyState(rawDailyState, t), [rawDailyState, t])
 
-  const dictations = useMemo(() => dictationHistory(logEntries, telemetry), [logEntries, telemetry])
-  const commands = useMemo(() => commandHistory(logEntries, telemetry), [logEntries, telemetry])
+  const dictations = useMemo(
+    () => dictationHistory(logEntries, telemetry, dictationHistoryClearedAt),
+    [dictationHistoryClearedAt, logEntries, telemetry]
+  )
+  const commands = useMemo(
+    () => commandHistory(logEntries, telemetry, commandHistoryClearedAt),
+    [commandHistoryClearedAt, logEntries, telemetry]
+  )
   const activity = useMemo(() => recentActivity(logEntries), [logEntries])
 
   const modelItems = useMemo(() => {
@@ -345,6 +371,12 @@ function App() {
   }, [currentModel?.selected, modelSelectionTouched])
 
   useEffect(() => {
+    if (!voiceSettingsTouched && status?.preferences) {
+      setVoicePreferences(status.preferences)
+    }
+  }, [status?.preferences, voiceSettingsTouched])
+
+  useEffect(() => {
     persistLanguage(language)
   }, [language])
 
@@ -448,6 +480,64 @@ function App() {
       }
     },
     [activeModel, refreshAll, showNotice]
+  )
+
+  const changeVoicePreferences = useCallback((preferences: VoicePreferences) => {
+    setVoicePreferences(preferences)
+    setVoiceSettingsTouched(true)
+  }, [])
+
+  const saveCurrentVoiceSettings = useCallback(async () => {
+    if (!voicePreferences) return
+    setBusyAction("voice-settings:save")
+    try {
+      const payload = await saveVoiceSettings(voicePreferences)
+      if (!payload.ok) throw new Error(payload.message || "could not save voice settings")
+      setVoicePreferences(payload.settings)
+      setVoiceSettingsTouched(false)
+      showNotice(
+        t("settings.voice_settings_saved", "Voice settings saved. They apply to the next dictation."),
+        "info",
+        "success"
+      )
+      await refreshAll({ notifyErrors: true })
+    } catch (error) {
+      showNotice(errorMessage(error), "error", "error")
+    } finally {
+      setBusyAction(null)
+    }
+  }, [refreshAll, showNotice, t, voicePreferences])
+
+  const runCorrectionModelAction = useCallback(
+    async (action: CorrectionModelAction) => {
+      setBusyAction(`correction-model:${action}`)
+      const serviceWasRunning = Boolean(latestStatusRef.current?.status.service.running)
+      try {
+        if (serviceWasRunning) {
+          const stop = await invokeServiceAction("stop")
+          if (!stop.ok) throw new Error(stop.message)
+        }
+        const payload = await invokeCorrectionModelAction(action)
+        if (!payload.ok) throw new Error(payload.message || payload.correction_model.message)
+        setVoicePreferences(payload.settings)
+        setVoiceSettingsTouched(false)
+        showNotice(payload.correction_model.message, "info", "success")
+      } catch (error) {
+        showNotice(errorMessage(error), "error", "error")
+      } finally {
+        if (serviceWasRunning) {
+          try {
+            await invokeServiceAction("start")
+            await sleep(SERVICE_SETTLE_MS)
+          } catch (error) {
+            showNotice(errorMessage(error), "error", "error")
+          }
+        }
+        await refreshAll({ notifyErrors: true })
+        setBusyAction(null)
+      }
+    },
+    [refreshAll, showNotice]
   )
 
   const requestPermission = useCallback(
@@ -644,6 +734,18 @@ function App() {
     }
   }, [dailyState.action, requestPermission, runModelAction, runServiceAction])
 
+  const clearDictationHistory = useCallback(() => {
+    const cutoff = Date.now() / 1000
+    window.localStorage.setItem(DICTATION_HISTORY_CUTOFF_KEY, String(cutoff))
+    setDictationHistoryClearedAt(cutoff)
+  }, [])
+
+  const clearCommandHistory = useCallback(() => {
+    const cutoff = Date.now() / 1000
+    window.localStorage.setItem(COMMAND_HISTORY_CUTOFF_KEY, String(cutoff))
+    setCommandHistoryClearedAt(cutoff)
+  }, [])
+
   const primaryActionLabel: Record<NonNullable<typeof dailyState.action>, string> = {
     start: t("action.start_voice", "Start voice"),
     retry: t("action.retry_link", "Retry link"),
@@ -679,6 +781,7 @@ function App() {
             primaryActionLabel={primaryActionLabel}
             onDailyAction={handleDailyAction}
             onOpenSettings={() => setSettingsOpen(true)}
+            onClearDictationHistory={clearDictationHistory}
             t={t}
           />
         ) : page === "map" ? (
@@ -704,6 +807,7 @@ function App() {
             onRefresh={() => void refreshCommands({ notifyErrors: true })}
             onSaveEntries={saveCommandMappings}
             onReset={() => void resetCommandMappings()}
+            onClearHistory={clearCommandHistory}
             t={t}
           />
         )}
@@ -726,6 +830,9 @@ function App() {
         repairModelDisabled={repairModelDisabled}
         useModelDisabled={useModelDisabled}
         deleteModelDisabled={deleteModelDisabled}
+        voicePreferences={voicePreferences}
+        correctionModel={status?.correction_model ?? null}
+        voiceSettingsTouched={voiceSettingsTouched}
         onOpenChange={setSettingsOpen}
         onLanguageChange={setLanguage}
         onModelChange={(model) => {
@@ -736,6 +843,9 @@ function App() {
         onRunServiceAction={(action) => void runServiceAction(action)}
         onRequestPermission={(kind) => void requestPermission(kind)}
         onRequestDeleteModel={() => setDeleteOpen(true)}
+        onVoicePreferencesChange={changeVoicePreferences}
+        onSaveVoiceSettings={() => void saveCurrentVoiceSettings()}
+        onRunCorrectionModelAction={(action) => void runCorrectionModelAction(action)}
         t={t}
       />
 
