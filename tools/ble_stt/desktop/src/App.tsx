@@ -14,9 +14,10 @@ import {
   type Notice,
   type PageKey,
   actionTitle,
+  commandHistory,
   deriveDailyState,
+  dictationHistory,
   errorMessage,
-  latestDictation,
   localizedDailyState,
   modelDetail,
   modelDisplayLabel,
@@ -90,7 +91,6 @@ function App() {
   const [mappingRefreshing, setMappingRefreshing] = useState(false)
   const [commandEnvelope, setCommandEnvelope] = useState<CommandEnvelope | null>(null)
   const [commandEntries, setCommandEntries] = useState<CommandEntry[]>([])
-  const [commandTouched, setCommandTouched] = useState(false)
   const [commandRefreshing, setCommandRefreshing] = useState(false)
 
   const latestStatusRef = useRef<StatusEnvelope | null>(null)
@@ -125,7 +125,8 @@ function App() {
   )
   const dailyState = useMemo(() => localizedDailyState(rawDailyState, t), [rawDailyState, t])
 
-  const dictation = useMemo(() => latestDictation(logEntries, telemetry), [logEntries, telemetry])
+  const dictations = useMemo(() => dictationHistory(logEntries, telemetry), [logEntries, telemetry])
+  const commands = useMemo(() => commandHistory(logEntries, telemetry), [logEntries, telemetry])
   const activity = useMemo(() => recentActivity(logEntries), [logEntries])
 
   const modelItems = useMemo(() => {
@@ -175,7 +176,6 @@ function App() {
     latestCommandRef.current = nextCommands
     setCommandEnvelope(nextCommands)
     setCommandEntries(nextCommands.commands.entries)
-    setCommandTouched(false)
   }, [])
 
   const showNotice = useCallback(
@@ -529,40 +529,20 @@ function App() {
     }
   }, [applyMappingSnapshot, showNotice])
 
-  const updateCommandEntry = useCallback((entry: CommandEntry) => {
-    setCommandEntries((currentEntries) => {
-      const nextEntry = {
-        ...entry,
-        flags: entry.flags ?? 0,
-      }
-      const index = currentEntries.findIndex((item) => item.id === nextEntry.id)
-      if (index === -1) {
-        return [...currentEntries, nextEntry]
-      }
-      const nextEntries = [...currentEntries]
-      nextEntries[index] = nextEntry
-      return nextEntries
-    })
-    setCommandTouched(true)
-  }, [])
-
-  const deleteCommandEntry = useCallback((id: string) => {
-    setCommandEntries((currentEntries) => currentEntries.filter((entry) => entry.id !== id))
-    setCommandTouched(true)
-  }, [])
-
-  const saveCommandMappings = useCallback(async () => {
+  const saveCommandMappings = useCallback(async (nextEntries: CommandEntry[]) => {
     setBusyAction("commands:save")
     try {
-      const payload = await saveCommands(commandEntries)
+      const payload = await saveCommands(nextEntries)
       applyCommandSnapshot(payload)
       showNotice("commands saved", "info", "success")
+      return true
     } catch (error) {
       showNotice(errorMessage(error), "error", "error")
+      return false
     } finally {
       setBusyAction(null)
     }
-  }, [applyCommandSnapshot, commandEntries, showNotice])
+  }, [applyCommandSnapshot, showNotice])
 
   const resetCommandMappings = useCallback(async () => {
     setBusyAction("commands:reset")
@@ -692,7 +672,7 @@ function App() {
             state={dailyState}
             status={status}
             telemetry={telemetry}
-            dictation={dictation}
+            dictations={dictations}
             currentModel={currentModel}
             lastUpdated={lastUpdated}
             busyAction={busyAction}
@@ -718,15 +698,12 @@ function App() {
           <CommandPage
             envelope={commandEnvelope}
             entries={commandEntries}
-            telemetry={telemetry}
-            touched={commandTouched}
+            history={commands}
             busyAction={busyAction}
             refreshing={commandRefreshing}
             onRefresh={() => void refreshCommands({ notifyErrors: true })}
-            onSave={() => void saveCommandMappings()}
+            onSaveEntries={saveCommandMappings}
             onReset={() => void resetCommandMappings()}
-            onChange={updateCommandEntry}
-            onDelete={deleteCommandEntry}
             t={t}
           />
         )}

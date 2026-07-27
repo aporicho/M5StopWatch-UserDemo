@@ -13,10 +13,15 @@ MINIMUM_SPEECH_MTU = 185
 
 def missing_required_services(uuids: set[str]) -> list[str]:
     missing: list[str] = []
-    if HID_SERVICE_UUID not in uuids:
-        missing.append("HID service 0x1812")
     if SERVICE_UUID not in uuids:
         missing.append("Speech GATT service")
+    return missing
+
+
+def missing_optional_services(uuids: set[str]) -> list[str]:
+    missing: list[str] = []
+    if HID_SERVICE_UUID not in uuids:
+        missing.append("HID service 0x1812")
     return missing
 
 
@@ -57,7 +62,15 @@ async def check(identifier: str | None, adapter: PlatformAdapter | None = None) 
             raise RuntimeError(
                 f"{', '.join(missing)} was not discovered; forget the device and pair it again"
             )
-        print("[ok] HID service 0x1812 discovered")
+        optional_missing = missing_optional_services(uuids)
+        if optional_missing:
+            print(
+                "[warn] "
+                + ", ".join(optional_missing)
+                + " was not exposed through CoreBluetooth; continuing because the Speech GATT service is available"
+            )
+        else:
+            print("[ok] HID service 0x1812 discovered")
         print("[ok] Speech GATT service discovered")
 
         status = StatusPacket.parse(bytes(await client.read_gatt_char(STATUS_UUID)))

@@ -84,16 +84,16 @@ export function DiagnosticsSheet({
           <SheetDescription>Technical state and logs for troubleshooting.</SheetDescription>
         </SheetHeader>
 
-        <Tabs defaultValue="overview" className="min-h-0 flex-1 px-4 pb-4">
-          <TabsList>
+        <Tabs defaultValue="overview" className="min-h-0 flex-1 px-4">
+          <TabsList className="shrink-0">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="runtime">Runtime</TabsTrigger>
             <TabsTrigger value="logs">Logs</TabsTrigger>
           </TabsList>
 
           <TabsContent value="overview" className="min-h-0">
-            <ScrollArea className="h-[calc(100vh-9rem)] pr-3">
-              <div className="flex flex-col gap-4 py-4">
+            <ScrollArea className="h-full pr-3">
+              <div className="flex flex-col gap-4 p-px py-4">
                 <Card>
                   <CardHeader>
                     <CardTitle>Status details</CardTitle>
@@ -174,8 +174,8 @@ export function DiagnosticsSheet({
           </TabsContent>
 
           <TabsContent value="runtime" className="min-h-0">
-            <ScrollArea className="h-[calc(100vh-9rem)] pr-3">
-              <div className="flex flex-col gap-4 py-4">
+            <ScrollArea className="h-full pr-3">
+              <div className="flex flex-col gap-4 p-px py-4">
                 <RuntimeCard state={dailyState} telemetry={telemetry} t={t} />
                 <Card>
                   <CardHeader>
@@ -221,7 +221,7 @@ export function DiagnosticsSheet({
           </TabsContent>
 
           <TabsContent value="logs" className="min-h-0">
-            <div className="flex h-[calc(100vh-9rem)] flex-col gap-4 py-4">
+            <div className="flex h-full min-h-0 flex-col gap-4 p-px py-4">
               <Card className="min-h-0 flex-1">
                 <CardHeader>
                   <div>
@@ -238,10 +238,7 @@ export function DiagnosticsSheet({
                   </CardAction>
                 </CardHeader>
                 <CardContent className="min-h-0">
-                  <ScrollArea
-                    className="h-[calc(100vh-18rem)] rounded-md border bg-background"
-                    onWheel={onDisableAutoFollowLogs}
-                  >
+                  <ScrollArea className="h-full rounded-md border bg-background" onWheel={onDisableAutoFollowLogs}>
                     {logEntries.length ? (
                       <Table>
                         <TableHeader>

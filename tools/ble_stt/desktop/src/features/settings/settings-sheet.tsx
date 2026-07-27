@@ -118,46 +118,47 @@ export function SettingsSheet({
           <SheetDescription>{t("settings.description", "Model, permissions, and voice service controls.")}</SheetDescription>
         </SheetHeader>
 
-        <div className="flex flex-col gap-4 overflow-y-auto px-4 py-4">
-          <Card>
-            <CardHeader>
-              <CardTitle>{t("settings.general", "General")}</CardTitle>
-              <CardDescription>{t("settings.general_description", "App preferences for this computer.")}</CardDescription>
-            </CardHeader>
-            <CardContent>
-              <FieldGroup>
-                <Field orientation="horizontal">
-                  <FieldContent>
-                    <FieldTitle>{t("settings.language", "Language")}</FieldTitle>
-                    <FieldDescription>{t("settings.language_description", "Changes apply immediately.")}</FieldDescription>
-                  </FieldContent>
-                  <Select
-                    items={languageItems}
-                    value={language}
-                    onValueChange={(value) => {
-                      if (value == null) {
-                        return
-                      }
-                      onLanguageChange(value as LanguageCode)
-                    }}
-                  >
-                    <SelectTrigger className="w-40">
-                      <SelectValue placeholder={t("settings.language", "Language")} />
-                    </SelectTrigger>
-                    <SelectContent alignItemWithTrigger={false}>
-                      <SelectGroup>
-                        {languageItems.map((item) => (
-                          <SelectItem key={item.value} value={item.value}>
-                            {item.label}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                </Field>
-              </FieldGroup>
-            </CardContent>
-          </Card>
+        <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+          <div className="flex flex-col gap-4 p-px">
+            <Card>
+              <CardHeader>
+                <CardTitle>{t("settings.general", "General")}</CardTitle>
+                <CardDescription>{t("settings.general_description", "App preferences for this computer.")}</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <FieldGroup>
+                  <Field orientation="horizontal">
+                    <FieldContent>
+                      <FieldTitle>{t("settings.language", "Language")}</FieldTitle>
+                      <FieldDescription>{t("settings.language_description", "Changes apply immediately.")}</FieldDescription>
+                    </FieldContent>
+                    <Select
+                      items={languageItems}
+                      value={language}
+                      onValueChange={(value) => {
+                        if (value == null) {
+                          return
+                        }
+                        onLanguageChange(value as LanguageCode)
+                      }}
+                    >
+                      <SelectTrigger className="w-40">
+                        <SelectValue placeholder={t("settings.language", "Language")} />
+                      </SelectTrigger>
+                      <SelectContent alignItemWithTrigger={false}>
+                        <SelectGroup>
+                          {languageItems.map((item) => (
+                            <SelectItem key={item.value} value={item.value}>
+                              {item.label}
+                            </SelectItem>
+                          ))}
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                </FieldGroup>
+              </CardContent>
+            </Card>
 
           <Card>
             <CardHeader>
@@ -298,6 +299,7 @@ export function SettingsSheet({
               </ButtonGroup>
             </CardFooter>
           </Card>
+          </div>
         </div>
       </SheetContent>
     </Sheet>

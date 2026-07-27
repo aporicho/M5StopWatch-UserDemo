@@ -47,6 +47,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { MappingParameterEditor } from "@/features/mapping/mapping-parameter-editor"
 import {
   COMMAND_ACTION_IDS,
+  type CommandHistoryItem,
   blankCommandEntry,
   commandAsMappingEntry,
   commandToolsEnvelope,
@@ -56,40 +57,52 @@ import {
   mappingActionSummary,
   withMappingAction,
 } from "@/lib/app-view-model"
-import type { CommandEntry, CommandEnvelope, RuntimeTelemetry } from "@/lib/helper-api"
+import type { CommandEntry, CommandEnvelope } from "@/lib/helper-api"
 import type { Translator } from "@/lib/i18n"
 
 type CommandPageProps = {
   envelope: CommandEnvelope | null
   entries: CommandEntry[]
-  telemetry: RuntimeTelemetry | null
-  touched: boolean
+  history: CommandHistoryItem[]
   busyAction: string | null
   refreshing: boolean
   onRefresh: () => void
-  onSave: () => void
+  onSaveEntries: (entries: CommandEntry[]) => Promise<boolean>
   onReset: () => void
-  onChange: (entry: CommandEntry) => void
-  onDelete: (id: string) => void
   t: Translator
+}
+
+function cloneCommand(entry: CommandEntry): CommandEntry {
+  return {
+    ...entry,
+    aliases: [...entry.aliases],
+    flags: entry.flags ?? 0,
+  }
+}
+
+function normalizedCommand(entry: CommandEntry): CommandEntry {
+  return {
+    ...entry,
+    phrase: entry.phrase.trim(),
+    aliases: entry.aliases.map((alias) => alias.trim()).filter(Boolean),
+    flags: entry.flags ?? 0,
+  }
 }
 
 export function CommandPage({
   envelope,
   entries,
-  telemetry,
-  touched,
+  history,
   busyAction,
   refreshing,
   onRefresh,
-  onSave,
+  onSaveEntries,
   onReset,
-  onChange,
-  onDelete,
   t,
 }: CommandPageProps) {
-  const [editingCommandId, setEditingCommandId] = useState<string | null>(null)
+  const [draftCommand, setDraftCommand] = useState<CommandEntry | null>(null)
   const disabled = busyAction !== null || refreshing
+  const saving = busyAction === "commands:save"
   const tools = useMemo(() => (envelope ? commandToolsEnvelope(envelope) : null), [envelope])
   const actionItems = useMemo(
     () =>
@@ -101,16 +114,46 @@ export function CommandPage({
         })) ?? [],
     [envelope, t]
   )
-  const selectedCommand = useMemo(
-    () => entries.find((entry) => entry.id === editingCommandId) ?? null,
-    [editingCommandId, entries]
-  )
-  const lastCommand = telemetry?.last_command ?? null
-  const hasBlankPhrase = entries.some((entry) => !entry.phrase.trim())
+  const draftExists = Boolean(draftCommand && entries.some((entry) => entry.id === draftCommand.id))
+  const draftInvalid = draftCommand ? !draftCommand.phrase.trim() : false
+
+  const openEditor = (entry: CommandEntry) => {
+    setDraftCommand(cloneCommand(entry))
+  }
+
+  const updateDraft = (updater: (entry: CommandEntry) => CommandEntry) => {
+    setDraftCommand((current) => (current ? updater(current) : current))
+  }
+
+  const saveDraft = async () => {
+    if (!draftCommand || draftInvalid) {
+      return
+    }
+
+    const nextCommand = normalizedCommand(draftCommand)
+    const exists = entries.some((entry) => entry.id === nextCommand.id)
+    const nextEntries = exists
+      ? entries.map((entry) => (entry.id === nextCommand.id ? nextCommand : entry))
+      : [...entries, nextCommand]
+    const saved = await onSaveEntries(nextEntries)
+    if (saved) {
+      setDraftCommand(null)
+    }
+  }
+
+  const deleteDraft = async () => {
+    if (!draftCommand) {
+      return
+    }
+    const saved = await onSaveEntries(entries.filter((entry) => entry.id !== draftCommand.id))
+    if (saved) {
+      setDraftCommand(null)
+    }
+  }
 
   if (!envelope || !tools) {
     return (
-      <section className="min-h-0 flex-1">
+      <section className="min-h-0 flex-1 p-px">
         <Card className="min-h-0">
           <CardHeader>
             <CardTitle>{t("commands.title", "Commands")}</CardTitle>
@@ -131,7 +174,7 @@ export function CommandPage({
     : t("mapping.defaults", "defaults")
 
   return (
-    <section className="grid min-h-0 flex-1 gap-3 md:grid-cols-[1fr_22rem] md:overflow-hidden">
+    <section className="grid min-h-0 flex-1 gap-3 overflow-hidden p-px md:grid-cols-[1fr_22rem]">
       <Card className="min-h-0 md:flex md:h-full md:flex-col">
         <CardHeader className="shrink-0">
           <div>
@@ -144,8 +187,7 @@ export function CommandPage({
                 variant="outline"
                 onClick={() => {
                   const entry = blankCommandEntry(entries.length + 1)
-                  onChange(entry)
-                  setEditingCommandId(entry.id)
+                  openEditor(entry)
                 }}
                 disabled={disabled}
               >
@@ -159,10 +201,6 @@ export function CommandPage({
               <Button variant="outline" onClick={onReset} disabled={disabled}>
                 <SpinnerOrIcon busy={busyAction === "commands:reset"} icon={Undo2Icon} />
                 {t("common.reset", "Reset")}
-              </Button>
-              <Button onClick={onSave} disabled={disabled || !touched || hasBlankPhrase}>
-                <SpinnerOrIcon busy={busyAction === "commands:save"} icon={SaveIcon} />
-                {t("common.save", "Save")}
               </Button>
             </ButtonGroup>
           </CardAction>
@@ -203,7 +241,7 @@ export function CommandPage({
                           </div>
                         </TableCell>
                         <TableCell className="align-middle text-right">
-                          <Button size="sm" variant="outline" onClick={() => setEditingCommandId(entry.id)}>
+                          <Button size="sm" variant="outline" onClick={() => openEditor(entry)}>
                             <SettingsIcon data-icon="inline-start" />
                             {t("mapping.open_editor", "Open editor")}
                           </Button>
@@ -230,43 +268,43 @@ export function CommandPage({
           <span>
             {t("mapping.revision", "Revision")} {envelope.commands.revision} · {t("mapping.updated", "Updated")} {updatedAt}
           </span>
-          <span>{touched ? t("mapping.unsaved_hint", "Unsaved changes") : t("mapping.saved_hint", "Saved changes sync to the watch while connected")}</span>
+          <span>{t("commands.saved_hint", "Saved commands sync to the watch while connected")}</span>
         </CardFooter>
       </Card>
 
-      <Card className="md:h-full">
+      <Card className="min-h-0 md:flex md:h-full md:flex-col">
         <CardHeader>
-          <CardTitle>{t("commands.last_result", "Last command")}</CardTitle>
-          <CardDescription>{t("commands.last_result_description", "Latest command-mode recognition result.")}</CardDescription>
+          <CardTitle>{t("commands.last_result", "Command history")}</CardTitle>
+          <CardDescription>{t("commands.last_result_description", "Recent command-mode recognition results.")}</CardDescription>
         </CardHeader>
-        <CardContent>
-          {lastCommand ? (
-            <Table>
-              <TableBody>
-                <TableRow>
-                  <TableCell className="font-medium">{t("commands.heard", "Heard")}</TableCell>
-                  <TableCell className="text-muted-foreground">{lastCommand.text || "--"}</TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="font-medium">{t("commands.match", "Match")}</TableCell>
-                  <TableCell>
-                    <Badge variant={lastCommand.matched ? "default" : "secondary"}>
-                      {lastCommand.matched ? lastCommand.phrase : lastCommand.reason}
-                    </Badge>
-                  </TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="font-medium">{t("commands.score", "Score")}</TableCell>
-                  <TableCell className="text-muted-foreground">{Math.round(lastCommand.score * 100)}%</TableCell>
-                </TableRow>
-                {lastCommand.error && (
-                  <TableRow>
-                    <TableCell className="font-medium">{t("commands.error", "Error")}</TableCell>
-                    <TableCell className="text-muted-foreground">{lastCommand.error}</TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
+        <CardContent className="min-h-0 md:flex-1">
+          {history.length ? (
+            <ScrollArea className="h-[calc(100vh-21rem)] md:h-full">
+              <Table>
+                <TableBody>
+                  {history.map((item) => (
+                    <TableRow key={item.key}>
+                      <TableCell className="align-top">
+                        <div className="flex min-w-0 flex-col gap-1">
+                          <span className="truncate font-medium">{item.text || "--"}</span>
+                          <span className="text-sm text-muted-foreground">{item.time}</span>
+                        </div>
+                      </TableCell>
+                      <TableCell className="w-28 align-top text-right">
+                        <div className="flex flex-col items-end gap-1">
+                          <Badge variant={item.matched ? "default" : "secondary"}>
+                            {item.matched ? item.phrase : item.reason}
+                          </Badge>
+                          <span className="text-sm text-muted-foreground">
+                            {Math.round(item.score * 100)}%
+                          </span>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </ScrollArea>
           ) : (
             <Empty>
               <EmptyHeader>
@@ -281,40 +319,42 @@ export function CommandPage({
         </CardContent>
       </Card>
 
-      <Sheet open={Boolean(selectedCommand)} onOpenChange={(open) => !open && setEditingCommandId(null)}>
+      <Sheet open={Boolean(draftCommand)} onOpenChange={(open) => !open && setDraftCommand(null)}>
         <SheetContent className="w-[min(520px,calc(100vw-2rem))] sm:max-w-lg">
           <SheetHeader>
-            <SheetTitle>{selectedCommand?.phrase || t("commands.edit_title", "Edit command")}</SheetTitle>
+            <SheetTitle>{draftCommand?.phrase || t("commands.edit_title", "Edit command")}</SheetTitle>
             <SheetDescription>{t("commands.edit_description", "Choose what this spoken phrase does.")}</SheetDescription>
           </SheetHeader>
 
-          {selectedCommand && (
+          {draftCommand && (
             <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
               <FieldGroup>
-                <Field data-invalid={!selectedCommand.phrase.trim() ? true : undefined}>
+                <Field data-invalid={!draftCommand.phrase.trim() ? true : undefined}>
                   <FieldLabel>{t("commands.phrase", "Phrase")}</FieldLabel>
                   <Input
-                    value={selectedCommand.phrase}
-                    onChange={(event) => onChange({ ...selectedCommand, phrase: event.target.value })}
+                    value={draftCommand.phrase}
+                    onChange={(event) => updateDraft((entry) => ({ ...entry, phrase: event.target.value }))}
                     placeholder={t("commands.phrase_placeholder", "Clear")}
-                    aria-invalid={!selectedCommand.phrase.trim()}
+                    aria-invalid={!draftCommand.phrase.trim()}
+                    disabled={disabled}
                   />
                   <FieldDescription>{t("commands.phrase_description", "Say this while holding the left button.")}</FieldDescription>
                 </Field>
                 <Field>
                   <FieldLabel>{t("commands.aliases", "Aliases")}</FieldLabel>
                   <Input
-                    value={selectedCommand.aliases.join(", ")}
+                    value={draftCommand.aliases.join(", ")}
                     onChange={(event) =>
-                      onChange({
-                        ...selectedCommand,
+                      updateDraft((entry) => ({
+                        ...entry,
                         aliases: event.target.value
                           .split(",")
                           .map((value) => value.trim())
                           .filter(Boolean),
-                      })
+                      }))
                     }
                     placeholder={t("commands.aliases_placeholder", "Clear input, remove text")}
+                    disabled={disabled}
                   />
                   <FieldDescription>{t("commands.aliases_description", "Separate alternatives with commas.")}</FieldDescription>
                 </Field>
@@ -324,13 +364,14 @@ export function CommandPage({
                     aria-label={t("commands.enabled", "Enabled")}
                     spacing={0}
                     variant="outline"
-                    value={[selectedCommand.enabled ? "1" : "0"]}
+                    value={[draftCommand.enabled ? "1" : "0"]}
                     onValueChange={(values) => {
                       const value = values[values.length - 1]
                       if (value != null) {
-                        onChange({ ...selectedCommand, enabled: value === "1" })
+                        updateDraft((entry) => ({ ...entry, enabled: value === "1" }))
                       }
                     }}
+                    disabled={disabled}
                   >
                     <ToggleGroupItem className="flex-1" value="1">
                       {t("commands.enabled", "Enabled")}
@@ -344,13 +385,15 @@ export function CommandPage({
                   <FieldLabel>{t("mapping.action", "Action")}</FieldLabel>
                   <Select
                     items={actionItems}
-                    value={selectedCommand.action}
+                    value={draftCommand.action}
                     onValueChange={(value) => {
                       if (value == null) {
                         return
                       }
-                      const mapped = withMappingAction(commandAsMappingEntry(selectedCommand), value)
-                      onChange(commandWithMappingEntry(selectedCommand, mapped))
+                      updateDraft((entry) => {
+                        const mapped = withMappingAction(commandAsMappingEntry(entry), value)
+                        return commandWithMappingEntry(entry, mapped)
+                      })
                     }}
                     disabled={disabled}
                   >
@@ -372,10 +415,12 @@ export function CommandPage({
                 <Field>
                   <FieldTitle>{t("mapping.parameters", "Parameters")}</FieldTitle>
                   <MappingParameterEditor
-                    entry={commandAsMappingEntry(selectedCommand)}
+                    entry={commandAsMappingEntry(draftCommand)}
                     envelope={tools}
                     disabled={disabled}
-                    onChange={(nextEntry) => onChange(commandWithMappingEntry(selectedCommand, nextEntry))}
+                    onChange={(nextEntry) =>
+                      updateDraft((entry) => commandWithMappingEntry(entry, nextEntry))
+                    }
                     t={t}
                   />
                 </Field>
@@ -384,14 +429,15 @@ export function CommandPage({
           )}
 
           <SheetFooter>
-            {selectedCommand && (
-              <Button variant="destructive" onClick={() => onDelete(selectedCommand.id)} disabled={disabled}>
+            {draftCommand && draftExists && (
+              <Button variant="destructive" onClick={() => void deleteDraft()} disabled={disabled}>
                 <Trash2Icon data-icon="inline-start" />
                 {t("commands.delete", "Delete")}
               </Button>
             )}
-            <Button variant="outline" onClick={() => setEditingCommandId(null)}>
-              {t("common.done", "Done")}
+            <Button onClick={() => void saveDraft()} disabled={disabled || draftInvalid}>
+              <SpinnerOrIcon busy={saving} icon={SaveIcon} />
+              {t("common.save", "Save")}
             </Button>
           </SheetFooter>
         </SheetContent>

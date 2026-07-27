@@ -127,7 +127,7 @@ export function MappingPage({
 
   if (!envelope) {
     return (
-      <section className="min-h-0 flex-1">
+      <section className="min-h-0 flex-1 p-px">
         <Card className="min-h-0">
           <CardHeader>
             <CardTitle>{t("mapping.title", "Event map")}</CardTitle>
@@ -148,7 +148,7 @@ export function MappingPage({
     : t("mapping.defaults", "defaults")
 
   return (
-    <section className="min-h-0 flex-1">
+    <section className="min-h-0 flex-1 p-px">
       <Card className="min-h-0 md:flex md:h-full md:flex-col">
         <CardHeader className="shrink-0">
           <div>

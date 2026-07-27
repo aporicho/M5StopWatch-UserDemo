@@ -34,6 +34,19 @@ def test_command_match_accepts_polite_short_phrase(tmp_path):
     assert result.command["phrase"] == "清空"
 
 
+def test_command_match_accepts_saved_phrase_with_punctuation(tmp_path):
+    commands = save_commands(
+        [{"id": "plan", "phrase": "计划", "action": "none"}],
+        config_at(tmp_path),
+    )["entries"]
+
+    result = match_command("计划。", commands)
+
+    assert result.matched is True
+    assert result.command is not None
+    assert result.command["phrase"] == "计划"
+
+
 def test_command_match_rejects_unrelated_text(tmp_path):
     commands = read_commands(config_at(tmp_path))["entries"]
 

@@ -22,7 +22,7 @@ import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table"
 import { formatBytes, type RuntimeTelemetry, type StatusPayload } from "@/lib/helper-api"
 import {
   type DailyState,
-  type DictationSnapshot,
+  type DictationHistoryItem,
   modelDisplayLabel,
   modelVariant,
   percent,
@@ -139,32 +139,49 @@ function StatusCard({
   )
 }
 
-function TranscriptCard({
-  dictation,
+function DictationHistoryCard({
+  dictations,
   className,
   t,
 }: {
-  dictation: DictationSnapshot
+  dictations: DictationHistoryItem[]
   className?: string
   t: Translator
 }) {
+  const latest = dictations[0] ?? null
+
   return (
-    <Card size="sm" className={cn("min-h-0", className)}>
+    <Card size="sm" className={cn("min-h-0 md:flex md:flex-col", className)}>
       <CardHeader>
-        <CardTitle>{t("home.transcript", "Transcript")}</CardTitle>
+        <CardTitle>{t("home.transcript", "Dictation history")}</CardTitle>
         <CardAction>
-          <Badge variant={dictation?.final ? "default" : "outline"}>
-            {dictation?.final ? t("home.final", "Final") : t("home.live", "Live")}
+          <Badge variant={latest?.final ? "default" : "outline"}>
+            {latest?.final ? t("home.final", "Final") : t("home.live", "Live")}
           </Badge>
         </CardAction>
       </CardHeader>
-      <CardContent className="min-h-0 flex-1">
-        {dictation ? (
-          <ScrollArea className="h-full min-h-24">
-            <div className="flex flex-col gap-3 pr-3">
-              <p className="text-xl leading-snug">{dictation.text}</p>
-              <p className="text-sm text-muted-foreground">{dictation.time}</p>
-            </div>
+      <CardContent className="min-h-0 md:flex-1">
+        {dictations.length ? (
+          <ScrollArea className="h-full min-h-32">
+            <Table>
+              <TableBody>
+                {dictations.map((item) => (
+                  <TableRow key={item.key}>
+                    <TableCell className="align-top">
+                      <div className="flex min-w-0 flex-col gap-1">
+                        <span className="text-lg leading-snug">{item.text}</span>
+                        <span className="text-sm text-muted-foreground">{item.time}</span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="w-20 align-top text-right">
+                      <Badge variant={item.final ? "default" : "outline"}>
+                        {item.final ? t("home.final", "Final") : t("home.live", "Live")}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
           </ScrollArea>
         ) : (
           <Empty className="min-h-24">
@@ -292,7 +309,7 @@ type HomePageProps = {
   state: DailyState
   status: StatusPayload | null
   telemetry: RuntimeTelemetry | null
-  dictation: DictationSnapshot
+  dictations: DictationHistoryItem[]
   currentModel: StatusPayload["model"] | null
   lastUpdated: Date | null
   busyAction: string | null
@@ -306,7 +323,7 @@ export function HomePage({
   state,
   status,
   telemetry,
-  dictation,
+  dictations,
   currentModel,
   lastUpdated,
   busyAction,
@@ -316,8 +333,8 @@ export function HomePage({
   t,
 }: HomePageProps) {
   return (
-    <section className="grid gap-3 md:min-h-0 md:flex-1 md:grid-cols-3 md:overflow-hidden">
-      <div className="flex min-w-0 flex-col gap-3 md:col-span-2 md:min-h-0">
+    <section className="grid min-h-0 flex-1 gap-3 overflow-hidden p-px md:grid-cols-3">
+      <div className="flex min-w-0 flex-col gap-3 overflow-visible md:col-span-2 md:min-h-0">
         <StatusCard
           state={state}
           status={status}
@@ -327,13 +344,15 @@ export function HomePage({
           primaryActionLabel={primaryActionLabel}
           t={t}
         />
-        <TranscriptCard dictation={dictation} className="md:flex-1" t={t} />
+        <DictationHistoryCard dictations={dictations} className="md:flex-1" t={t} />
       </div>
 
-      <div className="flex min-w-0 flex-col gap-3 md:min-h-0">
-        <ModelCard model={currentModel} onOpenSettings={onOpenSettings} t={t} />
-        <RuntimeCard state={state} telemetry={telemetry} className="md:min-h-0 md:flex-1" t={t} />
-      </div>
+      <ScrollArea className="min-h-0 md:h-full">
+        <div className="flex min-w-0 flex-col gap-3 p-px pr-3">
+          <ModelCard model={currentModel} onOpenSettings={onOpenSettings} t={t} />
+          <RuntimeCard state={state} telemetry={telemetry} t={t} />
+        </div>
+      </ScrollArea>
     </section>
   )
 }

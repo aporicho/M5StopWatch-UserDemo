@@ -55,6 +55,25 @@ export type DictationSnapshot = {
   final: boolean
 } | null
 
+export type DictationHistoryItem = {
+  key: string
+  text: string
+  time: string
+  final: boolean
+}
+
+export type CommandHistoryItem = {
+  key: string
+  time: string
+  text: string
+  matched: boolean
+  phrase: string | null
+  action: string | null
+  score: number
+  reason: string
+  error?: string
+}
+
 export const MODEL_OPTIONS = [
   {
     value: "small",
@@ -486,34 +505,136 @@ function latestRuntimeSignal(entries: StructuredLogEntry[]) {
   return null
 }
 
+function dictationFromLogEntry(entry: StructuredLogEntry): DictationHistoryItem | null {
+  const final = entry.message.toLowerCase().startsWith("[text final]")
+  const text = entry.message.replace(/^\[text final\]\s*/i, "").trim()
+
+  if (!final || !text || text === entry.message) {
+    return null
+  }
+
+  return {
+    key: `dictation:${entry.source}:${entry.time}:${text}`,
+    text,
+    time: compactTime(entry.time),
+    final,
+  }
+}
+
+export function dictationHistory(
+  entries: StructuredLogEntry[],
+  telemetry: RuntimeTelemetry | null
+): DictationHistoryItem[] {
+  const history: DictationHistoryItem[] = []
+  const latestTelemetryText = telemetry?.last_text?.text?.trim() ?? ""
+
+  if (telemetry?.last_text?.text) {
+    history.push({
+      key: `dictation:telemetry:${telemetry.last_text.time}:${telemetry.last_text.text}`,
+      text: telemetry.last_text.text,
+      time: formatUnixTime(telemetry.last_text.time),
+      final: telemetry.last_text.final,
+    })
+  }
+
+  for (const entry of entries.slice().reverse()) {
+    const item = dictationFromLogEntry(entry)
+    if (!item || item.text === latestTelemetryText) {
+      continue
+    }
+    history.push(item)
+    if (history.length >= 8) {
+      break
+    }
+  }
+
+  return history
+}
+
 export function latestDictation(
   entries: StructuredLogEntry[],
   telemetry: RuntimeTelemetry | null
 ): DictationSnapshot {
-  if (telemetry?.last_text?.text) {
+  return dictationHistory(entries, telemetry)[0] ?? null
+}
+
+function commandHistoryFromLogEntry(entry: StructuredLogEntry): CommandHistoryItem | null {
+  const executed = entry.message.match(
+    /^command executed(?: locally)? session=\S+\s+phrase=(.*?)\s+action=(.*?)\s+score=([0-9.]+)\s+transcript=(.*)$/i
+  )
+  if (executed) {
     return {
-      text: telemetry.last_text.text,
-      time: formatUnixTime(telemetry.last_text.time),
-      final: telemetry.last_text.final,
+      key: `command:${entry.source}:${entry.time}:${entry.message}`,
+      time: compactTime(entry.time),
+      text: executed[4]?.trim() ?? "",
+      matched: true,
+      phrase: executed[1]?.trim() || null,
+      action: executed[2]?.trim() || null,
+      score: Number(executed[3]) || 0,
+      reason: "matched",
     }
   }
 
-  for (const entry of entries.slice().reverse()) {
-    const text = entry.message
-      .replace(/^\[text final\]\s*/i, "")
-      .replace(/^\[text\]\s*/i, "")
-      .trim()
-
-    if (text !== entry.message && text) {
-      return {
-        text,
-        time: entry.time,
-        final: entry.message.toLowerCase().startsWith("[text final]"),
-      }
+  const unmatched = entry.message.match(
+    /^command not matched session=\S+\s+score=([0-9.]+)\s+reason=(\S+)\s+transcript=(.*)$/i
+  )
+  if (unmatched) {
+    return {
+      key: `command:${entry.source}:${entry.time}:${entry.message}`,
+      time: compactTime(entry.time),
+      text: unmatched[3]?.trim() ?? "",
+      matched: false,
+      phrase: null,
+      action: null,
+      score: Number(unmatched[1]) || 0,
+      reason: unmatched[2]?.trim() || "no_match",
     }
   }
 
   return null
+}
+
+export function commandHistory(
+  entries: StructuredLogEntry[],
+  telemetry: RuntimeTelemetry | null
+): CommandHistoryItem[] {
+  const history: CommandHistoryItem[] = []
+  const latestCommand = telemetry?.last_command ?? null
+
+  if (latestCommand) {
+    history.push({
+      key: `command:telemetry:${latestCommand.time}:${latestCommand.text}:${latestCommand.reason}`,
+      time: formatUnixTime(latestCommand.time),
+      text: latestCommand.text,
+      matched: latestCommand.matched,
+      phrase: latestCommand.phrase,
+      action: latestCommand.action,
+      score: latestCommand.score,
+      reason: latestCommand.reason,
+      error: latestCommand.error,
+    })
+  }
+
+  for (const entry of entries.slice().reverse()) {
+    const item = commandHistoryFromLogEntry(entry)
+    if (!item) {
+      continue
+    }
+    if (
+      latestCommand &&
+      item.text === latestCommand.text &&
+      item.matched === latestCommand.matched &&
+      item.phrase === latestCommand.phrase
+    ) {
+      continue
+    }
+    history.push(item)
+    if (history.length >= 8) {
+      break
+    }
+  }
+
+  return history
 }
 
 function telemetrySignal(telemetry: RuntimeTelemetry | null): DailyStateKey | null {
