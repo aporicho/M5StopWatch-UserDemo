@@ -226,6 +226,10 @@ export function RuntimeCard({
   const level = fresh ? telemetry?.audio.level : 0
   const peak = fresh ? telemetry?.audio.peak : 0
   const seconds = fresh ? telemetry?.audio.seconds ?? 0 : 0
+  const latestPerformance = telemetry?.performance?.latest
+  const performanceMetrics = latestPerformance?.metrics ?? {}
+  const formatLatency = (value: number | string | null | undefined) =>
+    typeof value === "number" ? `${Math.round(value)} ms` : "—"
 
   return (
     <Card size="sm" className={className}>
@@ -250,6 +254,30 @@ export function RuntimeCard({
           <ProgressLabel>{t("home.peak", "Peak")}</ProgressLabel>
           <ProgressValue>{() => percent(peak)}</ProgressValue>
         </Progress>
+        {latestPerformance?.kind === "session" ? (
+          <Table>
+            <TableBody>
+              <TableRow>
+                <TableCell className="font-medium">{t("performance.first_character", "First character")}</TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {formatLatency(performanceMetrics.start_to_first_character_ms)}
+                </TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell className="font-medium">{t("performance.result_ready", "Release to result")}</TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {formatLatency(performanceMetrics.release_to_result_ready_ms ?? performanceMetrics.host_release_to_result_ready_ms)}
+                </TableCell>
+              </TableRow>
+              <TableRow>
+                <TableCell className="font-medium">{t("performance.typing_complete", "Release to typed")}</TableCell>
+                <TableCell className="text-right tabular-nums">
+                  {formatLatency(performanceMetrics.release_to_typing_complete_ms ?? performanceMetrics.host_release_to_typing_complete_ms)}
+                </TableCell>
+              </TableRow>
+            </TableBody>
+          </Table>
+        ) : null}
       </CardContent>
       <CardFooter>
         <p className="text-sm text-muted-foreground">

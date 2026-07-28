@@ -10,7 +10,7 @@ from .config import log_dir
 
 
 TELEMETRY_FILE_NAME = "ble-stt-runtime.json"
-TELEMETRY_SCHEMA = 1
+TELEMETRY_SCHEMA = 2
 TELEMETRY_STALE_SECONDS = 8.0
 
 
@@ -54,6 +54,11 @@ def default_telemetry(stage: str = "offline") -> dict[str, Any]:
             "busy": False,
             "mode": "idle",
         },
+        "performance": {
+            "revision": 0,
+            "current": None,
+            "latest": None,
+        },
         "last_text": None,
         "last_command": None,
         "error": None,
@@ -73,6 +78,7 @@ def make_telemetry(
     last_text: dict[str, Any] | None = None,
     last_command: dict[str, Any] | None = None,
     error: str | None = None,
+    performance: dict[str, Any] | None = None,
     now: float | None = None,
 ) -> dict[str, Any]:
     timestamp = time.time() if now is None else now
@@ -88,6 +94,7 @@ def make_telemetry(
             "last_text": last_text,
             "last_command": last_command,
             "error": error,
+            "performance": performance or payload["performance"],
             "updated_at": timestamp,
             "stale": False,
             "age_seconds": 0.0,
@@ -132,6 +139,7 @@ def read_telemetry(path: Path | None = None, now: float | None = None) -> dict[s
     payload.setdefault("session_id", None)
     payload.setdefault("audio", default_telemetry()["audio"])
     payload.setdefault("recognition", default_telemetry()["recognition"])
+    payload.setdefault("performance", default_telemetry()["performance"])
     payload.setdefault("last_text", None)
     payload.setdefault("last_command", None)
     payload.setdefault("error", None)

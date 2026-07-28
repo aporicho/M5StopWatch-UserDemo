@@ -381,8 +381,10 @@ void Hal::lvgl_init()
     lv_indev_set_read_cb(lvTouchpad, lvgl_read_cb);
     lv_indev_set_display(lvTouchpad, disp);
 
-    xGuiSemaphore                                     = xSemaphoreCreateMutex();
-    const esp_timer_create_args_t periodic_timer_args = {.callback = &lvgl_tick_timer, .name = "lvgl_tick_timer"};
+    xGuiSemaphore = xSemaphoreCreateMutex();
+    esp_timer_create_args_t periodic_timer_args{};
+    periodic_timer_args.callback = &lvgl_tick_timer;
+    periodic_timer_args.name     = "lvgl_tick_timer";
     esp_timer_handle_t periodic_timer;
     ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
     ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 10 * 1000));

@@ -128,6 +128,17 @@ BLE_STT_SKIP_LLAMA_RUNTIME=1 npm run build:mac:app
 /usr/bin/pkill -x M5StopWatch >/dev/null 2>&1 || true
 
 BACKUP_ROOT="$(/usr/bin/mktemp -d "${TMPDIR:-/tmp}/m5stopwatch-install.XXXXXX")"
+INSTALL_SUCCEEDED=0
+cleanup_install_backup() {
+  local status=$?
+  if [ "$INSTALL_SUCCEEDED" = "1" ]; then
+    /bin/rm -rf "$BACKUP_ROOT"
+  else
+    printf 'Installation stopped; previous app backup kept at %s\n' "$BACKUP_ROOT" >&2
+  fi
+  return "$status"
+}
+trap cleanup_install_backup EXIT
 move_existing_app "$APP_TARGET" "$APP_NAME"
 move_existing_app "$SYSTEM_APP_TARGET" "System $APP_NAME"
 move_existing_app "$OLD_CONTROL_APP" "M5StopWatch Control.app"
@@ -179,4 +190,5 @@ fi
 "$APP_EXEC" service status --json
 
 /usr/bin/open "$APP_TARGET"
+INSTALL_SUCCEEDED=1
 printf 'Installed %s\n' "$APP_TARGET"

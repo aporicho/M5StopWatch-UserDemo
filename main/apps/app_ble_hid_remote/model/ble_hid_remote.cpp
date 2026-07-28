@@ -15,6 +15,7 @@
 #include <esp_hid_common.h>
 #include <esp_hidd.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <hal/hal.h>
 #include <host/ble_att.h>
 #include <host/ble_gap.h>
@@ -43,11 +44,19 @@ constexpr size_t BondScanCapacity             = 8;
 constexpr uint32_t BatteryPollMs              = 60000;
 constexpr uint32_t ConnectionParameterDelayMs = 5000;
 
-constexpr uint8_t SpeechProtocolVersion   = 1;
-constexpr uint8_t SpeechCodecImaAdpcm     = 1;
-constexpr uint16_t SpeechSampleRate       = 16000;
-constexpr uint16_t MinimumSpeechMtu       = 185;
-constexpr uint32_t SpeechWorkerStackBytes = 12 * 1024;
+constexpr uint8_t SpeechProtocolVersion     = 1;
+constexpr uint8_t SpeechCodecImaAdpcm       = 1;
+constexpr uint16_t SpeechSampleRate         = 16000;
+constexpr uint16_t MinimumSpeechMtu         = 185;
+constexpr uint32_t SpeechWorkerStackBytes   = 12 * 1024;
+constexpr uint8_t PerformanceWireVersion    = 1;
+constexpr uint8_t PerformanceCapabilities   = 0;
+constexpr uint8_t PerformanceSyncRequest    = 1;
+constexpr uint8_t PerformanceSyncResponse   = 2;
+constexpr uint8_t PerformanceSession        = 3;
+constexpr uint8_t PerformanceConnection     = 4;
+constexpr size_t PerformanceSessionBytes    = 154;
+constexpr size_t PerformanceConnectionBytes = 68;
 
 enum SpeechEvent : uint8_t {
     SpeechReady = 0,
@@ -74,6 +83,36 @@ const ble_uuid128_t UserEventUuid =
     BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x05, 0x10, 0x3a, 0x7f);
 const ble_uuid128_t ActionExecUuid =
     BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x06, 0x10, 0x3a, 0x7f);
+const ble_uuid128_t PerformanceUuid =
+    BLE_UUID128_INIT(0x01, 0x9a, 0x1f, 0x8b, 0x0d, 0x5e, 0xc0, 0xa7, 0x6d, 0x4c, 0x2e, 0x6b, 0x07, 0x10, 0x3a, 0x7f);
+
+uint64_t monotonicUs()
+{
+    return static_cast<uint64_t>(esp_timer_get_time());
+}
+
+template <size_t Size>
+void put16(std::array<uint8_t, Size>& packet, size_t& offset, uint16_t value)
+{
+    packet[offset++] = static_cast<uint8_t>(value & 0xFF);
+    packet[offset++] = static_cast<uint8_t>(value >> 8);
+}
+
+template <size_t Size>
+void put32(std::array<uint8_t, Size>& packet, size_t& offset, uint32_t value)
+{
+    for (int shift = 0; shift < 32; shift += 8) {
+        packet[offset++] = static_cast<uint8_t>(value >> shift);
+    }
+}
+
+template <size_t Size>
+void put64(std::array<uint8_t, Size>& packet, size_t& offset, uint64_t value)
+{
+    for (int shift = 0; shift < 64; shift += 8) {
+        packet[offset++] = static_cast<uint8_t>(value >> shift);
+    }
+}
 
 constexpr uint8_t HidReportMap[] = {
     // Keyboard, report ID 1.
@@ -257,6 +296,9 @@ bool BleHidRemote::start()
         return true;
     }
 
+    _connection_timing.fill(0);
+    recordConnectionTiming(ConnectionRemoteStarted, monotonicUs());
+    _speech_timing            = {};
     _state                    = State::Starting;
     _last_error               = ESP_OK;
     _last_error_stage         = "none";
@@ -279,6 +321,7 @@ bool BleHidRemote::start()
     _host_status              = HostStatus::Waiting;
     _host_error               = 0;
     _user_event_subscribed    = false;
+    _performance_subscribed   = false;
     _mapping.load();
 
     _command_queue = xQueueCreate(16, sizeof(Command));
@@ -336,9 +379,10 @@ void BleHidRemote::stop()
     }
 
     cleanupBluetooth();
-    _connection_handle = InvalidConnectionHandle;
-    _advertising_mode  = AdvertisingMode::None;
-    _pairing_open      = false;
+    _connection_handle      = InvalidConnectionHandle;
+    _advertising_mode       = AdvertisingMode::None;
+    _pairing_open           = false;
+    _performance_subscribed = false;
     enterState(_policy.stop());
     ESP_LOGI(Tag, "BLE HID stopped");
 }
@@ -472,9 +516,22 @@ BleHidRemote::SpeechServiceState BleHidRemote::speechServiceState() const
 
 bool BleHidRemote::startSpeech()
 {
+    return startSpeech(SpeechTimingSeed{});
+}
+
+bool BleHidRemote::startSpeech(const SpeechTimingSeed& timing)
+{
     if (_speech_active.load() || _speech_worker_running.load() || !isSpeechReady()) {
         return false;
     }
+
+    taskENTER_CRITICAL(&_timing_mux);
+    _speech_timing                                    = {};
+    _speech_timing.timestampUs[TimingButtonDown]      = timing.buttonDownUs;
+    _speech_timing.timestampUs[TimingHoldTriggered]   = timing.holdTriggeredUs;
+    _speech_timing.timestampUs[TimingSpeechScheduled] = timing.scheduledUs;
+    _speech_timing.timestampUs[TimingSpeechStartCall] = monotonicUs();
+    taskEXIT_CRITICAL(&_timing_mux);
 
     ++_speech_session;
     if (_speech_session == 0) {
@@ -491,6 +548,7 @@ bool BleHidRemote::startSpeech()
         _speech_active = false;
         return false;
     }
+    recordSpeechTiming(TimingStatusStartSent, monotonicUs());
 
     _speech_worker_running = true;
     if (xTaskCreate(speechWorkerTask, "ble_speech", SpeechWorkerStackBytes, this, 4, &_speech_worker_task) != pdPASS) {
@@ -510,7 +568,17 @@ void BleHidRemote::stopSpeech(bool abort)
     if (abort) {
         _speech_abort_requested = true;
     }
+    if (_speech_active.load()) {
+        recordSpeechTiming(TimingStopRequested, monotonicUs());
+    }
     _speech_active = false;
+}
+
+void BleHidRemote::noteSpeechRelease(uint64_t releasedAtUs)
+{
+    if (_speech_active.load()) {
+        recordSpeechTiming(TimingReleaseDetected, releasedAtUs == 0 ? monotonicUs() : releasedAtUs);
+    }
 }
 
 bool BleHidRemote::pairNewComputer()
@@ -674,7 +742,7 @@ bool BleHidRemote::initializeBluetooth()
 
 bool BleHidRemote::registerSpeechService()
 {
-    static ble_gatt_chr_def characteristics[4]{};
+    static ble_gatt_chr_def characteristics[5]{};
     static ble_gatt_svc_def services[2]{};
     static bool initialized = false;
 
@@ -694,6 +762,12 @@ bool BleHidRemote::registerSpeechService()
         characteristics[2].flags      = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC;
         characteristics[2].val_handle = &_host_status_handle;
 
+        characteristics[3].uuid       = &PerformanceUuid.u;
+        characteristics[3].access_cb  = speechGattAccess;
+        characteristics[3].flags      = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_READ_ENC | BLE_GATT_CHR_F_WRITE |
+                                        BLE_GATT_CHR_F_WRITE_ENC | BLE_GATT_CHR_F_NOTIFY;
+        characteristics[3].val_handle = &_performance_handle;
+
         services[0].type            = BLE_GATT_SVC_TYPE_PRIMARY;
         services[0].uuid            = &SpeechServiceUuid.u;
         services[0].characteristics = characteristics;
@@ -704,6 +778,7 @@ bool BleHidRemote::registerSpeechService()
         characteristics[0].val_handle = &_speech_status_handle;
         characteristics[1].val_handle = &_speech_audio_handle;
         characteristics[2].val_handle = &_host_status_handle;
+        characteristics[3].val_handle = &_performance_handle;
     }
 
     int result = ble_gatts_count_cfg(services);
@@ -770,6 +845,7 @@ void BleHidRemote::cleanupBluetooth()
     _speech_subscribed        = false;
     _speech_status_subscribed = false;
     _user_event_subscribed    = false;
+    _performance_subscribed   = false;
     _host_status              = HostStatus::Waiting;
     _host_error               = 0;
 
@@ -952,6 +1028,7 @@ bool BleHidRemote::startPolicyAdvertising()
     _advertising_mode        = mode;
     _advertising_started_at  = GetHAL().millis();
     _advertising_duration_ms = duration;
+    recordConnectionTiming(ConnectionAdvertisingStarted, monotonicUs());
     if (mode == AdvertisingMode::ReconnectDirected) {
         logPeerAddress("bounded high-duty directed reconnect", allowedPeer);
     } else {
@@ -1121,6 +1198,7 @@ void BleHidRemote::handleDisconnected(uint8_t reason)
     _speech_subscribed        = false;
     _speech_status_subscribed = false;
     _user_event_subscribed    = false;
+    _performance_subscribed   = false;
     _host_status              = HostStatus::Waiting;
     _host_error               = 0;
     _connection_handle        = InvalidConnectionHandle;
@@ -1130,6 +1208,10 @@ void BleHidRemote::handleDisconnected(uint8_t reason)
     if (!_active.load()) {
         return;
     }
+    taskENTER_CRITICAL(&_timing_mux);
+    _connection_timing.fill(0);
+    _connection_timing[ConnectionRemoteStarted] = monotonicUs();
+    taskEXIT_CRITICAL(&_timing_mux);
     if (_pairing_after_disconnect || _pairing_open.load()) {
         startPairingWindow();
         return;
@@ -1167,6 +1249,7 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
 
             ESP_LOGI(Tag, "computer connected; checking peer before encrypted HID session");
             _connection_handle = event->connect.conn_handle;
+            recordConnectionTiming(ConnectionLinkConnected, monotonicUs());
             enterIdleState();
             ble_gap_conn_desc connectedPeer{};
             const bool hasDescription = ble_gap_conn_find(event->connect.conn_handle, &connectedPeer) == 0;
@@ -1182,6 +1265,7 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
                 break;
             }
             if (hasDescription && connectedPeer.sec_state.encrypted != 0 && connectedPeer.sec_state.bonded != 0) {
+                recordConnectionTiming(ConnectionEncryptionReady, monotonicUs());
                 if (!commitConnectedPeer(event->connect.conn_handle)) {
                     ble_gap_terminate(event->connect.conn_handle, BLE_ERR_AUTH_FAIL);
                     break;
@@ -1198,6 +1282,7 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
         case BLE_GAP_EVENT_ENC_CHANGE:
             if (event->enc_change.status == 0 && _active.load()) {
                 ESP_LOGI(Tag, "pairing complete; encrypted connection ready");
+                recordConnectionTiming(ConnectionEncryptionReady, monotonicUs());
                 if (!commitConnectedPeer(event->enc_change.conn_handle)) {
                     const int result = ble_gap_terminate(event->enc_change.conn_handle, BLE_ERR_AUTH_FAIL);
                     if (result != 0 && result != BLE_HS_ENOTCONN) {
@@ -1222,13 +1307,27 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
         case BLE_GAP_EVENT_SUBSCRIBE:
             if (event->subscribe.attr_handle == _speech_audio_handle) {
                 _speech_subscribed = event->subscribe.cur_notify != 0;
+                if (_speech_subscribed.load()) {
+                    recordConnectionTiming(ConnectionAudioSubscribed, monotonicUs());
+                }
                 ESP_LOGI(Tag, "speech audio subscription: %s", _speech_subscribed.load() ? "on" : "off");
             } else if (event->subscribe.attr_handle == _speech_status_handle) {
                 _speech_status_subscribed = event->subscribe.cur_notify != 0;
+                if (_speech_status_subscribed.load()) {
+                    recordConnectionTiming(ConnectionStatusSubscribed, monotonicUs());
+                }
                 ESP_LOGI(Tag, "speech status subscription: %s", _speech_status_subscribed.load() ? "on" : "off");
             } else if (event->subscribe.attr_handle == _user_event_handle) {
                 _user_event_subscribed = event->subscribe.cur_notify != 0;
                 ESP_LOGI(Tag, "user event subscription: %s", _user_event_subscribed.load() ? "on" : "off");
+            } else if (event->subscribe.attr_handle == _performance_handle) {
+                _performance_subscribed = event->subscribe.cur_notify != 0;
+                ESP_LOGI(Tag, "performance subscription: %s", _performance_subscribed.load() ? "on" : "off");
+                if (_performance_subscribed.load()) {
+                    recordConnectionTiming(ConnectionPerformanceSubscribed, monotonicUs());
+                    sendPerformanceCapabilities();
+                    sendConnectionTimingSummary();
+                }
             }
             if (isSpeechReady()) {
                 sendSpeechStatus(SpeechReady);
@@ -1236,6 +1335,7 @@ int BleHidRemote::handleGapEvent(ble_gap_event* event)
             break;
         case BLE_GAP_EVENT_MTU:
             ESP_LOGI(Tag, "ATT MTU updated: %u", event->mtu.value);
+            recordConnectionTiming(ConnectionMtuReady, monotonicUs());
             if (isSpeechReady()) {
                 sendSpeechStatus(SpeechReady);
             }
@@ -1453,6 +1553,128 @@ bool BleHidRemote::sendSpeechAudio(const uint8_t* adpcm, std::size_t length)
     return false;
 }
 
+void BleHidRemote::recordSpeechTiming(SpeechTimingIndex index, uint64_t timestampUs)
+{
+    taskENTER_CRITICAL(&_timing_mux);
+    _speech_timing.timestampUs[index] = timestampUs;
+    taskEXIT_CRITICAL(&_timing_mux);
+}
+
+void BleHidRemote::recordConnectionTiming(ConnectionTimingIndex index, uint64_t timestampUs)
+{
+    taskENTER_CRITICAL(&_timing_mux);
+    _connection_timing[index] = timestampUs;
+    taskEXIT_CRITICAL(&_timing_mux);
+}
+
+bool BleHidRemote::sendPerformancePacket(const uint8_t* data, std::size_t length)
+{
+    if (!_performance_subscribed.load() || data == nullptr || length == 0) {
+        return false;
+    }
+    const uint16_t connectionHandle = _connection_handle.load();
+    if (connectionHandle == InvalidConnectionHandle || _performance_handle == 0) {
+        return false;
+    }
+    os_mbuf* buffer = ble_hs_mbuf_from_flat(data, length);
+    return buffer != nullptr && ble_gatts_notify_custom(connectionHandle, _performance_handle, buffer) == 0;
+}
+
+bool BleHidRemote::sendPerformanceCapabilities()
+{
+    std::array<uint8_t, 4> packet{PerformanceWireVersion, PerformanceCapabilities, 0x03, 0x00};
+    return sendPerformancePacket(packet.data(), packet.size());
+}
+
+bool BleHidRemote::sendSpeechTimingSummary()
+{
+    SpeechTiming timing{};
+    taskENTER_CRITICAL(&_timing_mux);
+    timing = _speech_timing;
+    taskEXIT_CRITICAL(&_timing_mux);
+
+    std::array<uint8_t, PerformanceSessionBytes> packet{};
+    size_t offset    = 0;
+    packet[offset++] = PerformanceWireVersion;
+    packet[offset++] = PerformanceSession;
+    put16(packet, offset, _speech_session);
+    uint16_t flags = 0;
+    for (size_t index = 0; index < timing.timestampUs.size(); ++index) {
+        if (timing.timestampUs[index] != 0) {
+            flags |= static_cast<uint16_t>(1U << index);
+        }
+    }
+    put16(packet, offset, flags);
+    put16(packet, offset, timing.frameCount);
+    put16(packet, offset, timing.notifyFailures);
+    for (const uint64_t timestamp : timing.timestampUs) {
+        put64(packet, offset, timestamp);
+    }
+    const std::array<TimingAggregate, 4> aggregates{
+        timing.capture,
+        timing.resample,
+        timing.encode,
+        timing.notify,
+    };
+    for (const auto& aggregate : aggregates) {
+        put32(packet, offset, aggregate.totalUs > UINT32_MAX ? UINT32_MAX : static_cast<uint32_t>(aggregate.totalUs));
+        put32(packet, offset, aggregate.maxUs);
+    }
+    return offset == packet.size() && sendPerformancePacket(packet.data(), packet.size());
+}
+
+bool BleHidRemote::sendConnectionTimingSummary()
+{
+    std::array<uint64_t, ConnectionTimingCount> timing{};
+    taskENTER_CRITICAL(&_timing_mux);
+    timing = _connection_timing;
+    taskEXIT_CRITICAL(&_timing_mux);
+
+    std::array<uint8_t, PerformanceConnectionBytes> packet{};
+    size_t offset    = 0;
+    packet[offset++] = PerformanceWireVersion;
+    packet[offset++] = PerformanceConnection;
+    uint16_t flags   = 0;
+    for (size_t index = 0; index < timing.size(); ++index) {
+        if (timing[index] != 0) {
+            flags |= static_cast<uint16_t>(1U << index);
+        }
+    }
+    put16(packet, offset, flags);
+    for (const uint64_t timestamp : timing) {
+        put64(packet, offset, timestamp);
+    }
+    return offset == packet.size() && sendPerformancePacket(packet.data(), packet.size());
+}
+
+int BleHidRemote::readPerformance(ble_gatt_access_ctxt* context)
+{
+    const std::array<uint8_t, 4> packet{PerformanceWireVersion, PerformanceCapabilities, 0x03, 0x00};
+    return os_mbuf_append(context->om, packet.data(), packet.size()) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+}
+
+int BleHidRemote::writePerformance(ble_gatt_access_ctxt* context)
+{
+    if (OS_MBUF_PKTLEN(context->om) != 4) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    std::array<uint8_t, 4> request{};
+    const uint64_t receivedAt = monotonicUs();
+    if (os_mbuf_copydata(context->om, 0, request.size(), request.data()) != 0 || request[0] != PerformanceWireVersion ||
+        request[1] != PerformanceSyncRequest) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    const uint16_t sequence = static_cast<uint16_t>(request[2] | (static_cast<uint16_t>(request[3]) << 8));
+    std::array<uint8_t, 20> response{};
+    size_t offset      = 0;
+    response[offset++] = PerformanceWireVersion;
+    response[offset++] = PerformanceSyncResponse;
+    put16(response, offset, sequence);
+    put64(response, offset, receivedAt);
+    put64(response, offset, monotonicUs());
+    return sendPerformancePacket(response.data(), response.size()) ? 0 : BLE_ATT_ERR_UNLIKELY;
+}
+
 void BleHidRemote::runSpeechWorker()
 {
     std::array<int16_t, speech::InputSamplesPerFrame> input{};
@@ -1461,19 +1683,48 @@ void BleHidRemote::runSpeechWorker()
     int stepIndex      = 0;
     uint16_t errorCode = 0;
 
+    recordSpeechTiming(TimingWorkerStarted, monotonicUs());
     while (_speech_active.load()) {
+        const uint64_t captureStarted = monotonicUs();
         if (!GetHAL().audioReadSamples(input.data(), input.size(), 30.0f)) {
             errorCode = static_cast<uint16_t>(ESP_FAIL);
             break;
         }
+        const uint64_t captureDone     = monotonicUs();
+        const uint64_t resampleStarted = captureDone;
         speech::resample44k1To16k(input.data(), resampled);
+        const uint64_t resampleDone  = monotonicUs();
+        const uint64_t encodeStarted = resampleDone;
         speech::encodeImaAdpcm(resampled, encoded, stepIndex);
-        if (!sendSpeechAudio(encoded.data(), encoded.size())) {
+        const uint64_t encodeDone    = monotonicUs();
+        const uint64_t notifyStarted = encodeDone;
+        const bool sent              = sendSpeechAudio(encoded.data(), encoded.size());
+        const uint64_t notifyDone    = monotonicUs();
+        taskENTER_CRITICAL(&_timing_mux);
+        _speech_timing.capture.observe(captureDone - captureStarted);
+        _speech_timing.resample.observe(resampleDone - resampleStarted);
+        _speech_timing.encode.observe(encodeDone - encodeStarted);
+        _speech_timing.notify.observe(notifyDone - notifyStarted);
+        _speech_timing.frameCount = _speech_sequence;
+        if (_speech_timing.timestampUs[TimingFirstCaptureDone] == 0) {
+            _speech_timing.timestampUs[TimingFirstCaptureDone]  = captureDone;
+            _speech_timing.timestampUs[TimingFirstResampleDone] = resampleDone;
+            _speech_timing.timestampUs[TimingFirstEncodeDone]   = encodeDone;
+            if (sent) {
+                _speech_timing.timestampUs[TimingFirstAudioSent] = notifyDone;
+            }
+        }
+        if (!sent && _speech_timing.notifyFailures != UINT16_MAX) {
+            ++_speech_timing.notifyFailures;
+        }
+        taskEXIT_CRITICAL(&_timing_mux);
+        if (!sent) {
             errorCode = static_cast<uint16_t>(ESP_FAIL);
             break;
         }
     }
 
+    recordSpeechTiming(TimingWorkerExited, monotonicUs());
     const bool aborted = _speech_abort_requested.load() || errorCode != 0;
     _speech_active     = false;
     if (errorCode != 0) {
@@ -1481,6 +1732,8 @@ void BleHidRemote::runSpeechWorker()
     } else {
         sendSpeechStatus(aborted ? SpeechAbort : SpeechEnd);
     }
+    recordSpeechTiming(TimingStatusEndSent, monotonicUs());
+    sendSpeechTimingSummary();
     const UBaseType_t stackFree = uxTaskGetStackHighWaterMark(nullptr);
     ESP_LOGI(Tag, "speech session %u %s after %u frames, min free stack=%u bytes", _speech_session,
              aborted ? "aborted" : "ended", _speech_sequence, static_cast<unsigned>(stackFree));
@@ -1645,6 +1898,14 @@ int BleHidRemote::speechGattAccess(uint16_t connectionHandle, uint16_t attribute
     }
     if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR && attributeHandle == instance->_host_status_handle) {
         return instance->writeHostStatus(context);
+    }
+    if (attributeHandle == instance->_performance_handle) {
+        if (context->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+            return instance->readPerformance(context);
+        }
+        if (context->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
+            return instance->writePerformance(context);
+        }
     }
     return BLE_ATT_ERR_UNLIKELY;
 }

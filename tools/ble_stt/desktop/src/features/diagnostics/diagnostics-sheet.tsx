@@ -26,6 +26,7 @@ import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { RuntimeCard } from "@/features/home/home-page"
+import { PerformanceView } from "@/features/diagnostics/performance-view"
 import {
   type ActivityItem,
   type DailyState,
@@ -37,7 +38,7 @@ import {
   percent,
   readinessVariant,
 } from "@/lib/app-view-model"
-import type { RuntimeTelemetry, StatusPayload, StructuredLogEntry } from "@/lib/helper-api"
+import type { PerformanceSnapshot, RuntimeTelemetry, StatusPayload, StructuredLogEntry } from "@/lib/helper-api"
 import type { Translator } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
@@ -46,6 +47,7 @@ type DiagnosticsSheetProps = {
   status: StatusPayload | null
   dailyState: DailyState
   telemetry: RuntimeTelemetry | null
+  performance: PerformanceSnapshot | null
   activity: ActivityItem[]
   logEntries: StructuredLogEntry[]
   autoFollowLogs: boolean
@@ -56,6 +58,7 @@ type DiagnosticsSheetProps = {
   onDisableAutoFollowLogs: () => void
   onOpenLogs: () => void
   onCopyDiagnostics: () => void
+  onClearPerformance: () => void
   t: Translator
 }
 
@@ -64,6 +67,7 @@ export function DiagnosticsSheet({
   status,
   dailyState,
   telemetry,
+  performance,
   activity,
   logEntries,
   autoFollowLogs,
@@ -74,6 +78,7 @@ export function DiagnosticsSheet({
   onDisableAutoFollowLogs,
   onOpenLogs,
   onCopyDiagnostics,
+  onClearPerformance,
   t,
 }: DiagnosticsSheetProps) {
   return (
@@ -88,6 +93,7 @@ export function DiagnosticsSheet({
           <TabsList className="shrink-0">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="runtime">Runtime</TabsTrigger>
+            <TabsTrigger value="performance">Performance</TabsTrigger>
             <TabsTrigger value="logs">Logs</TabsTrigger>
           </TabsList>
 
@@ -285,6 +291,17 @@ export function DiagnosticsSheet({
                 </CardContent>
               </Card>
             </div>
+          </TabsContent>
+
+          <TabsContent value="performance" className="min-h-0">
+            <ScrollArea className="h-full pr-3">
+              <PerformanceView
+                snapshot={performance}
+                busy={busyAction !== null}
+                onClear={onClearPerformance}
+                t={t}
+              />
+            </ScrollArea>
           </TabsContent>
         </Tabs>
 

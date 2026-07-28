@@ -27,7 +27,8 @@ struct HelperResult {
 }
 
 const TELEMETRY_FILE_NAME: &str = "ble-stt-runtime.json";
-const TELEMETRY_SCHEMA: i32 = 1;
+const PERFORMANCE_FILE_NAME: &str = "ble-stt-performance.json";
+const TELEMETRY_SCHEMA: i32 = 2;
 const TELEMETRY_STALE_SECONDS: f64 = 8.0;
 
 fn helper_cli_args() -> Option<Vec<String>> {
@@ -43,8 +44,8 @@ fn helper_cli_args() -> Option<Vec<String>> {
         return Some(args);
     }
     match args[0].as_str() {
-        "run" | "status" | "logs" | "telemetry" | "service" | "permissions" | "prepare"
-        | "models" | "mappings" | "commands" | "voice-settings" | "doctor" | "test"
+        "run" | "status" | "logs" | "telemetry" | "performance" | "service" | "permissions"
+        | "prepare" | "models" | "mappings" | "commands" | "voice-settings" | "doctor" | "test"
         | "journey-test" | "restart" | "upgrade" | "uninstall" | "help" | "--version" | "-h"
         | "--help" => Some(args),
         _ => None,
@@ -310,6 +311,11 @@ fn default_telemetry(stage: &str) -> Value {
             "busy": false,
             "mode": "idle"
         },
+        "performance": {
+            "revision": 0,
+            "current": null,
+            "latest": null
+        },
         "last_text": null,
         "last_command": null,
         "error": null,
@@ -357,6 +363,11 @@ fn read_runtime_telemetry() -> Value {
         object.entry("recognition").or_insert(json!({
             "busy": false,
             "mode": "idle"
+        }));
+        object.entry("performance").or_insert(json!({
+            "revision": 0,
+            "current": null,
+            "latest": null
         }));
         object.entry("last_text").or_insert(Value::Null);
         object.entry("last_command").or_insert(Value::Null);
@@ -446,6 +457,74 @@ fn helper_telemetry(_app: tauri::AppHandle) -> Result<HelperResult, String> {
     }))
     .map_err(|error| format!("could not encode telemetry: {error}"))?;
 
+    Ok(HelperResult {
+        ok: true,
+        code: Some(0),
+        stdout: format!("{stdout}\n"),
+        stderr: String::new(),
+    })
+}
+
+fn default_performance(revision: u64) -> Value {
+    json!({
+        "schema": 1,
+        "revision": revision,
+        "updated_at": unix_timestamp(),
+        "sessions": [],
+        "lifecycles": []
+    })
+}
+
+fn read_performance_history() -> Value {
+    let path = telemetry_log_dir().join(PERFORMANCE_FILE_NAME);
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .filter(Value::is_object)
+        .unwrap_or_else(|| default_performance(0))
+}
+
+#[tauri::command]
+fn helper_performance(_app: tauri::AppHandle) -> Result<HelperResult, String> {
+    let stdout = serde_json::to_string(&json!({
+        "ok": true,
+        "performance": read_performance_history()
+    }))
+    .map_err(|error| format!("could not encode performance history: {error}"))?;
+    Ok(HelperResult {
+        ok: true,
+        code: Some(0),
+        stdout: format!("{stdout}\n"),
+        stderr: String::new(),
+    })
+}
+
+#[tauri::command]
+fn performance_clear(_app: tauri::AppHandle) -> Result<HelperResult, String> {
+    let previous = read_performance_history();
+    let revision = previous
+        .get("revision")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        + 1;
+    let payload = default_performance(revision);
+    let destination = telemetry_log_dir().join(PERFORMANCE_FILE_NAME);
+    fs::create_dir_all(telemetry_log_dir())
+        .map_err(|error| format!("could not create performance directory: {error}"))?;
+    let temporary = destination.with_extension("tmp");
+    let encoded = serde_json::to_string(&payload)
+        .map_err(|error| format!("could not encode empty performance history: {error}"))?;
+    fs::write(&temporary, format!("{encoded}\n"))
+        .map_err(|error| format!("could not write empty performance history: {error}"))?;
+    #[cfg(target_os = "windows")]
+    if destination.exists() {
+        fs::remove_file(&destination)
+            .map_err(|error| format!("could not replace performance history: {error}"))?;
+    }
+    fs::rename(&temporary, &destination)
+        .map_err(|error| format!("could not clear performance history: {error}"))?;
+    let stdout = serde_json::to_string(&json!({"ok": true, "performance": payload}))
+        .map_err(|error| format!("could not encode cleared performance history: {error}"))?;
     Ok(HelperResult {
         ok: true,
         code: Some(0),
@@ -655,6 +734,8 @@ pub fn run() {
             helper_status,
             helper_logs,
             helper_telemetry,
+            helper_performance,
+            performance_clear,
             service_action,
             model_action,
             mapping_status,

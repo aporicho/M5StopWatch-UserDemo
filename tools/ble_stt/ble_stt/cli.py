@@ -43,6 +43,7 @@ from .recognizers import prepare_recognizer
 from .service import ServiceManager
 from .status import collect_status, snapshot_to_dict, status_lines
 from .telemetry import read_telemetry
+from .performance import clear_performance, read_performance
 
 
 COMMANDS = {
@@ -53,6 +54,7 @@ COMMANDS = {
     "journey-test",
     "logs",
     "telemetry",
+    "performance",
     "restart",
     "service",
     "upgrade",
@@ -513,6 +515,23 @@ def show_telemetry(argv: Sequence[str]) -> int:
     return 0
 
 
+def manage_performance(argv: Sequence[str]) -> int:
+    values = [value for value in argv if value != "--json"]
+    json_output = len(values) != len(argv)
+    parser = argparse.ArgumentParser(prog="ble-stt performance", description="Show or clear local performance traces")
+    parser.add_argument("action", nargs="?", choices=("show", "clear"), default="show")
+    args = parser.parse_args(values)
+    payload = clear_performance() if args.action == "clear" else read_performance()
+    envelope = {"ok": True, "performance": payload}
+    if json_output:
+        _print_json(envelope)
+    else:
+        print(f"Revision: {payload.get('revision', 0)}")
+        print(f"Sessions: {len(payload.get('sessions', []))} / 200")
+        print(f"Lifecycles: {len(payload.get('lifecycles', []))} / 20")
+    return 0
+
+
 def manage_permissions(argv: Sequence[str]) -> int:
     values = [value for value in argv if value != "--json"]
     json_output = len(values) != len(argv)
@@ -620,6 +639,7 @@ Commands:
   voice-settings Configure correction, dictionaries, typing, and its local model
   logs         Show or follow background service logs
   telemetry    Show live runtime telemetry for the desktop HUD
+  performance  Show or clear local end-to-end performance traces
   restart      Restart the login service
   service      Install, inspect, or remove the login service
   permissions  Open platform permission settings
@@ -678,6 +698,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             code = show_logs(values)
         elif command == "telemetry":
             code = show_telemetry(values)
+        elif command == "performance":
+            code = manage_performance(values)
         elif command == "restart":
             json_output = "--json" in values
             restart_values = [value for value in values if value != "--json"]

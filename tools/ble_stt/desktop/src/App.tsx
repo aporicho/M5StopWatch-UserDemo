@@ -26,9 +26,11 @@ import {
 } from "@/lib/app-view-model"
 import {
   formatBytes,
+  clearPerformance,
   helperCommands,
   helperLogs,
   helperMappings,
+  helperPerformance,
   helperStatus,
   helperTelemetry,
   invokeCorrectionModelAction,
@@ -57,6 +59,7 @@ import {
   type LogsEnvelope,
   type MappingEntry,
   type MappingEnvelope,
+  type PerformanceSnapshot,
   type ModelAction,
   type PermissionKind,
   type ServiceAction,
@@ -86,6 +89,7 @@ function App() {
   const [statusEnvelope, setStatusEnvelope] = useState<StatusEnvelope | null>(null)
   const [logsEnvelope, setLogsEnvelope] = useState<LogsEnvelope | null>(null)
   const [telemetryEnvelope, setTelemetryEnvelope] = useState<TelemetryEnvelope | null>(null)
+  const [performance, setPerformance] = useState<PerformanceSnapshot | null>(null)
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [busyAction, setBusyAction] = useState<string | null>(null)
@@ -363,6 +367,28 @@ function App() {
     }
   }, [])
 
+  const refreshPerformance = useCallback(async () => {
+    try {
+      const payload = await helperPerformance()
+      setPerformance(payload.performance)
+    } catch {
+      // Performance history is diagnostic-only and must not affect voice operation.
+    }
+  }, [])
+
+  const clearPerformanceHistory = useCallback(async () => {
+    setBusyAction("performance-clear")
+    try {
+      const payload = await clearPerformance()
+      setPerformance(payload.performance)
+      showNotice(t("performance.cleared", "Performance history cleared."), "info", "success")
+    } catch (error) {
+      showNotice(errorMessage(error), "error", "error")
+    } finally {
+      setBusyAction(null)
+    }
+  }, [showNotice, t])
+
   useEffect(() => {
     void refreshAll({ notifyErrors: true })
     const timer = window.setInterval(() => {
@@ -388,6 +414,12 @@ function App() {
 
     return () => window.clearInterval(timer)
   }, [refreshTelemetry])
+
+  useEffect(() => {
+    if (diagnosticsOpen) {
+      void refreshPerformance()
+    }
+  }, [diagnosticsOpen, refreshPerformance, telemetry?.performance?.revision])
 
   useEffect(() => {
     const current = currentModel?.selected
@@ -707,6 +739,7 @@ function App() {
         latestMappingRef.current ?? (await helperMappings().catch(() => null))
       const snapshotCommands =
         latestCommandRef.current ?? (await helperCommands().catch(() => null))
+      const snapshotPerformance = performance ?? (await helperPerformance().then((value) => value.performance).catch(() => null))
       await navigator.clipboard.writeText(
         JSON.stringify(
           {
@@ -715,6 +748,7 @@ function App() {
             telemetry: snapshotTelemetry,
             mapping: snapshotMapping,
             commands: snapshotCommands,
+            performance: snapshotPerformance,
             logs: snapshotLogs,
           },
           null,
@@ -727,7 +761,7 @@ function App() {
     } finally {
       setBusyAction(null)
     }
-  }, [showNotice])
+  }, [performance, showNotice])
 
   const modelInstalled = Boolean(currentModel?.installed)
   const deleteModelDisabled =
@@ -900,6 +934,7 @@ function App() {
         status={status}
         dailyState={dailyState}
         telemetry={telemetry}
+        performance={performance}
         activity={activity}
         logEntries={logEntries}
         autoFollowLogs={autoFollowLogs}
@@ -914,6 +949,7 @@ function App() {
         }}
         onOpenLogs={() => void openLogs()}
         onCopyDiagnostics={() => void copyDiagnostics()}
+        onClearPerformance={() => void clearPerformanceHistory()}
         t={t}
       />
 

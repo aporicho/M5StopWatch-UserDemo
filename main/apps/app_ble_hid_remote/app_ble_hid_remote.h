@@ -61,6 +61,9 @@ private:
     std::unique_ptr<model::BleHidRemote> _remote;
     std::unique_ptr<view::BleHidRemoteView> _view;
     uint32_t _speech_start_at                = 0;
+    uint64_t _speech_button_down_us          = 0;
+    uint64_t _speech_hold_trigger_us         = 0;
+    uint64_t _speech_scheduled_us            = 0;
     uint32_t _last_wheel_log_at              = 0;
     bool _left_long_latched                  = false;
     bool _right_long_latched                 = false;

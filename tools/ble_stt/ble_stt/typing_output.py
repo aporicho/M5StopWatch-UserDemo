@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 from collections import deque
 from collections.abc import Callable
 
@@ -21,6 +22,7 @@ class AnimatedTextWriter:
         preferences: TypingPreferences,
         *,
         on_emit: Callable[[str], None] | None = None,
+        on_timing: Callable[[str, int, int], None] | None = None,
         sleeper: Callable[[float], asyncio.Future[None] | asyncio.Task[None] | object] | None = None,
         random_source: random.Random | None = None,
     ) -> None:
@@ -28,6 +30,7 @@ class AnimatedTextWriter:
         self.expected_window = expected_window
         self.preferences = preferences
         self.on_emit = on_emit
+        self.on_timing = on_timing
         self._sleeper = sleeper or asyncio.sleep
         self._random = random_source or random.Random()
         self._pending: deque[str] = deque()
@@ -95,6 +98,8 @@ class AnimatedTextWriter:
                 continue
             value = self._pending.popleft()
             self._inflight = True
+            started_ns = time.monotonic_ns()
+            injected = False
             try:
                 if not self.injector.type_text(value, self.expected_window):
                     self.failed = True
@@ -102,6 +107,7 @@ class AnimatedTextWriter:
                     self._pending.clear()
                     self._drained.set()
                     return
+                injected = True
                 self.emitted.append(value)
                 if self.on_emit is not None:
                     self.on_emit(value)
@@ -112,6 +118,8 @@ class AnimatedTextWriter:
                 self._drained.set()
                 return
             finally:
+                if injected and self.on_timing is not None:
+                    self.on_timing(value, started_ns, time.monotonic_ns())
                 self._inflight = False
             await self._sleep(self._delay(value))
         self._drained.set()

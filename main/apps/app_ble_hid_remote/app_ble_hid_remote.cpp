@@ -8,6 +8,7 @@
 #include <assets/assets.h>
 #include <esp_log.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <hal/hal.h>
 #include <hal/utils/wear_levelling/wear_levelling.h>
 #include <mooncake_log.h>
@@ -201,7 +202,8 @@ bool AppBleHidRemote::scheduleSpeechStart()
         return false;
     }
 
-    const uint32_t now = GetHAL().millis();
+    const uint32_t now   = GetHAL().millis();
+    _speech_scheduled_us = static_cast<uint64_t>(esp_timer_get_time());
     logEvent("speech start scheduled");
     GetHAL().vibrate(20, 70);
     _speech_start_at      = now + VibrationSettleMs;
@@ -330,13 +332,16 @@ void AppBleHidRemote::onOpen()
     }
 
     _remote->start();
-    _left_long_latched     = false;
-    _right_long_latched    = false;
-    _speech_start_pending  = false;
-    _speech_end_feedback   = false;
-    _home_latched          = false;
-    _remote_snapshot_valid = false;
-    _last_wheel_log_at     = 0;
+    _left_long_latched      = false;
+    _right_long_latched     = false;
+    _speech_start_pending   = false;
+    _speech_button_down_us  = 0;
+    _speech_hold_trigger_us = 0;
+    _speech_scheduled_us    = 0;
+    _speech_end_feedback    = false;
+    _home_latched           = false;
+    _remote_snapshot_valid  = false;
+    _last_wheel_log_at      = 0;
     logRemoteSnapshot("after start");
 }
 
@@ -366,11 +371,15 @@ void AppBleHidRemote::handleButtonPressAndHold(bool leftButton)
     const auto holdEvent = leftButton ? model::UserEvent::ButtonLeftHold : model::UserEvent::ButtonRightHold;
 
     if (button.wasPressed()) {
-        latch                 = false;
-        _speech_start_pending = false;
+        latch                   = false;
+        _speech_start_pending   = false;
+        _speech_button_down_us  = static_cast<uint64_t>(esp_timer_get_time());
+        _speech_hold_trigger_us = 0;
+        _speech_scheduled_us    = 0;
     }
     if (_remote && button.isPressed() && !latch && button.pressedFor(SpeechHoldMs)) {
-        latch = true;
+        latch                   = true;
+        _speech_hold_trigger_us = static_cast<uint64_t>(esp_timer_get_time());
         executeMappedEvent(holdEvent);
     }
 }
@@ -389,6 +398,7 @@ void AppBleHidRemote::handleButtonRelease(bool leftButton)
     }
     _speech_start_pending = false;
     if (latch) {
+        _remote->noteSpeechRelease(static_cast<uint64_t>(esp_timer_get_time()));
         executeMappedEvent(releaseAfterHoldEvent);
     } else {
         const bool handled = executeMappedEvent(tapEvent);
@@ -404,7 +414,12 @@ void AppBleHidRemote::tickPendingSpeechStart(uint32_t now)
 {
     if (_remote && _speech_start_pending && static_cast<int32_t>(now - _speech_start_at) >= 0) {
         _speech_start_pending = false;
-        if (!_remote->startSpeech()) {
+        const model::BleHidRemote::SpeechTimingSeed timing{
+            .buttonDownUs    = _speech_button_down_us,
+            .holdTriggeredUs = _speech_hold_trigger_us,
+            .scheduledUs     = _speech_scheduled_us,
+        };
+        if (!_remote->startSpeech(timing)) {
             logEvent("speech start failed");
             logRemoteSnapshot("speech start failed");
             GetHAL().vibrate(160, 100);

@@ -176,6 +176,26 @@ export type RuntimeTelemetry = {
     busy: boolean
     mode: string
   }
+  performance?: {
+    revision: number
+    current: {
+      trace_id: string
+      kind: string
+      session_id: number | null
+      mode: string | null
+      phase: string
+      elapsed_ms: number
+    } | null
+    latest: {
+      trace_id: string
+      kind: string
+      session_id: number | null
+      mode: string | null
+      outcome: string
+      duration_ms: number
+      metrics: Record<string, number | string | null>
+    } | null
+  }
   last_text: {
     text: string
     raw_text?: string
@@ -210,6 +230,51 @@ export type RuntimeTelemetry = {
 export type TelemetryEnvelope = {
   ok: boolean
   telemetry: RuntimeTelemetry
+}
+
+export type PerformanceSpan = {
+  name: string
+  lane: "device" | "ble" | "recognition" | "correction" | "output" | "command" | "host" | "lifecycle" | string
+  category: "work" | "io" | "wait" | "intentional" | string
+  start_ms: number | null
+  duration_ms: number
+  count?: number
+  mean_ms?: number
+  max_ms?: number
+}
+
+export type PerformanceRecord = {
+  schema: number
+  trace_id: string
+  kind: "session" | "lifecycle"
+  session_id: number | null
+  mode: "dictation" | "command" | null
+  outcome: string
+  error_code: string | null
+  configuration: Record<string, string | number | boolean | null>
+  started_at: number
+  completed_at: number
+  duration_ms: number
+  clock_sync: {
+    rtt_ms: number
+    uncertainty_ms: number
+    merged: boolean
+  } | null
+  spans: PerformanceSpan[]
+  metrics: Record<string, number | string | null>
+}
+
+export type PerformanceSnapshot = {
+  schema: number
+  revision: number
+  updated_at: number | null
+  sessions: PerformanceRecord[]
+  lifecycles: PerformanceRecord[]
+}
+
+export type PerformanceEnvelope = {
+  ok: boolean
+  performance: PerformanceSnapshot
 }
 
 export type ServiceAction = "install" | "start" | "stop" | "restart"
@@ -438,6 +503,16 @@ export async function helperLogs(lines = LOG_LINES) {
 export async function helperTelemetry() {
   const result = await invoke<HelperResult>("helper_telemetry")
   return parseHelperJson<TelemetryEnvelope>(result)
+}
+
+export async function helperPerformance() {
+  const result = await invoke<HelperResult>("helper_performance")
+  return parseHelperJson<PerformanceEnvelope>(result)
+}
+
+export async function clearPerformance() {
+  const result = await invoke<HelperResult>("performance_clear")
+  return parseHelperJson<PerformanceEnvelope>(result)
 }
 
 export async function helperMappings() {

@@ -209,9 +209,11 @@ private:
         lv_obj_set_style_bg_opa(switch_widget->get(), LV_OPA_COVER, LV_PART_KNOB);
         lv_obj_set_style_border_width(switch_widget->get(), 0, LV_PART_KNOB);
         lv_obj_set_style_radius(switch_widget->get(), LV_RADIUS_CIRCLE, LV_PART_KNOB);
-        switch_widget->setBgColor(lv_color_hex(0x53BD65), LV_PART_INDICATOR | LV_STATE_CHECKED);
-        switch_widget->setBgOpa(LV_OPA_COVER, LV_PART_INDICATOR | LV_STATE_CHECKED);
-        switch_widget->setBorderWidth(0, LV_PART_INDICATOR | LV_STATE_CHECKED);
+        const auto checkedIndicator =
+            static_cast<lv_style_selector_t>(LV_PART_INDICATOR) | static_cast<lv_style_selector_t>(LV_STATE_CHECKED);
+        switch_widget->setBgColor(lv_color_hex(0x53BD65), checkedIndicator);
+        switch_widget->setBgOpa(LV_OPA_COVER, checkedIndicator);
+        switch_widget->setBorderWidth(0, checkedIndicator);
         switch_widget->onValueChanged().connect(onChanged);
 
         _labels.push_back(std::move(label));

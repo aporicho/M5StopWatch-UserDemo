@@ -8,6 +8,7 @@
 #include "ble_connection_policy.h"
 #include "user_event_mapping.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -53,6 +54,12 @@ public:
         MtuTooSmall,
     };
 
+    struct SpeechTimingSeed {
+        uint64_t buttonDownUs    = 0;
+        uint64_t holdTriggeredUs = 0;
+        uint64_t scheduledUs     = 0;
+    };
+
     BleHidRemote() = default;
     ~BleHidRemote();
 
@@ -67,7 +74,9 @@ public:
     bool cancelPairing();
     void poll();
     bool startSpeech();
+    bool startSpeech(const SpeechTimingSeed& timing);
     void stopSpeech(bool abort = false);
+    void noteSpeechRelease(uint64_t releasedAtUs);
     bool isSpeechReady() const;
     SpeechServiceState speechServiceState() const;
     UserActionMapping mappingFor(UserEvent event) const;
@@ -163,6 +172,7 @@ private:
     std::atomic<bool> _speech_status_subscribed{false};
     std::atomic<bool> _speech_subscribed{false};
     std::atomic<bool> _user_event_subscribed{false};
+    std::atomic<bool> _performance_subscribed{false};
     std::atomic<bool> _pairing_open{false};
     std::atomic<AdvertisingMode> _advertising_mode{AdvertisingMode::None};
     std::atomic<uint8_t> _bond_count{0};
@@ -182,6 +192,7 @@ private:
     uint16_t _mapping_config_handle  = 0;
     uint16_t _user_event_handle      = 0;
     uint16_t _action_exec_handle     = 0;
+    uint16_t _performance_handle     = 0;
     uint16_t _speech_session         = 0;
     uint16_t _speech_sequence        = 0;
     uint16_t _user_event_sequence    = 0;
@@ -195,6 +206,60 @@ private:
     bool _controller_initialized     = false;
     bool _controller_enabled         = false;
     bool _nimble_initialized         = false;
+
+    enum SpeechTimingIndex : uint8_t {
+        TimingButtonDown = 0,
+        TimingHoldTriggered,
+        TimingSpeechScheduled,
+        TimingSpeechStartCall,
+        TimingStatusStartSent,
+        TimingWorkerStarted,
+        TimingFirstCaptureDone,
+        TimingFirstResampleDone,
+        TimingFirstEncodeDone,
+        TimingFirstAudioSent,
+        TimingReleaseDetected,
+        TimingStopRequested,
+        TimingWorkerExited,
+        TimingStatusEndSent,
+        SpeechTimingCount,
+    };
+
+    enum ConnectionTimingIndex : uint8_t {
+        ConnectionRemoteStarted = 0,
+        ConnectionAdvertisingStarted,
+        ConnectionLinkConnected,
+        ConnectionEncryptionReady,
+        ConnectionMtuReady,
+        ConnectionStatusSubscribed,
+        ConnectionAudioSubscribed,
+        ConnectionPerformanceSubscribed,
+        ConnectionTimingCount,
+    };
+
+    struct TimingAggregate {
+        uint64_t totalUs = 0;
+        uint32_t maxUs   = 0;
+        void observe(uint64_t durationUs)
+        {
+            totalUs += durationUs;
+            maxUs = durationUs > UINT32_MAX ? UINT32_MAX : std::max(maxUs, static_cast<uint32_t>(durationUs));
+        }
+    };
+
+    struct SpeechTiming {
+        std::array<uint64_t, SpeechTimingCount> timestampUs{};
+        TimingAggregate capture;
+        TimingAggregate resample;
+        TimingAggregate encode;
+        TimingAggregate notify;
+        uint16_t frameCount     = 0;
+        uint16_t notifyFailures = 0;
+    };
+
+    portMUX_TYPE _timing_mux = portMUX_INITIALIZER_UNLOCKED;
+    SpeechTiming _speech_timing;
+    std::array<uint64_t, ConnectionTimingCount> _connection_timing{};
 
     bool initializeBluetooth();
     bool registerSpeechService();
@@ -223,6 +288,14 @@ private:
     std::array<uint8_t, 12> buildSpeechStatusPacket(uint8_t event, uint16_t error = 0) const;
     bool sendSpeechStatus(uint8_t event, uint16_t error = 0);
     bool sendSpeechAudio(const uint8_t* adpcm, std::size_t length);
+    bool sendPerformanceCapabilities();
+    bool sendSpeechTimingSummary();
+    bool sendConnectionTimingSummary();
+    bool sendPerformancePacket(const uint8_t* data, std::size_t length);
+    void recordSpeechTiming(SpeechTimingIndex index, uint64_t timestampUs);
+    void recordConnectionTiming(ConnectionTimingIndex index, uint64_t timestampUs);
+    int readPerformance(struct ble_gatt_access_ctxt* context);
+    int writePerformance(struct ble_gatt_access_ctxt* context);
     void waitForSpeechWorker();
     int readSpeechStatus(struct ble_gatt_access_ctxt* context);
     int readMappingConfig(struct ble_gatt_access_ctxt* context);

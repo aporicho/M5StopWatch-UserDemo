@@ -42,26 +42,26 @@ public:
 
         _i2s_init();
 
-        audio_codec_i2s_cfg_t i2s_cfg = {
-            .rx_handle = _rx_handle,
-            .tx_handle = _tx_handle,
-        };
-        _data_if = audio_codec_new_i2s_data(&i2s_cfg);
+        audio_codec_i2s_cfg_t i2s_cfg{};
+        i2s_cfg.rx_handle = _rx_handle;
+        i2s_cfg.tx_handle = _tx_handle;
+        _data_if          = audio_codec_new_i2s_data(&i2s_cfg);
 
-        audio_codec_i2c_cfg_t i2c_cfg = {.addr = ES8311_CODEC_DEFAULT_ADDR, .bus_handle = i2c_bus};
-        _ctrl_if                      = audio_codec_new_i2c_ctrl(&i2c_cfg);
+        audio_codec_i2c_cfg_t i2c_cfg{};
+        i2c_cfg.addr       = ES8311_CODEC_DEFAULT_ADDR;
+        i2c_cfg.bus_handle = i2c_bus;
+        _ctrl_if           = audio_codec_new_i2c_ctrl(&i2c_cfg);
 
         _gpio_if = audio_codec_new_gpio();
 
-        es8311_codec_cfg_t es8311_cfg = {
-            .ctrl_if     = _ctrl_if,
-            .gpio_if     = _gpio_if,
-            .codec_mode  = ESP_CODEC_DEV_WORK_MODE_BOTH,
-            .pa_pin      = GPIO_NUM_NC,
-            .pa_reverted = false,
-            .use_mclk    = true,
-        };
-        _codec_if = es8311_codec_new(&es8311_cfg);
+        es8311_codec_cfg_t es8311_cfg{};
+        es8311_cfg.ctrl_if     = _ctrl_if;
+        es8311_cfg.gpio_if     = _gpio_if;
+        es8311_cfg.codec_mode  = ESP_CODEC_DEV_WORK_MODE_BOTH;
+        es8311_cfg.pa_pin      = GPIO_NUM_NC;
+        es8311_cfg.pa_reverted = false;
+        es8311_cfg.use_mclk    = true;
+        _codec_if              = es8311_codec_new(&es8311_cfg);
 
         esp_codec_dev_cfg_t dev_cfg = {
             .dev_type = ESP_CODEC_DEV_TYPE_IN_OUT,
@@ -72,11 +72,10 @@ public:
 
         esp_codec_dev_set_in_gain(_codec_dev, 30.0);
 
-        esp_codec_dev_sample_info_t fs = {
-            .bits_per_sample = 16,
-            .channel         = 1,
-            .sample_rate     = sample_rate,
-        };
+        esp_codec_dev_sample_info_t fs{};
+        fs.bits_per_sample = 16;
+        fs.channel         = 1;
+        fs.sample_rate     = sample_rate;
         esp_codec_dev_open(_codec_dev, &fs);
     }
 
@@ -241,18 +240,14 @@ private:
         mclog::tagInfo(_tag, "i2s init");
 
         i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_PORT, I2S_ROLE_MASTER);
-        i2s_std_config_t std_cfg   = {
-            .clk_cfg  = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate),
-            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
-            .gpio_cfg =
-                {
-                    .mclk = I2S_MCLK_PIN,
-                    .bclk = I2S_BCLK_PIN,
-                    .ws   = I2S_LRCK_PIN,
-                    .dout = I2S_DDAC_OUT_PIN,
-                    .din  = I2S_DADC_IN_PIN,
-                },
-        };
+        i2s_std_config_t std_cfg{};
+        std_cfg.clk_cfg       = I2S_STD_CLK_DEFAULT_CONFIG(sample_rate);
+        std_cfg.slot_cfg      = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+        std_cfg.gpio_cfg.mclk = I2S_MCLK_PIN;
+        std_cfg.gpio_cfg.bclk = I2S_BCLK_PIN;
+        std_cfg.gpio_cfg.ws   = I2S_LRCK_PIN;
+        std_cfg.gpio_cfg.dout = I2S_DDAC_OUT_PIN;
+        std_cfg.gpio_cfg.din  = I2S_DADC_IN_PIN;
 
         ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, &_tx_handle, &_rx_handle));
         ESP_ERROR_CHECK(i2s_channel_init_std_mode(_tx_handle, &std_cfg));

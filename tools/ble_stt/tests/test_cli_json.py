@@ -115,6 +115,29 @@ class CliJsonTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(payload["telemetry"]["stage"], "listening")
 
+    def test_performance_json_reports_local_history(self):
+        history = {"schema": 1, "revision": 4, "sessions": [{"trace_id": "one"}], "lifecycles": []}
+        with patch("ble_stt.cli.read_performance", return_value=history):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = cli.manage_performance(["show", "--json"])
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["performance"], history)
+
+    def test_performance_clear_uses_bounded_history_store(self):
+        history = {"schema": 1, "revision": 5, "sessions": [], "lifecycles": []}
+        with patch("ble_stt.cli.clear_performance", return_value=history) as clear:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = cli.manage_performance(["clear", "--json"])
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(code, 0)
+        clear.assert_called_once_with()
+        self.assertEqual(payload["performance"]["revision"], 5)
+
     def test_mappings_json_reports_default_event_map(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "ble-stt.json"

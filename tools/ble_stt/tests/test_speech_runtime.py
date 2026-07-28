@@ -1,8 +1,10 @@
 import asyncio
 import unittest
+from unittest.mock import patch
 
 from ble_stt.correction import CorrectionResult
 from ble_stt.main import SpeechController, SpeechSession
+from ble_stt.performance import PerformanceTrace
 from ble_stt.preferences import CorrectionPreferences, TypingPreferences, VoicePreferences
 from ble_stt.types import TextReplacementResult, TranscriptSegment
 from ble_stt.typing_output import AnimatedTextWriter
@@ -125,6 +127,29 @@ class SpeechRuntimeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(injector.value, "你好世")
         self.assertEqual(controller._last_text["replacement"], "focus_changed")
+
+    async def test_final_pipeline_persists_stage_timings(self):
+        injector = FakeInjector()
+        session = await self.make_session(injector, "明天去上海")
+        trace = PerformanceTrace("session", session_id=session.session_id, mode="dictation")
+        trace.mark("status_end_received")
+        trace.mark("device_release_detected")
+        session.performance = trace
+
+        with patch(
+            "ble_stt.main.append_performance",
+            return_value={"revision": 1, "sessions": [], "lifecycles": []},
+        ) as append:
+            await self.run_finalize(
+                FakeRecognizer(["明天去北京"]), FakeCorrector("明天去北京"), injector, session
+            )
+
+        record = append.call_args.args[0]
+        names = {span["name"] for span in record["spans"]}
+        self.assertTrue({"final_stt", "normalize", "correction", "suffix_replace"}.issubset(names))
+        self.assertIsNotNone(record["metrics"]["release_to_result_ready_ms"])
+        self.assertIsNotNone(record["metrics"]["release_to_typing_complete_ms"])
+        self.assertEqual(record["outcome"], "success")
 
 
 if __name__ == "__main__":

@@ -19,11 +19,10 @@ bool Cst820::begin(i2c_master_bus_handle_t bus_handle, uint8_t addr)
 {
     _addr = addr;
 
-    i2c_device_config_t dev_cfg = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = _addr,
-        .scl_speed_hz    = 100000,  // Original driver used 100kHz
-    };
+    i2c_device_config_t dev_cfg{};
+    dev_cfg.dev_addr_length = I2C_ADDR_BIT_LEN_7;
+    dev_cfg.device_address  = _addr;
+    dev_cfg.scl_speed_hz    = 100000;  // Original driver used 100kHz
 
     esp_err_t ret = i2c_master_bus_add_device(bus_handle, &dev_cfg, &_i2c_dev);
     if (ret != ESP_OK) {
@@ -62,9 +61,8 @@ bool Cst820::read()
     // buf[3] = X_H, buf[4] = X_L
     // buf[5] = Y_H, buf[6] = Y_L
 
-    _finger_num        = buf[2];
-    uint8_t status_raw = buf[3] & 0xC0;  // High bits of X_H might contain status info in some variants,
-                                         // but original code used:
+    _finger_num = buf[2];
+    // High bits of X_H contain the touch event status:
     // cst820_status = (i2c_buf[3] & 0xC0) >> 6;
     // cst820_x = ((uint16_t)(i2c_buf[3] & 0x0F) << 8) | i2c_buf[4];
 
@@ -88,7 +86,6 @@ bool Cst820::read()
 
 void Cst820::sleep()
 {
-    uint8_t cmd[] = {0x03};  // Enter sleep command value
     // Original: i2c_bus_write_bytes(cst820_dev, 0xE5, 1, i2c_buf);
     // Writes value 0x03 to register 0xE5
 

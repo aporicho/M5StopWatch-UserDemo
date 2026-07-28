@@ -64,6 +64,22 @@ class AnimatedTextWriterTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(writer.emitted_text, "你")
         self.assertEqual(discarded, "好世界")
 
+    async def test_timing_callback_only_reports_successful_injection(self):
+        timings = []
+        injector = FakeInjector()
+        writer = AnimatedTextWriter(
+            injector,
+            "wrong-window",
+            TypingPreferences(enabled=False),
+            on_timing=lambda *values: timings.append(values),
+            sleeper=no_sleep,
+        )
+        writer.enqueue("text")
+        self.assertFalse(await writer.drain())
+        await writer.close(cancel=True)
+
+        self.assertEqual(timings, [])
+
 
 if __name__ == "__main__":
     unittest.main()
