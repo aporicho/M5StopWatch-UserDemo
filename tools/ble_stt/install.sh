@@ -35,6 +35,7 @@ MAC_NEW_APP_ACTIVATED=0
 MAC_INSTALLER_SWITCHED=0
 MAC_SHIM_SWITCHED=0
 MAC_OLD_SHIM_TARGET=""
+MAC_APP_WAS_RUNNING=0
 MAC_SIGNING_CERTIFICATE_DER=""
 MAC_SIGNING_PUBLIC_KEY=""
 EXPECTED_MACOS_BUNDLE_ID="com.aporicho.m5stopwatch-ble-stt"
@@ -103,6 +104,23 @@ macos_stop_service() {
 macos_start_previous_service() {
     [ "$MAC_HAD_PLIST" = "1" ] || return 0
     launchctl bootstrap "gui/$(id -u)" "$MAC_PLIST" >/dev/null 2>&1 || true
+}
+
+macos_stop_app() {
+    [ -d "$MAC_APP" ] || return 0
+    executable="$(macos_app_executable "$MAC_APP")"
+    executable_name="${executable##*/}"
+    if /usr/bin/pgrep -x "$executable_name" >/dev/null 2>&1; then
+        MAC_APP_WAS_RUNNING=1
+        /usr/bin/pkill -x "$executable_name" >/dev/null 2>&1 || true
+        attempt=0
+        while [ "$attempt" -lt 5 ] && /usr/bin/pgrep -x "$executable_name" >/dev/null 2>&1; do
+            sleep 1
+            attempt=$((attempt + 1))
+        done
+        /usr/bin/pgrep -x "$executable_name" >/dev/null 2>&1 \
+            && fail "the running M5StopWatch app could not be closed for the upgrade"
+    fi
 }
 
 macos_prepare_release_key() {
@@ -240,6 +258,9 @@ cleanup() {
             fi
         fi
         macos_start_previous_service
+        if [ "$MAC_APP_WAS_RUNNING" = "1" ] && [ -d "$MAC_APP" ]; then
+            /usr/bin/open "$MAC_APP" >/dev/null 2>&1 || true
+        fi
     fi
     if [ "$platform" = "Darwin" ] && [ "${INSTALL_COMPLETE:-0}" = "1" ]; then
         if [ -n "$MAC_APP_BACKUP" ]; then
@@ -432,6 +453,7 @@ install_macos_app() {
 
     MAC_TRANSACTION_STARTED=1
     macos_stop_service
+    macos_stop_app
     if [ "$MAC_HAD_APP" = "1" ]; then
         MAC_OLD_APP_BACKED_UP=1
         mv "$MAC_APP" "$MAC_APP_BACKUP"

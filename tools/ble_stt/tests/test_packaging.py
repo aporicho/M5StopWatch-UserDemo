@@ -88,6 +88,12 @@ class MacOSPackagingTests(unittest.TestCase):
             public_install,
         )
         self.assertIn('"$app_executable" models use --engine "$ENGINE" --model "$MODEL"', public_install)
+        self.assertIn("macos_stop_app", public_install)
+        self.assertIn('/usr/bin/pkill -x "$executable_name"', public_install)
+        self.assertLess(
+            public_install.index("    macos_stop_app\n"),
+            public_install.index('    mv "$MAC_APP_STAGE" "$MAC_APP"'),
+        )
 
     def test_release_packages_outer_desktop_app_with_signed_nested_helper(self):
         workflow = (
