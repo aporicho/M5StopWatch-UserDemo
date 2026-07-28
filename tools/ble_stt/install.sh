@@ -121,6 +121,7 @@ macos_stop_app() {
         /usr/bin/pgrep -x "$executable_name" >/dev/null 2>&1 \
             && fail "the running M5StopWatch app could not be closed for the upgrade"
     fi
+    return 0
 }
 
 macos_prepare_release_key() {
