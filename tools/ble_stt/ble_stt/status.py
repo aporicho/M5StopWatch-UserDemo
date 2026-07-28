@@ -7,7 +7,7 @@ from typing import Any
 from .config import UserConfig, log_dir
 from .correction_models import correction_model_status, list_correction_models
 from .diagnostics import event_log_paths
-from .models import ModelStatus, model_status
+from .models import ModelStatus, list_models, model_status
 from .platforms import create_platform
 from .preferences import read_voice_preferences
 from .service import ServiceManager
@@ -167,6 +167,7 @@ def snapshot_to_dict(snapshot: StatusSnapshot) -> dict[str, Any]:
             "model": snapshot.model,
         },
         "model": snapshot.model_state.to_dict(),
+        "models": list_models(config),
         "preferences": read_voice_preferences(config).to_dict(),
         "correction_model": correction_model_status(config).to_dict(),
         "correction_models": list_correction_models(config),

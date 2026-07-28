@@ -1,6 +1,7 @@
 import { FileTextIcon, PlayIcon, SettingsIcon, Trash2Icon } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
+import { ModelOperationProgress } from "@/components/common/model-operation-progress"
 import { Button } from "@/components/ui/button"
 import {
   Card,
@@ -17,7 +18,12 @@ import { ScrollArea } from "@/components/ui/scroll-area"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Spinner } from "@/components/ui/spinner"
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table"
-import { formatBytes, type RuntimeTelemetry, type StatusPayload } from "@/lib/helper-api"
+import {
+  formatBytes,
+  type ModelOperationProgress as ModelOperation,
+  type RuntimeTelemetry,
+  type StatusPayload,
+} from "@/lib/helper-api"
 import {
   type DailyState,
   type DictationHistoryItem,
@@ -273,11 +279,15 @@ export function RuntimeCard({
 
 function ModelCard({
   model,
+  operation,
   onOpenSettings,
+  onCancelModelOperation,
   t,
 }: {
   model: StatusPayload["model"] | null
+  operation: ModelOperation | null
   onOpenSettings: () => void
+  onCancelModelOperation: () => void
   t: Translator
 }) {
   return (
@@ -290,22 +300,31 @@ function ModelCard({
       </CardHeader>
       <CardContent>
         {model ? (
-          <Table>
-            <TableBody>
-              <TableRow>
-                <TableCell className="font-medium">{t("home.selected", "Selected")}</TableCell>
-                <TableCell className="text-muted-foreground">{modelDisplayLabel(model.selected, t)}</TableCell>
-              </TableRow>
-              <TableRow>
-                <TableCell className="font-medium">{t("home.engine", "Engine")}</TableCell>
-                <TableCell className="text-muted-foreground">{model.engine}</TableCell>
-              </TableRow>
-              <TableRow>
-                <TableCell className="font-medium">{t("home.storage", "Storage")}</TableCell>
-                <TableCell className="text-muted-foreground">{formatBytes(model.disk_bytes)}</TableCell>
-              </TableRow>
-            </TableBody>
-          </Table>
+          <div className="flex flex-col gap-4">
+            <Table>
+              <TableBody>
+                <TableRow>
+                  <TableCell className="font-medium">{t("home.selected", "Selected")}</TableCell>
+                  <TableCell className="text-muted-foreground">{modelDisplayLabel(model.selected, t)}</TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">{t("home.engine", "Engine")}</TableCell>
+                  <TableCell className="text-muted-foreground">{model.engine}</TableCell>
+                </TableRow>
+                <TableRow>
+                  <TableCell className="font-medium">{t("home.storage", "Storage")}</TableCell>
+                  <TableCell className="text-muted-foreground">{formatBytes(model.disk_bytes)}</TableCell>
+                </TableRow>
+              </TableBody>
+            </Table>
+            {operation && (
+              <ModelOperationProgress
+                operation={operation}
+                onCancel={onCancelModelOperation}
+                t={t}
+              />
+            )}
+          </div>
         ) : (
           <div className="flex flex-col gap-2">
             <Skeleton className="h-8 w-full" />
@@ -329,11 +348,13 @@ type HomePageProps = {
   telemetry: RuntimeTelemetry | null
   dictations: DictationHistoryItem[]
   currentModel: StatusPayload["model"] | null
+  modelOperation: ModelOperation | null
   lastUpdated: Date | null
   busyAction: string | null
   primaryActionLabel: PrimaryActionLabel
   onDailyAction: () => void
   onOpenSettings: () => void
+  onCancelModelOperation: () => void
   onClearDictationHistory: () => void
   t: Translator
 }
@@ -344,11 +365,13 @@ export function HomePage({
   telemetry,
   dictations,
   currentModel,
+  modelOperation,
   lastUpdated,
   busyAction,
   primaryActionLabel,
   onDailyAction,
   onOpenSettings,
+  onCancelModelOperation,
   onClearDictationHistory,
   t,
 }: HomePageProps) {
@@ -369,7 +392,13 @@ export function HomePage({
 
       <ScrollArea className="min-h-0 md:h-full">
         <div className="flex min-w-0 flex-col gap-3 p-px pr-3">
-          <ModelCard model={currentModel} onOpenSettings={onOpenSettings} t={t} />
+          <ModelCard
+            model={currentModel}
+            operation={modelOperation}
+            onOpenSettings={onOpenSettings}
+            onCancelModelOperation={onCancelModelOperation}
+            t={t}
+          />
           <RuntimeCard state={state} telemetry={telemetry} t={t} />
         </div>
       </ScrollArea>

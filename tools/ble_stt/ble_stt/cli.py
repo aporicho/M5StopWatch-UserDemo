@@ -25,6 +25,7 @@ from .correction_models import (
 )
 from .diagnostics import event_log_paths
 from .mapping import mapping_payload, read_mapping, reset_mapping, save_mapping
+from .model_progress import operation_reporter
 from .models import (
     DEFAULT_ENGINE,
     DEFAULT_MODEL,
@@ -148,6 +149,7 @@ def manage_models(argv: Sequence[str]) -> int:
 
     args = parser.parse_args(values)
     config = UserConfig()
+    progress = operation_reporter()
     payload: dict[str, object]
     if args.action == "status":
         status = model_status(config)
@@ -165,11 +167,32 @@ def manage_models(argv: Sequence[str]) -> int:
             if args.action == "use":
                 status = use_model(args.model, args.engine, config)
             elif args.action == "install":
-                status = install_model(args.model, args.engine, args.device, args.cpu_threads, config=config)
+                status = install_model(
+                    args.model,
+                    args.engine,
+                    args.device,
+                    args.cpu_threads,
+                    config=config,
+                    progress=progress,
+                )
             elif args.action == "update":
-                status = update_model(args.model, args.engine, args.device, args.cpu_threads, config=config)
+                status = update_model(
+                    args.model,
+                    args.engine,
+                    args.device,
+                    args.cpu_threads,
+                    config=config,
+                    progress=progress,
+                )
             elif args.action == "repair":
-                status = repair_model(args.model, args.engine, args.device, args.cpu_threads, config=config)
+                status = repair_model(
+                    args.model,
+                    args.engine,
+                    args.device,
+                    args.cpu_threads,
+                    config=config,
+                    progress=progress,
+                )
             else:
                 status = delete_model(args.model, args.engine, config=config)
             payload = {"ok": True, "action": args.action, "model": status.to_dict()}
@@ -287,6 +310,7 @@ def manage_voice_settings(argv: Sequence[str]) -> int:
 
     args = parser.parse_args(values)
     config = UserConfig()
+    progress = operation_reporter()
     try:
         if args.action == "save":
             raw = json.loads(args.payload)
@@ -302,11 +326,11 @@ def manage_voice_settings(argv: Sequence[str]) -> int:
             model = use_correction_model(args.model, config)
             settings = read_voice_preferences(config)
         elif args.action == "install-model":
-            model = install_correction_model(config, args.model)
+            model = install_correction_model(config, args.model, progress)
         elif args.action == "update-model":
-            model = update_correction_model(config, args.model)
+            model = update_correction_model(config, args.model, progress)
         elif args.action == "repair-model":
-            model = repair_correction_model(config, args.model)
+            model = repair_correction_model(config, args.model, progress)
         elif args.action == "delete-model":
             model = delete_correction_model(config, args.model)
         else:

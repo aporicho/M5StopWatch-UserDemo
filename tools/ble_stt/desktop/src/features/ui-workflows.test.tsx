@@ -1,14 +1,21 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react"
-import { describe, expect, it, vi } from "vitest"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { MappingPage } from "@/features/mapping/mapping-page"
+import { ModelOperationProgress } from "@/components/common/model-operation-progress"
 import { DeleteModelDialog } from "@/features/settings/delete-model-dialog"
 import { PermissionPanel } from "@/features/settings/permission-panel"
-import type { MappingEnvelope, StatusPayload } from "@/lib/helper-api"
+import type {
+  MappingEnvelope,
+  ModelOperationProgress as ModelOperation,
+  StatusPayload,
+} from "@/lib/helper-api"
 import { createTranslator } from "@/lib/i18n"
 
 const en = createTranslator("en")
 const zh = createTranslator("zh-CN")
+
+afterEach(() => cleanup())
 
 const mapping: MappingEnvelope = {
   ok: true,
@@ -79,5 +86,52 @@ describe("desktop UI workflows", () => {
 
     expect(screen.getByRole("heading", { name: "删除模型？" })).toBeInTheDocument()
     expect(screen.getByRole("button", { name: "删除模型" })).toBeInTheDocument()
+  })
+
+  it("shows real model download progress and allows cancellation", () => {
+    const onCancel = vi.fn()
+    const operation: ModelOperation = {
+      schema: 1,
+      id: "operation-1",
+      kind: "speech",
+      action: "install",
+      model: "medium",
+      phase: "downloading",
+      component: "model",
+      downloaded_bytes: 50 * 1024 * 1024,
+      total_bytes: 100 * 1024 * 1024,
+      percent: 50,
+      cancellable: true,
+      updated_at: 1,
+    }
+
+    render(<ModelOperationProgress operation={operation} onCancel={onCancel} t={zh} />)
+
+    expect(screen.getByText("正在下载模型…")).toBeInTheDocument()
+    expect(screen.getByText("50%")).toBeInTheDocument()
+    fireEvent.click(screen.getByRole("button", { name: "取消" }))
+    expect(onCancel).toHaveBeenCalledOnce()
+  })
+
+  it("does not offer cancellation while verifying", () => {
+    const operation: ModelOperation = {
+      schema: 1,
+      id: "operation-1",
+      kind: "correction",
+      action: "repair",
+      model: "lite",
+      phase: "verifying",
+      component: "model",
+      downloaded_bytes: 100,
+      total_bytes: 100,
+      percent: 100,
+      cancellable: false,
+      updated_at: 1,
+    }
+
+    render(<ModelOperationProgress operation={operation} onCancel={vi.fn()} t={zh} />)
+
+    expect(screen.getByText("正在校验文件…")).toBeInTheDocument()
+    expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument()
   })
 })

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { listen, type UnlistenFn } from "@tauri-apps/api/event"
 
 import { AppShell } from "@/components/common/app-shell"
 import { toast } from "@/components/ui/toast"
@@ -26,6 +27,7 @@ import {
 import { AutoSaveQueue, type AutoSaveState } from "@/lib/auto-save"
 import {
   formatBytes,
+  cancelModelOperation,
   clearPerformance,
   helperCommands,
   helperLogs,
@@ -36,10 +38,12 @@ import {
   invokeCorrectionModelAction,
   invokeModelAction,
   invokeServiceAction,
+  getModelOperationStatus,
   LOG_LINES,
   MODEL_IDS,
   modelActionMessage,
   modelBlocksServiceStart,
+  modelOperationActive,
   openLogsFolder,
   openPermissionPanel,
   POLL_MS,
@@ -61,6 +65,8 @@ import {
   type MappingEnvelope,
   type PerformanceSnapshot,
   type ModelAction,
+  ModelOperationCancelledError,
+  type ModelOperationProgress,
   type PermissionKind,
   type ServiceAction,
   type StatusEnvelope,
@@ -93,6 +99,7 @@ function App() {
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const [busyAction, setBusyAction] = useState<string | null>(null)
+  const [modelOperation, setModelOperation] = useState<ModelOperationProgress | null>(null)
   const [refreshing, setRefreshing] = useState(false)
   const [selectedModel, setSelectedModel] = useState<string>("small")
   const [modelSelectionTouched, setModelSelectionTouched] = useState(false)
@@ -135,7 +142,7 @@ function App() {
   const telemetry = telemetryEnvelope?.telemetry ?? null
   const currentModel = status?.model ?? null
   const currentCorrectionModel = status?.correction_model ?? null
-  const controlsDisabled = busyAction !== null
+  const controlsDisabled = busyAction !== null || modelOperationActive(modelOperation)
   const activeModel = selectedModel || currentModel?.selected || "small"
   const activeCorrectionModel =
     selectedCorrectionModel || currentCorrectionModel?.model || "lite"
@@ -205,6 +212,12 @@ function App() {
       status?.correction_models?.find((model) => model.id === activeCorrectionModel)
         ?.status ?? currentCorrectionModel,
     [activeCorrectionModel, currentCorrectionModel, status?.correction_models]
+  )
+  const activeModelStatus = useMemo(
+    () =>
+      status?.models?.find((model) => model.id === activeModel)?.status ??
+      (activeModel === currentModel?.selected ? currentModel : null),
+    [activeModel, currentModel, status?.models]
   )
 
   const applySnapshots = useCallback(
@@ -406,6 +419,36 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    let disposed = false
+    let unlisten: UnlistenFn | undefined
+
+    void getModelOperationStatus()
+      .then((progress) => {
+        if (!disposed && modelOperationActive(progress)) setModelOperation(progress)
+      })
+      .catch(() => undefined)
+    void listen<ModelOperationProgress>("model-operation-progress", (event) => {
+      if (disposed) return
+      if (modelOperationActive(event.payload)) {
+        setModelOperation(event.payload)
+      } else {
+        setModelOperation(null)
+        void refreshAll()
+      }
+    })
+      .then((cleanup) => {
+        if (disposed) cleanup()
+        else unlisten = cleanup
+      })
+      .catch(() => undefined)
+
+    return () => {
+      disposed = true
+      unlisten?.()
+    }
+  }, [refreshAll])
+
   const clearPerformanceHistory = useCallback(async () => {
     setBusyAction("performance-clear")
     try {
@@ -559,13 +602,24 @@ function App() {
 
         await refreshAll({ notifyErrors: true })
       } catch (error) {
-        showNotice(errorMessage(error), "error", "error")
+        if (!(error instanceof ModelOperationCancelledError)) {
+          showNotice(errorMessage(error), "error", "error")
+        }
       } finally {
         setBusyAction(null)
       }
     },
     [activeModel, refreshAll, showNotice, t]
   )
+
+  const cancelActiveModelOperation = useCallback(async () => {
+    if (!modelOperation?.cancellable) return
+    try {
+      await cancelModelOperation(modelOperation.id)
+    } catch (error) {
+      showNotice(errorMessage(error), "error", "error")
+    }
+  }, [modelOperation, showNotice])
 
   const changeVoicePreferences = useCallback((preferences: VoicePreferences) => {
     voicePreferencesRef.current = preferences
@@ -614,7 +668,9 @@ function App() {
         }
         showNotice(t("notice.action_completed", "Done."), "info", "success")
       } catch (error) {
-        showNotice(errorMessage(error), "error", "error")
+        if (!(error instanceof ModelOperationCancelledError)) {
+          showNotice(errorMessage(error), "error", "error")
+        }
       } finally {
         if (serviceWasRunning) {
           try {
@@ -770,24 +826,22 @@ function App() {
     }
   }, [performance, showNotice, t])
 
-  const modelInstalled = Boolean(currentModel?.installed)
+  const modelInstalled = Boolean(activeModelStatus?.installed)
   const deleteModelDisabled =
     controlsDisabled ||
-    !currentModel ||
-    !isCurrentModel ||
-    !modelInstalled ||
-    currentModel.source === "bundled" ||
-    Boolean(status?.service.running)
+    !activeModelStatus ||
+    !(activeModelStatus.disk_bytes > 0) ||
+    activeModelStatus.source === "bundled" ||
+    (isCurrentModel && Boolean(status?.service.running))
   const installModelDisabled =
-    controlsDisabled || !activeModel || (isCurrentModel && modelInstalled)
+    controlsDisabled || !activeModel || modelInstalled
   const updateModelDisabled =
     controlsDisabled ||
-    !currentModel ||
-    !isCurrentModel ||
-    !currentModel.update_available
+    !activeModelStatus ||
+    !activeModelStatus.update_available
   const repairModelDisabled =
-    controlsDisabled || !currentModel || !isCurrentModel || !modelInstalled
-  const useModelDisabled = controlsDisabled || !activeModel || isCurrentModel
+    controlsDisabled || !activeModelStatus || !(activeModelStatus.disk_bytes > 0)
+  const useModelDisabled = controlsDisabled || !activeModel || !modelInstalled || isCurrentModel
   const serviceModelBlocked = currentModel ? modelBlocksServiceStart(currentModel) : true
 
   const handleDailyAction = useCallback(() => {
@@ -871,11 +925,13 @@ function App() {
             telemetry={telemetry}
             dictations={dictations}
             currentModel={currentModel}
+            modelOperation={modelOperation}
             lastUpdated={lastUpdated}
             busyAction={busyAction}
             primaryActionLabel={primaryActionLabel}
             onDailyAction={handleDailyAction}
             onOpenSettings={() => setSettingsOpen(true)}
+            onCancelModelOperation={() => void cancelActiveModelOperation()}
             onClearDictationHistory={clearDictationHistory}
             t={t}
           />
@@ -910,6 +966,7 @@ function App() {
         busyAction={busyAction}
         controlsDisabled={controlsDisabled}
         currentModel={currentModel}
+        selectedModel={activeModelStatus}
         activeModel={activeModel}
         selectedModelDetail={selectedModelDetail}
         modelItems={modelItems}
@@ -928,6 +985,7 @@ function App() {
         correctionModelItems={correctionModelItems}
         correctionModelSelectionTouched={correctionModelSelectionTouched}
         voiceSettingsSaveState={voiceSettingsSaveState}
+        modelOperation={modelOperation}
         onOpenChange={(open) => void changeSettingsOpen(open)}
         onLanguageChange={setLanguage}
         onModelChange={(model) => {
@@ -945,6 +1003,7 @@ function App() {
           setSelectedCorrectionModel(model)
         }}
         onRunCorrectionModelAction={(action) => void runCorrectionModelAction(action)}
+        onCancelModelOperation={() => void cancelActiveModelOperation()}
         t={t}
       />
 

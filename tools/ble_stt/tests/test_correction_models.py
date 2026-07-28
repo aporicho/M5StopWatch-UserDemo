@@ -80,6 +80,28 @@ class CorrectionModelManagementTests(unittest.TestCase):
             self.assertFalse(status.installed)
             self.assertEqual(status.state, "partial")
 
+    def test_status_reports_resumable_hub_cache_as_partial(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cache = Path(directory)
+            partial = (
+                cache
+                / "correction"
+                / "hub"
+                / "models--ggml-org--Qwen3.5-0.8B-GGUF"
+                / "weights.incomplete"
+            )
+            partial.parent.mkdir(parents=True)
+            partial.write_bytes(b"partial")
+            with (
+                patch("ble_stt.correction_models.model_cache_dir", return_value=cache),
+                patch("ble_stt.correction_models.llama_server_path", return_value=Path("/runtime")),
+            ):
+                status = correction_model_status()
+
+            self.assertEqual(status.state, "partial")
+            self.assertEqual(status.disk_bytes, len(b"partial"))
+            self.assertIn("continue", status.message)
+
     def test_successful_install_atomically_replaces_legacy_model(self):
         with tempfile.TemporaryDirectory() as directory:
             cache = Path(directory)

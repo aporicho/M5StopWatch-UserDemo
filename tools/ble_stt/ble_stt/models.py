@@ -7,10 +7,13 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 from .config import UserConfig, config_dir, model_cache_dir
 from .recognizers import configure_hf_environment, prepare_recognizer, resolve_engine, resolve_model
+
+if TYPE_CHECKING:
+    from .model_progress import ModelProgressReporter
 
 
 DEFAULT_MODEL = "small"
@@ -360,13 +363,31 @@ def _metadata_revision(repo: str | None) -> str | None:
         return None
 
 
-def _download_snapshot(repo: str) -> None:
+def _repository_total_bytes(repo: str) -> int | None:
+    try:
+        configure_hf_environment()
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(repo, revision="main", files_metadata=True)
+        sizes = [int(size) for sibling in (info.siblings or ()) if (size := getattr(sibling, "size", None))]
+        return sum(sizes) or None
+    except Exception:
+        return None
+
+
+def _download_snapshot(repo: str, progress: ModelProgressReporter | None = None) -> None:
     configure_hf_environment()
     from huggingface_hub import snapshot_download
 
     hub_cache = model_cache_dir() / "hub"
     hub_cache.mkdir(parents=True, exist_ok=True)
-    snapshot_download(repo_id=repo, cache_dir=str(hub_cache), revision="main")
+    total_bytes = _repository_total_bytes(repo)
+    cache_path = hub_cache / _repo_cache_name(repo)
+    if progress is None:
+        snapshot_download(repo_id=repo, cache_dir=str(hub_cache), revision="main")
+        return
+    with progress.monitor_download((cache_path / "blobs",), total_bytes, component="model"):
+        snapshot_download(repo_id=repo, cache_dir=str(hub_cache), revision="main")
 
 
 def runtime_model_name(engine_request: str, model: str, config: UserConfig | object | None = None) -> str:
@@ -586,21 +607,30 @@ def install_model(
     cpu_threads: int | None = None,
     *,
     config: UserConfig | None = None,
+    progress: ModelProgressReporter | None = None,
 ) -> ModelStatus:
     config = config or UserConfig()
+    if progress:
+        progress.emit("preparing", cancellable=True)
     resolved_engine = resolve_engine(engine)
     if model == BUNDLED_MODEL and bundled_model_path(resolved_engine, model) is not None:
+        if progress:
+            progress.emit("installing")
         path = ensure_bundled_model(resolved_engine, model)
         return record_model_ready(engine, model, str(path), config=config, source="bundled", cache_path=path)
 
     repo = repository_for_model(resolved_engine, model)
     revision = None
     if repo is not None:
-        _download_snapshot(repo)
+        _download_snapshot(repo, progress)
+        if progress:
+            progress.emit("verifying")
         installed, _, message, _ = _downloaded_cache_status(_repo_cache_path(repo))
         if not installed:
             raise RuntimeError(message)
         revision = _metadata_revision(repo)
+    if progress:
+        progress.emit("installing")
     threads = cpu_threads or max(1, (os.cpu_count() or 4) // 2)
     resolved = prepare_recognizer(engine, model, device, threads)
     return record_model_ready(engine, model, resolved, config=config, source="downloaded", revision=revision)
@@ -613,8 +643,11 @@ def repair_model(
     cpu_threads: int | None = None,
     *,
     config: UserConfig | None = None,
+    progress: ModelProgressReporter | None = None,
 ) -> ModelStatus:
     config = config or UserConfig()
+    if progress:
+        progress.emit("preparing", cancellable=True)
     resolved_engine = resolve_engine(engine)
     repo = repository_for_model(resolved_engine, model)
     if repo is not None:
@@ -623,7 +656,7 @@ def repair_model(
         _delete_metadata_entry(config, resolved_engine, model)
     if model == BUNDLED_MODEL and bundled_model_path(resolved_engine, model) is not None:
         shutil.rmtree(bundled_cache_path(resolved_engine, model), ignore_errors=True)
-    return install_model(model, engine, device, cpu_threads, config=config)
+    return install_model(model, engine, device, cpu_threads, config=config, progress=progress)
 
 
 def check_updates(config: UserConfig | None = None) -> ModelStatus:
@@ -650,9 +683,10 @@ def update_model(
     cpu_threads: int | None = None,
     *,
     config: UserConfig | None = None,
+    progress: ModelProgressReporter | None = None,
 ) -> ModelStatus:
     config = config or UserConfig()
-    status = install_model(model, engine, device, cpu_threads, config=config)
+    status = install_model(model, engine, device, cpu_threads, config=config, progress=progress)
     entry = _metadata_entry(config, status.engine, model)
     if entry:
         entry["update_available"] = False

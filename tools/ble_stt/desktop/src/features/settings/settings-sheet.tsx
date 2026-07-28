@@ -13,6 +13,7 @@ import {
 import { useState } from "react"
 
 import { SpinnerOrIcon } from "@/components/common/spinner-or-icon"
+import { ModelOperationProgress } from "@/components/common/model-operation-progress"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -74,6 +75,7 @@ import {
   type CorrectionModelAction,
   type CorrectionModelStatus,
   type ModelAction,
+  type ModelOperationProgress as ModelOperation,
   type PermissionKind,
   type ServiceAction,
   type StatusPayload,
@@ -92,6 +94,7 @@ type SettingsSheetProps = {
   busyAction: string | null
   controlsDisabled: boolean
   currentModel: StatusPayload["model"] | null
+  selectedModel: StatusPayload["model"] | null
   activeModel: string
   selectedModelDetail: string
   modelItems: SelectItemOption[]
@@ -110,6 +113,7 @@ type SettingsSheetProps = {
   correctionModelItems: SelectItemOption[]
   correctionModelSelectionTouched: boolean
   voiceSettingsSaveState: "idle" | "pending" | "saving" | "saved" | "error"
+  modelOperation: ModelOperation | null
   onOpenChange: (open: boolean) => void
   onLanguageChange: (language: LanguageCode) => void
   onModelChange: (model: string) => void
@@ -121,6 +125,7 @@ type SettingsSheetProps = {
   onRetryVoiceSettings: () => void
   onCorrectionModelChange: (model: string) => void
   onRunCorrectionModelAction: (action: CorrectionModelAction) => void
+  onCancelModelOperation: () => void
   t: Translator
 }
 
@@ -130,6 +135,7 @@ export function SettingsSheet({
   busyAction,
   controlsDisabled,
   currentModel,
+  selectedModel,
   activeModel,
   selectedModelDetail,
   modelItems,
@@ -148,6 +154,7 @@ export function SettingsSheet({
   correctionModelItems,
   correctionModelSelectionTouched,
   voiceSettingsSaveState,
+  modelOperation,
   onOpenChange,
   onLanguageChange,
   onModelChange,
@@ -159,6 +166,7 @@ export function SettingsSheet({
   onRetryVoiceSettings,
   onCorrectionModelChange,
   onRunCorrectionModelAction,
+  onCancelModelOperation,
   t,
 }: SettingsSheetProps) {
   const [correctionDeleteOpen, setCorrectionDeleteOpen] = useState(false)
@@ -172,6 +180,26 @@ export function SettingsSheet({
           "settings.correction_lite_detail",
           "Smallest recommended option; good enough for everyday conservative correction."
         )
+  const speechOperation =
+    modelOperation?.kind === "speech" && modelOperation.model === activeModel
+      ? modelOperation
+      : null
+  const correctionOperation =
+    modelOperation?.kind === "correction" && modelOperation.model === activeCorrectionModel
+      ? modelOperation
+      : null
+  const operationButtonLabel = (operation: ModelOperation) => {
+    if (operation.phase === "cancelling") {
+      return t("model_operation.cancelling", "Cancelling…")
+    }
+    if (operation.action === "update") {
+      return t("model_operation.updating", "Updating…")
+    }
+    if (operation.action === "repair") {
+      return t("model_operation.repairing", "Repairing…")
+    }
+    return t("model_operation.installing_button", "Installing…")
+  }
 
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
@@ -313,6 +341,7 @@ export function SettingsSheet({
                       <Select
                         items={correctionModelItems}
                         value={activeCorrectionModel}
+                        disabled={controlsDisabled}
                         onValueChange={(value) => {
                           if (value) onCorrectionModelChange(value)
                         }}
@@ -384,19 +413,35 @@ export function SettingsSheet({
                       </Alert>
                     )}
                   </FieldGroup>
+                  {correctionOperation && (
+                    <div className="mt-4 rounded-lg border bg-muted/30 p-3">
+                      <ModelOperationProgress
+                        operation={correctionOperation}
+                        onCancel={onCancelModelOperation}
+                        t={t}
+                      />
+                    </div>
+                  )}
                 </CardContent>
                 <CardFooter className="flex flex-wrap gap-2">
-                  {correctionModelSelectionTouched ? (
-                    <Button onClick={() => onRunCorrectionModelAction("use-model")} disabled={controlsDisabled}>
-                      <SpinnerOrIcon busy={busyAction === "correction-model:use-model"} icon={CheckCircle2Icon} />
-                      {t("settings.use", "Use")}
+                  {correctionOperation ? (
+                    <Button disabled>
+                      <SpinnerOrIcon busy icon={DownloadIcon} />
+                      {operationButtonLabel(correctionOperation)}
                     </Button>
                   ) : !correctionModel?.installed ? (
                     <Button onClick={() => onRunCorrectionModelAction("install-model")} disabled={controlsDisabled}>
                       <SpinnerOrIcon busy={busyAction === "correction-model:install-model"} icon={DownloadIcon} />
                       {correctionModel && correctionModel.stale_disk_bytes > 0
                         ? t("settings.replace_model", "Replace legacy model")
+                        : correctionModel?.state === "partial"
+                          ? t("model_operation.continue_install", "Continue installation")
                         : t("settings.install_model", "Install model")}
+                    </Button>
+                  ) : correctionModelSelectionTouched ? (
+                    <Button onClick={() => onRunCorrectionModelAction("use-model")} disabled={controlsDisabled}>
+                      <SpinnerOrIcon busy={busyAction === "correction-model:use-model"} icon={CheckCircle2Icon} />
+                      {t("settings.use", "Use")}
                     </Button>
                   ) : null}
                   <DropdownMenu>
@@ -513,6 +558,7 @@ export function SettingsSheet({
                   <Select
                     items={modelItems}
                     value={activeModel}
+                    disabled={controlsDisabled}
                     onValueChange={(value) => {
                       if (!value) {
                         return
@@ -541,27 +587,41 @@ export function SettingsSheet({
                 <Field orientation="horizontal">
                   <FieldContent>
                     <FieldTitle>{t("home.storage", "Storage")}</FieldTitle>
-                    <FieldDescription>{formatBytes(currentModel?.disk_bytes ?? 0)}</FieldDescription>
+                    <FieldDescription>{formatBytes(selectedModel?.disk_bytes ?? 0)}</FieldDescription>
                   </FieldContent>
-                  <Badge variant={readinessVariant(Boolean(currentModel?.installed))}>
-                    {modelStateLabel(currentModel?.state, t)}
+                  <Badge variant={readinessVariant(Boolean(selectedModel?.installed))}>
+                    {modelStateLabel(selectedModel?.state, t)}
                   </Badge>
                 </Field>
                 <Field orientation="horizontal">
                   <FieldContent>
                     <FieldTitle>{t("settings.update", "Update")}</FieldTitle>
                     <FieldDescription>
-                      {currentModel?.update_available ? t("settings.update_available", "An update is available.") : t("settings.no_update", "No update is available.")}
+                      {selectedModel?.update_available ? t("settings.update_available", "An update is available.") : t("settings.no_update", "No update is available.")}
                     </FieldDescription>
                   </FieldContent>
-                  <Badge variant={currentModel?.update_available ? "secondary" : "outline"}>
-                    {currentModel?.update_available ? t("settings.available", "Available") : t("settings.current", "Current")}
+                  <Badge variant={selectedModel?.update_available ? "secondary" : "outline"}>
+                    {selectedModel?.update_available ? t("settings.available", "Available") : t("settings.current", "Current")}
                   </Badge>
                 </Field>
               </FieldGroup>
+              {speechOperation && (
+                <div className="mt-4 rounded-lg border bg-muted/30 p-3">
+                  <ModelOperationProgress
+                    operation={speechOperation}
+                    onCancel={onCancelModelOperation}
+                    t={t}
+                  />
+                </div>
+              )}
             </CardContent>
             <CardFooter className="flex flex-wrap gap-2">
-              {!useModelDisabled ? (
+              {speechOperation ? (
+                <Button disabled>
+                  <SpinnerOrIcon busy icon={DownloadIcon} />
+                  {operationButtonLabel(speechOperation)}
+                </Button>
+              ) : !useModelDisabled ? (
                 <Button onClick={() => onRunModelAction("use")}>
                   <SpinnerOrIcon busy={busyAction === "model:use"} icon={CheckCircle2Icon} />
                   {t("settings.use", "Use")}
@@ -569,7 +629,9 @@ export function SettingsSheet({
               ) : !installModelDisabled ? (
                 <Button onClick={() => onRunModelAction("install")}>
                   <SpinnerOrIcon busy={busyAction === "model:install"} icon={DownloadIcon} />
-                  {t("settings.install", "Install")}
+                  {selectedModel?.state === "partial"
+                    ? t("model_operation.continue_install", "Continue installation")
+                    : t("settings.install", "Install")}
                 </Button>
               ) : !updateModelDisabled ? (
                 <Button onClick={() => onRunModelAction("update")}>

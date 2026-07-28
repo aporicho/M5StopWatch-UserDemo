@@ -11,6 +11,46 @@ export type HelperResult = {
   code: number | null
   stdout: string
   stderr: string
+  cancelled?: boolean
+}
+
+export type ModelOperationProgress = {
+  schema: 1
+  id: string
+  kind: "speech" | "correction"
+  action: "install" | "update" | "repair"
+  model: string
+  phase:
+    | "preparing"
+    | "downloading"
+    | "verifying"
+    | "installing"
+    | "cancelling"
+    | "completed"
+    | "cancelled"
+    | "error"
+  component: "model" | "runtime" | null
+  downloaded_bytes: number
+  total_bytes: number | null
+  percent: number | null
+  cancellable: boolean
+  updated_at: number
+}
+
+export class ModelOperationCancelledError extends Error {
+  constructor() {
+    super("model operation cancelled")
+    this.name = "ModelOperationCancelledError"
+  }
+}
+
+export function modelOperationActive(progress: ModelOperationProgress | null) {
+  return Boolean(
+    progress &&
+      ["preparing", "downloading", "verifying", "installing", "cancelling"].includes(
+        progress.phase
+      )
+  )
 }
 
 export type StatusLine = {
@@ -36,6 +76,13 @@ export type ModelStatus = {
   cache_dir: string
   update_available: boolean
   message: string
+}
+
+export type ModelPreset = {
+  id: string
+  label: string
+  description: string
+  status: ModelStatus
 }
 
 export type VoicePreferences = {
@@ -115,6 +162,7 @@ export type StatusPayload = {
     model: string
   }
   model: ModelStatus
+  models?: ModelPreset[]
   preferences: VoicePreferences
   correction_model: CorrectionModelStatus
   correction_models: CorrectionModelPreset[]
@@ -556,7 +604,16 @@ export async function invokeServiceAction(action: ServiceAction) {
 
 export async function invokeModelAction(action: ModelAction, model: string) {
   const result = await invoke<HelperResult>("model_action", { action, model })
+  if (result.cancelled) throw new ModelOperationCancelledError()
   return parseHelperJson<ModelEnvelope>(result)
+}
+
+export async function getModelOperationStatus() {
+  return invoke<ModelOperationProgress | null>("model_operation_status")
+}
+
+export async function cancelModelOperation(id: string) {
+  await invoke("cancel_model_operation", { id })
 }
 
 export async function saveVoiceSettings(settings: VoicePreferences) {
@@ -571,6 +628,7 @@ export async function invokeCorrectionModelAction(
   model: string
 ) {
   const result = await invoke<HelperResult>("correction_model_action", { action, model })
+  if (result.cancelled) throw new ModelOperationCancelledError()
   return parseHelperJson<VoiceSettingsEnvelope>(result)
 }
 

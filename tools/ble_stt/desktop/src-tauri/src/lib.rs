@@ -1,14 +1,20 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     env,
     ffi::OsStr,
     fs,
+    io::{BufRead, BufReader, Read},
     path::{Path, PathBuf},
-    process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Child, Command, Stdio},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    thread,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
-use tauri::{path::BaseDirectory, Manager};
+use tauri::{path::BaseDirectory, Emitter, Manager};
 
 #[derive(Debug, Clone)]
 struct HelperInvocation {
@@ -24,7 +30,41 @@ struct HelperResult {
     code: Option<i32>,
     stdout: String,
     stderr: String,
+    cancelled: bool,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ModelOperationProgress {
+    schema: u8,
+    id: String,
+    kind: String,
+    action: String,
+    model: String,
+    phase: String,
+    component: Option<String>,
+    downloaded_bytes: u64,
+    total_bytes: Option<u64>,
+    percent: Option<f64>,
+    cancellable: bool,
+    updated_at: f64,
+}
+
+struct ActiveModelOperation {
+    id: String,
+    child: Arc<Mutex<Child>>,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[derive(Default)]
+struct ModelOperationInner {
+    active: Option<ActiveModelOperation>,
+    latest: Option<ModelOperationProgress>,
+}
+
+#[derive(Default)]
+struct ModelOperationState(Mutex<ModelOperationInner>);
+
+const MODEL_PROGRESS_PREFIX: &str = "BLE_STT_MODEL_PROGRESS ";
 
 const TELEMETRY_FILE_NAME: &str = "ble-stt-runtime.json";
 const PERFORMANCE_FILE_NAME: &str = "ble-stt-performance.json";
@@ -215,7 +255,252 @@ where
         code: output.status.code(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        cancelled: false,
     })
+}
+
+fn emit_model_progress(app: &tauri::AppHandle, progress: ModelOperationProgress) {
+    if let Ok(mut inner) = app.state::<ModelOperationState>().0.lock() {
+        inner.latest = Some(progress.clone());
+    }
+    let _ = app.emit("model-operation-progress", progress);
+}
+
+fn parse_model_progress(line: &str) -> Option<ModelOperationProgress> {
+    let start = line.find(MODEL_PROGRESS_PREFIX)? + MODEL_PROGRESS_PREFIX.len();
+    serde_json::from_str(line[start..].trim()).ok()
+}
+
+fn model_operation_id() -> String {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{}-{nanos}", std::process::id())
+}
+
+fn initial_model_progress(
+    id: &str,
+    kind: &str,
+    action: &str,
+    model: &str,
+) -> ModelOperationProgress {
+    ModelOperationProgress {
+        schema: 1,
+        id: id.into(),
+        kind: kind.into(),
+        action: action.into(),
+        model: model.into(),
+        phase: "preparing".into(),
+        component: None,
+        downloaded_bytes: 0,
+        total_bytes: None,
+        percent: None,
+        cancellable: true,
+        updated_at: unix_timestamp(),
+    }
+}
+
+fn terminal_model_progress(
+    app: &tauri::AppHandle,
+    id: &str,
+    kind: &str,
+    action: &str,
+    model: &str,
+    phase: &str,
+) -> ModelOperationProgress {
+    let latest = app
+        .state::<ModelOperationState>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|inner| inner.latest.clone())
+        .filter(|progress| progress.id == id);
+    let mut progress = latest.unwrap_or_else(|| initial_model_progress(id, kind, action, model));
+    progress.phase = phase.into();
+    progress.cancellable = false;
+    progress.updated_at = unix_timestamp();
+    if phase == "completed" {
+        if let Some(total) = progress.total_bytes {
+            progress.downloaded_bytes = total;
+            progress.percent = Some(100.0);
+        }
+    }
+    progress
+}
+
+fn run_managed_model_helper(
+    app: tauri::AppHandle,
+    args: Vec<String>,
+    kind: String,
+    action: String,
+    model: String,
+) -> Result<HelperResult, String> {
+    let helper = resolve_helper(Some(&app))?;
+    let id = model_operation_id();
+    let mut command = Command::new(&helper.program);
+    command.args(&helper.prefix_args).args(args);
+    configure_macos_service_env(&mut command, &helper);
+    configure_bundled_models_env(&mut command, Some(&app), &helper);
+    command
+        .env("BLE_STT_MODEL_PROGRESS", "1")
+        .env("BLE_STT_MODEL_OPERATION_ID", &id)
+        .env("BLE_STT_MODEL_KIND", &kind)
+        .env("BLE_STT_MODEL_ACTION", &action)
+        .env("BLE_STT_MODEL_NAME", &model)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(path) = helper.python_path {
+        command.env("PYTHONPATH", path);
+    }
+    if let Some(path) = helper.workdir {
+        command.current_dir(path);
+    }
+
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let child = {
+        let state = app.state::<ModelOperationState>();
+        let mut inner = state
+            .0
+            .lock()
+            .map_err(|_| "model operation state is unavailable".to_string())?;
+        if inner.active.is_some() {
+            return Err("another model operation is already running".into());
+        }
+        let spawned = command
+            .spawn()
+            .map_err(|error| format!("failed to run helper: {error}"))?;
+        let child = Arc::new(Mutex::new(spawned));
+        inner.active = Some(ActiveModelOperation {
+            id: id.clone(),
+            child: Arc::clone(&child),
+            cancelled: Arc::clone(&cancelled),
+        });
+        child
+    };
+    emit_model_progress(&app, initial_model_progress(&id, &kind, &action, &model));
+
+    let (stdout, stderr) = {
+        let mut process = child
+            .lock()
+            .map_err(|_| "model helper process is unavailable".to_string())?;
+        (process.stdout.take(), process.stderr.take())
+    };
+    let stdout_thread = thread::spawn(move || {
+        let mut output = String::new();
+        if let Some(mut stream) = stdout {
+            let _ = stream.read_to_string(&mut output);
+        }
+        output
+    });
+    let progress_app = app.clone();
+    let stderr_thread = thread::spawn(move || {
+        let mut output = String::new();
+        if let Some(stream) = stderr {
+            for line in BufReader::new(stream).lines().map_while(Result::ok) {
+                if let Some(progress) = parse_model_progress(&line) {
+                    emit_model_progress(&progress_app, progress);
+                    if let Some(prefix) = line.split(MODEL_PROGRESS_PREFIX).next() {
+                        if !prefix.trim().is_empty() {
+                            output.push_str(prefix);
+                            output.push('\n');
+                        }
+                    }
+                } else {
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+            }
+        }
+        output
+    });
+
+    let status = loop {
+        let maybe_status = child
+            .lock()
+            .map_err(|_| "model helper process is unavailable".to_string())?
+            .try_wait()
+            .map_err(|error| format!("failed to wait for model helper: {error}"))?;
+        if let Some(status) = maybe_status {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    if let Ok(mut inner) = app.state::<ModelOperationState>().0.lock() {
+        if inner.active.as_ref().map(|active| active.id.as_str()) == Some(id.as_str()) {
+            inner.active = None;
+        }
+    }
+
+    let was_cancelled = cancelled.load(Ordering::SeqCst);
+    let phase = if was_cancelled {
+        "cancelled"
+    } else if status.success() {
+        "completed"
+    } else {
+        "error"
+    };
+    emit_model_progress(
+        &app,
+        terminal_model_progress(&app, &id, &kind, &action, &model, phase),
+    );
+    Ok(HelperResult {
+        ok: status.success() && !was_cancelled,
+        code: status.code(),
+        stdout,
+        stderr,
+        cancelled: was_cancelled,
+    })
+}
+
+#[tauri::command]
+fn model_operation_status(app: tauri::AppHandle) -> Option<ModelOperationProgress> {
+    app.state::<ModelOperationState>()
+        .0
+        .lock()
+        .ok()
+        .and_then(|inner| inner.latest.clone())
+}
+
+#[tauri::command]
+fn cancel_model_operation(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let (child, cancelled, progress) = {
+        let state = app.state::<ModelOperationState>();
+        let mut inner = state
+            .0
+            .lock()
+            .map_err(|_| "model operation state is unavailable".to_string())?;
+        let active = inner
+            .active
+            .as_ref()
+            .filter(|active| active.id == id)
+            .ok_or_else(|| "model operation is no longer running".to_string())?;
+        if !inner
+            .latest
+            .as_ref()
+            .is_some_and(|progress| progress.id == id && progress.cancellable)
+        {
+            return Err("model operation can no longer be cancelled".into());
+        }
+        let child = Arc::clone(&active.child);
+        let cancelled = Arc::clone(&active.cancelled);
+        let mut progress = inner.latest.clone().expect("checked above");
+        progress.phase = "cancelling".into();
+        progress.cancellable = false;
+        progress.updated_at = unix_timestamp();
+        inner.latest = Some(progress.clone());
+        (child, cancelled, progress)
+    };
+    emit_model_progress(&app, progress);
+    cancelled.store(true, Ordering::SeqCst);
+    let result = child
+        .lock()
+        .map_err(|_| "model helper process is unavailable".to_string())?
+        .kill()
+        .map_err(|error| format!("could not cancel model operation: {error}"));
+    result
 }
 
 fn run_helper_passthrough(args: &[String]) -> Result<i32, String> {
@@ -462,6 +747,7 @@ fn helper_telemetry(_app: tauri::AppHandle) -> Result<HelperResult, String> {
         code: Some(0),
         stdout: format!("{stdout}\n"),
         stderr: String::new(),
+        cancelled: false,
     })
 }
 
@@ -496,6 +782,7 @@ fn helper_performance(_app: tauri::AppHandle) -> Result<HelperResult, String> {
         code: Some(0),
         stdout: format!("{stdout}\n"),
         stderr: String::new(),
+        cancelled: false,
     })
 }
 
@@ -530,6 +817,7 @@ fn performance_clear(_app: tauri::AppHandle) -> Result<HelperResult, String> {
         code: Some(0),
         stdout: format!("{stdout}\n"),
         stderr: String::new(),
+        cancelled: false,
     })
 }
 
@@ -582,7 +870,9 @@ async fn model_action(
     model: Option<String>,
 ) -> Result<HelperResult, String> {
     validate_model_action(action.as_str())?;
+    let managed = matches!(action.as_str(), "install" | "update" | "repair");
     let mut args = vec!["models".to_string(), action.clone(), "--json".to_string()];
+    let operation_model = model.clone();
     match action.as_str() {
         "use" | "install" | "update" | "repair" | "delete" => {
             let model = model.ok_or_else(|| format!("model is required for {action}"))?;
@@ -593,9 +883,21 @@ async fn model_action(
         }
         _ => {}
     }
-    tauri::async_runtime::spawn_blocking(move || run_helper(Some(&app), args))
-        .await
-        .map_err(|error| format!("model action failed to join: {error}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        if managed {
+            run_managed_model_helper(
+                app,
+                args,
+                "speech".into(),
+                action,
+                operation_model.expect("validated model"),
+            )
+        } else {
+            run_helper(Some(&app), args)
+        }
+    })
+    .await
+    .map_err(|error| format!("model action failed to join: {error}"))?
 }
 
 #[tauri::command]
@@ -660,17 +962,24 @@ async fn correction_model_action(
 ) -> Result<HelperResult, String> {
     validate_correction_model_action(action.as_str())?;
     let model = model.ok_or_else(|| format!("model is required for {action}"))?;
+    let managed = matches!(
+        action.as_str(),
+        "install-model" | "update-model" | "repair-model"
+    );
+    let progress_action = action.trim_end_matches("-model").to_string();
     tauri::async_runtime::spawn_blocking(move || {
-        run_helper(
-            Some(&app),
-            [
-                "voice-settings",
-                action.as_str(),
-                "--json",
-                "--model",
-                model.as_str(),
-            ],
-        )
+        let args = vec![
+            "voice-settings".to_string(),
+            action,
+            "--json".to_string(),
+            "--model".to_string(),
+            model.clone(),
+        ];
+        if managed {
+            run_managed_model_helper(app, args, "correction".into(), progress_action, model)
+        } else {
+            run_helper(Some(&app), args)
+        }
     })
     .await
     .map_err(|error| format!("correction model action failed to join: {error}"))?
@@ -728,7 +1037,8 @@ pub fn run() {
         }
     }
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
+        .manage(ModelOperationState::default())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             helper_status,
@@ -746,11 +1056,25 @@ pub fn run() {
             command_reset,
             voice_settings_save,
             correction_model_action,
+            model_operation_status,
+            cancel_model_operation,
             open_permission,
             open_logs
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|handle, event| {
+        if matches!(event, tauri::RunEvent::ExitRequested { .. }) {
+            if let Ok(inner) = handle.state::<ModelOperationState>().0.lock() {
+                if let Some(active) = &inner.active {
+                    active.cancelled.store(true, Ordering::SeqCst);
+                    if let Ok(mut child) = active.child.lock() {
+                        let _ = child.kill();
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]
@@ -793,5 +1117,17 @@ mod tests {
     fn rejects_unknown_correction_model_action() {
         let error = validate_correction_model_action("wipe").unwrap_err();
         assert!(error.contains("unsupported correction model action"));
+    }
+
+    #[test]
+    fn parses_progress_after_terminal_control_text() {
+        let line = concat!(
+            "downloading 42%\rBLE_STT_MODEL_PROGRESS ",
+            r#"{"schema":1,"id":"op-1","kind":"speech","action":"install","model":"medium","phase":"downloading","component":"model","downloaded_bytes":42,"total_bytes":100,"percent":42.0,"cancellable":true,"updated_at":1.0}"#
+        );
+        let progress = parse_model_progress(line).expect("valid progress");
+        assert_eq!(progress.id, "op-1");
+        assert_eq!(progress.downloaded_bytes, 42);
+        assert!(progress.cancellable);
     }
 }

@@ -14,7 +14,7 @@ import urllib.request
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .config import UserConfig, model_cache_dir
 from .preferences import (
@@ -25,6 +25,9 @@ from .preferences import (
     save_voice_preferences,
 )
 from .recognizers import configure_hf_environment
+
+if TYPE_CHECKING:
+    from .model_progress import ModelProgressReporter
 
 
 MAX_CORRECTION_MODEL_BYTES = 1_000_000_000
@@ -134,6 +137,11 @@ def correction_model_path(
 
 def correction_metadata_path(platform_name: str | None = None) -> Path:
     return correction_model_dir(platform_name) / CORRECTION_METADATA_FILE
+
+
+def _correction_repo_cache(preset: CorrectionModelPreset, platform_name: str | None = None) -> Path:
+    name = f"models--{preset.repository.replace('/', '--')}"
+    return correction_model_dir(platform_name) / "hub" / name
 
 
 def correction_runtime_dir(platform_name: str | None = None) -> Path:
@@ -268,15 +276,27 @@ def correction_model_status(
     metadata = _model_metadata(preset, platform_name)
     runtime = llama_server_path(platform_name)
     installed = path.exists() and path.is_file() and path.stat().st_size > 0
+    root = correction_model_dir(platform_name)
+    partial_bytes = max(
+        (
+            _tree_size(_correction_repo_cache(preset, platform_name)),
+            _tree_size(root / "model-staging" / preset.filename),
+        ),
+        default=0,
+    )
     stale_disk_bytes = sum(candidate.stat().st_size for candidate in _stale_model_paths(platform_name))
-    state = "ready" if installed else ("legacy" if stale_disk_bytes else "missing")
+    state = "ready" if installed else ("partial" if partial_bytes else ("legacy" if stale_disk_bytes else "missing"))
     message = (
         f"{preset.display_name} ready"
         if installed
         else (
-            f"legacy correction model found; replace it with {preset.display_name}"
-            if stale_disk_bytes
-            else f"{preset.display_name} is not installed"
+            f"{preset.display_name} download is incomplete; continue installation"
+            if partial_bytes
+            else (
+                f"legacy correction model found; replace it with {preset.display_name}"
+                if stale_disk_bytes
+                else f"{preset.display_name} is not installed"
+            )
         )
     )
     if installed:
@@ -302,7 +322,7 @@ def correction_model_status(
         display_name=preset.display_name,
         state=state,
         installed=installed,
-        disk_bytes=path.stat().st_size if path.exists() else 0,
+        disk_bytes=path.stat().st_size if path.exists() else partial_bytes,
         expected_disk_bytes=preset.expected_bytes,
         stale_disk_bytes=stale_disk_bytes,
         path=str(path),
@@ -365,19 +385,39 @@ def _download_model(
     revision: str,
     destination: Path,
     cache: Path,
+    progress: ModelProgressReporter | None = None,
 ) -> Path:
     configure_hf_environment()
     from huggingface_hub import hf_hub_download
 
-    return Path(
-        hf_hub_download(
-            repo_id=preset.repository,
-            filename=preset.filename,
-            revision=revision,
-            local_dir=destination,
-            cache_dir=cache,
-        )
-    )
+    arguments = {
+        "repo_id": preset.repository,
+        "filename": preset.filename,
+        "revision": revision,
+        "local_dir": destination,
+        "cache_dir": cache,
+    }
+    if progress is None:
+        return Path(hf_hub_download(**arguments))
+    with progress.monitor_download(
+        (cache / f"models--{preset.repository.replace('/', '--')}", destination),
+        preset.expected_bytes,
+        component="model",
+    ):
+        return Path(hf_hub_download(**arguments))
+
+
+def _tree_size(path: Path) -> int:
+    if not path.exists():
+        return 0
+    total = 0
+    for root, _, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                pass
+    return total
 
 
 def _runtime_asset_key(platform_name: str | None = None, machine: str | None = None) -> str:
@@ -392,14 +432,40 @@ def _runtime_asset_key(platform_name: str | None = None, machine: str | None = N
     return key
 
 
-def _download_file(url: str, destination: Path) -> None:
+def _download_file(
+    url: str,
+    destination: Path,
+    progress: ModelProgressReporter | None = None,
+) -> None:
     last_error: Exception | None = None
     for attempt in range(3):
         try:
             request = urllib.request.Request(url, headers={"User-Agent": "M5StopWatch/ble-stt"})
             with urllib.request.urlopen(request, timeout=60) as response:
+                raw_total = response.headers.get("Content-Length")
+                total = int(raw_total) if raw_total and raw_total.isdigit() else None
                 with destination.open("wb") as stream:
-                    shutil.copyfileobj(response, stream, length=1024 * 1024)
+                    downloaded = 0
+                    while chunk := response.read(1024 * 1024):
+                        stream.write(chunk)
+                        downloaded += len(chunk)
+                        if progress:
+                            progress.emit(
+                                "downloading",
+                                component="runtime",
+                                downloaded_bytes=downloaded,
+                                total_bytes=total,
+                                cancellable=True,
+                                force=False,
+                            )
+                if progress:
+                    progress.emit(
+                        "downloading",
+                        component="runtime",
+                        downloaded_bytes=downloaded,
+                        total_bytes=total,
+                        cancellable=True,
+                    )
             return
         except (OSError, urllib.error.URLError) as exc:
             last_error = exc
@@ -434,6 +500,7 @@ def _extract_runtime_archive(archive: Path, destination: Path) -> None:
 def install_correction_runtime(
     platform_name: str | None = None,
     machine: str | None = None,
+    progress: ModelProgressReporter | None = None,
 ) -> Path:
     existing = llama_server_path(platform_name)
     if existing is not None:
@@ -447,7 +514,9 @@ def install_correction_runtime(
         archive = root / asset
         extracted = root / "extracted"
         extracted.mkdir()
-        _download_file(url, archive)
+        _download_file(url, archive, progress)
+        if progress:
+            progress.emit("verifying", component="runtime")
         if sha256_file(archive).casefold() != expected_sha256.casefold():
             raise RuntimeError("downloaded correction runtime failed SHA-256 verification")
         _extract_runtime_archive(archive, extracted)
@@ -519,11 +588,14 @@ def use_correction_model(
 def install_correction_model(
     config: UserConfig | None = None,
     model: str | None = None,
+    progress: ModelProgressReporter | None = None,
 ) -> CorrectionModelStatus:
     config = config or UserConfig()
     preset = correction_model_preset(model, config)
+    if progress:
+        progress.emit("preparing", cancellable=True)
     revision, expected_sha256, expected_size = _remote_metadata(preset)
-    install_correction_runtime()
+    install_correction_runtime(progress=progress)
     destination = correction_model_path(model=preset.id)
     destination.parent.mkdir(parents=True, exist_ok=True)
     root = correction_model_dir()
@@ -531,26 +603,38 @@ def install_correction_model(
     temporary = destination.with_name(f".{destination.name}.installing")
     shutil.rmtree(staging, ignore_errors=True)
     temporary.unlink(missing_ok=True)
+    completed = False
     try:
-        downloaded = _download_model(
+        download_arguments = (
             preset,
             revision or preset.revision,
             staging,
             root / "hub",
         )
+        downloaded = (
+            _download_model(*download_arguments, progress)
+            if progress
+            else _download_model(*download_arguments)
+        )
+        if progress:
+            progress.emit("verifying", component="model")
         if expected_size is not None and downloaded.stat().st_size != expected_size:
             raise RuntimeError("downloaded correction model has an unexpected size")
         actual_sha256 = sha256_file(downloaded)
         if expected_sha256 and actual_sha256.casefold() != expected_sha256.casefold():
             raise RuntimeError("downloaded correction model failed SHA-256 verification")
+        if progress:
+            progress.emit("installing", component="model")
         # local_dir may be backed by a cache link in older huggingface_hub
         # versions. Copy into our own filesystem before deleting Hub caches.
         shutil.copy2(downloaded, temporary)
         temporary.replace(destination)
+        completed = True
     finally:
         temporary.unlink(missing_ok=True)
         shutil.rmtree(staging, ignore_errors=True)
-        shutil.rmtree(root / "hub", ignore_errors=True)
+        if completed:
+            shutil.rmtree(_correction_repo_cache(preset), ignore_errors=True)
     _write_model_metadata(
         preset,
         {
@@ -579,7 +663,7 @@ def _delete_correction_model_files(
     if remove_legacy_if_missing and not was_installed:
         for path in _stale_model_paths():
             path.unlink(missing_ok=True)
-    shutil.rmtree(root / "hub", ignore_errors=True)
+    shutil.rmtree(_correction_repo_cache(preset), ignore_errors=True)
     shutil.rmtree(root / "model-staging", ignore_errors=True)
     _write_model_metadata(preset, None)
 
@@ -597,12 +681,17 @@ def delete_correction_model(
 def repair_correction_model(
     config: UserConfig | None = None,
     model: str | None = None,
+    progress: ModelProgressReporter | None = None,
 ) -> CorrectionModelStatus:
-    return install_correction_model(config, model)
+    config = config or UserConfig()
+    preset = correction_model_preset(model, config)
+    _delete_correction_model_files(preset, remove_legacy_if_missing=False)
+    return install_correction_model(config, preset.id, progress)
 
 
 def update_correction_model(
     config: UserConfig | None = None,
     model: str | None = None,
+    progress: ModelProgressReporter | None = None,
 ) -> CorrectionModelStatus:
-    return install_correction_model(config, model)
+    return install_correction_model(config, model, progress)
