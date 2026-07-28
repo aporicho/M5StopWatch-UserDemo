@@ -1,7 +1,18 @@
-import { KeyboardIcon, PlusIcon, RefreshCwIcon, SaveIcon, SettingsIcon, Trash2Icon, Undo2Icon } from "lucide-react"
+import { KeyboardIcon, PlusIcon, SaveIcon, SettingsIcon, Trash2Icon, Undo2Icon } from "lucide-react"
 import { useMemo, useState } from "react"
 
 import { SpinnerOrIcon } from "@/components/common/spinner-or-icon"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { ButtonGroup } from "@/components/ui/button-group"
@@ -9,8 +20,6 @@ import {
   Card,
   CardAction,
   CardContent,
-  CardDescription,
-  CardFooter,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
@@ -36,7 +45,6 @@ import {
 import {
   Sheet,
   SheetContent,
-  SheetDescription,
   SheetFooter,
   SheetHeader,
   SheetTitle,
@@ -49,10 +57,10 @@ import {
   COMMAND_ACTION_IDS,
   type CommandHistoryItem,
   blankCommandEntry,
+  commandReasonLabel,
   commandAsMappingEntry,
   commandToolsEnvelope,
   commandWithMappingEntry,
-  formatUnixTime,
   mappingActionLabel,
   mappingActionSummary,
   withMappingAction,
@@ -66,7 +74,6 @@ type CommandPageProps = {
   history: CommandHistoryItem[]
   busyAction: string | null
   refreshing: boolean
-  onRefresh: () => void
   onSaveEntries: (entries: CommandEntry[]) => Promise<boolean>
   onReset: () => void
   onClearHistory: () => void
@@ -96,13 +103,13 @@ export function CommandPage({
   history,
   busyAction,
   refreshing,
-  onRefresh,
   onSaveEntries,
   onReset,
   onClearHistory,
   t,
 }: CommandPageProps) {
   const [draftCommand, setDraftCommand] = useState<CommandEntry | null>(null)
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const disabled = busyAction !== null || refreshing
   const saving = busyAction === "commands:save"
   const tools = useMemo(() => (envelope ? commandToolsEnvelope(envelope) : null), [envelope])
@@ -149,6 +156,7 @@ export function CommandPage({
     }
     const saved = await onSaveEntries(entries.filter((entry) => entry.id !== draftCommand.id))
     if (saved) {
+      setDeleteConfirmOpen(false)
       setDraftCommand(null)
     }
   }
@@ -159,7 +167,6 @@ export function CommandPage({
         <Card className="min-h-0">
           <CardHeader>
             <CardTitle>{t("commands.title", "Commands")}</CardTitle>
-            <CardDescription>{t("commands.loading_description", "Loading speech command configuration.")}</CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-3">
             <Skeleton className="h-10 w-full" />
@@ -171,18 +178,11 @@ export function CommandPage({
     )
   }
 
-  const updatedAt = envelope.commands.updated_at
-    ? formatUnixTime(envelope.commands.updated_at)
-    : t("mapping.defaults", "defaults")
-
   return (
     <section className="grid min-h-0 flex-1 gap-3 overflow-hidden p-px md:grid-cols-[1fr_22rem]">
       <Card className="min-h-0 md:flex md:h-full md:flex-col">
         <CardHeader className="shrink-0">
-          <div>
-            <CardTitle>{t("commands.title", "Commands")}</CardTitle>
-            <CardDescription>{t("commands.description", "Map short spoken phrases to watch actions.")}</CardDescription>
-          </div>
+          <CardTitle>{t("commands.title", "Commands")}</CardTitle>
           <CardAction>
             <ButtonGroup className="flex-wrap">
               <Button
@@ -196,20 +196,30 @@ export function CommandPage({
                 <PlusIcon data-icon="inline-start" />
                 {t("commands.add", "Add")}
               </Button>
-              <Button variant="outline" onClick={onRefresh} disabled={disabled}>
-                <SpinnerOrIcon busy={refreshing} icon={RefreshCwIcon} />
-                {t("common.refresh", "Refresh")}
-              </Button>
-              <Button variant="outline" onClick={onReset} disabled={disabled}>
-                <SpinnerOrIcon busy={busyAction === "commands:reset"} icon={Undo2Icon} />
-                {t("common.reset", "Reset")}
-              </Button>
+              <AlertDialog>
+                <AlertDialogTrigger render={<Button variant="outline" disabled={disabled} />}>
+                  <SpinnerOrIcon busy={busyAction === "commands:reset"} icon={Undo2Icon} />
+                  {t("common.reset", "Reset")}
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t("commands.reset_title", "Reset all commands?")}</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      {t("commands.reset_description", "Your custom commands will be replaced with the defaults.")}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t("common.cancel", "Cancel")}</AlertDialogCancel>
+                    <AlertDialogAction onClick={onReset}>{t("common.reset", "Reset")}</AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             </ButtonGroup>
           </CardAction>
         </CardHeader>
         <CardContent className="min-h-0 md:flex-1">
           {entries.length ? (
-            <ScrollArea className="h-[calc(100vh-21rem)] rounded-md border bg-background md:h-full">
+            <ScrollArea className="h-[calc(100vh-17rem)] rounded-md border bg-background md:h-full">
               <Table>
                 <TableHeader>
                   <TableRow>
@@ -245,7 +255,7 @@ export function CommandPage({
                         <TableCell className="align-middle text-right">
                           <Button size="sm" variant="outline" onClick={() => openEditor(entry)}>
                             <SettingsIcon data-icon="inline-start" />
-                            {t("mapping.open_editor", "Open editor")}
+                            {t("common.edit", "Edit")}
                           </Button>
                         </TableCell>
                       </TableRow>
@@ -266,20 +276,11 @@ export function CommandPage({
             </Empty>
           )}
         </CardContent>
-        <CardFooter className="shrink-0 justify-between text-sm text-muted-foreground">
-          <span>
-            {t("mapping.revision", "Revision")} {envelope.commands.revision} · {t("mapping.updated", "Updated")} {updatedAt}
-          </span>
-          <span>{t("commands.saved_hint", "Saved commands sync to the watch while connected")}</span>
-        </CardFooter>
       </Card>
 
       <Card className="min-h-0 md:flex md:h-full md:flex-col">
         <CardHeader>
-          <div>
-            <CardTitle>{t("commands.last_result", "Command history")}</CardTitle>
-            <CardDescription>{t("commands.last_result_description", "Recent command-mode recognition results.")}</CardDescription>
-          </div>
+          <CardTitle>{t("commands.last_result", "Command history")}</CardTitle>
           <CardAction>
             <Button size="sm" variant="ghost" onClick={onClearHistory} disabled={!history.length}>
               <Trash2Icon data-icon="inline-start" />
@@ -289,7 +290,7 @@ export function CommandPage({
         </CardHeader>
         <CardContent className="min-h-0 md:flex-1">
           {history.length ? (
-            <ScrollArea className="h-[calc(100vh-21rem)] md:h-full">
+            <ScrollArea className="h-[calc(100vh-17rem)] md:h-full">
               <Table>
                 <TableBody>
                   {history.map((item) => (
@@ -303,7 +304,7 @@ export function CommandPage({
                       <TableCell className="w-28 align-top text-right">
                         <div className="flex flex-col items-end gap-1">
                           <Badge variant={item.matched ? "default" : "secondary"}>
-                            {item.matched ? item.phrase : item.reason}
+                            {item.matched ? item.phrase : commandReasonLabel(item.reason, t)}
                           </Badge>
                           <span className="text-sm text-muted-foreground">
                             {Math.round(item.score * 100)}%
@@ -333,13 +334,15 @@ export function CommandPage({
         <SheetContent className="w-[min(520px,calc(100vw-2rem))] sm:max-w-lg">
           <SheetHeader>
             <SheetTitle>{draftCommand?.phrase || t("commands.edit_title", "Edit command")}</SheetTitle>
-            <SheetDescription>{t("commands.edit_description", "Choose what this spoken phrase does.")}</SheetDescription>
           </SheetHeader>
 
           {draftCommand && (
             <div className="min-h-0 flex-1 overflow-y-auto px-4 pb-4">
               <FieldGroup>
-                <Field data-invalid={!draftCommand.phrase.trim() ? true : undefined}>
+                <Field
+                  data-invalid={!draftCommand.phrase.trim() ? true : undefined}
+                  data-disabled={disabled ? true : undefined}
+                >
                   <FieldLabel>{t("commands.phrase", "Phrase")}</FieldLabel>
                   <Input
                     value={draftCommand.phrase}
@@ -350,7 +353,7 @@ export function CommandPage({
                   />
                   <FieldDescription>{t("commands.phrase_description", "Say this while holding the left button.")}</FieldDescription>
                 </Field>
-                <Field>
+                <Field data-disabled={disabled ? true : undefined}>
                   <FieldLabel>{t("commands.aliases", "Aliases")}</FieldLabel>
                   <Input
                     value={draftCommand.aliases.join(", ")}
@@ -368,7 +371,7 @@ export function CommandPage({
                   />
                   <FieldDescription>{t("commands.aliases_description", "Separate alternatives with commas.")}</FieldDescription>
                 </Field>
-                <Field>
+                <Field data-disabled={disabled ? true : undefined}>
                   <FieldLabel>{t("commands.enabled", "Enabled")}</FieldLabel>
                   <ToggleGroup
                     aria-label={t("commands.enabled", "Enabled")}
@@ -391,7 +394,7 @@ export function CommandPage({
                     </ToggleGroupItem>
                   </ToggleGroup>
                 </Field>
-                <Field>
+                <Field data-disabled={disabled ? true : undefined}>
                   <FieldLabel>{t("mapping.action", "Action")}</FieldLabel>
                   <Select
                     items={actionItems}
@@ -422,7 +425,7 @@ export function CommandPage({
                     </SelectContent>
                   </Select>
                 </Field>
-                <Field>
+                <Field data-disabled={disabled ? true : undefined}>
                   <FieldTitle>{t("mapping.parameters", "Parameters")}</FieldTitle>
                   <MappingParameterEditor
                     entry={commandAsMappingEntry(draftCommand)}
@@ -440,11 +443,26 @@ export function CommandPage({
 
           <SheetFooter>
             {draftCommand && draftExists && (
-              <Button variant="destructive" onClick={() => void deleteDraft()} disabled={disabled}>
-                <Trash2Icon data-icon="inline-start" />
-                {t("commands.delete", "Delete")}
-              </Button>
+              <AlertDialog open={deleteConfirmOpen} onOpenChange={setDeleteConfirmOpen}>
+                <AlertDialogTrigger render={<Button variant="destructive" disabled={disabled} />}>
+                  <Trash2Icon data-icon="inline-start" />
+                  {t("common.delete", "Delete")}
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{t("commands.delete_title", "Delete this command?")}</AlertDialogTitle>
+                    <AlertDialogDescription>{t("commands.delete_description", "This cannot be undone.")}</AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{t("common.cancel", "Cancel")}</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => void deleteDraft()}>{t("common.delete", "Delete")}</AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             )}
+            <Button variant="outline" onClick={() => setDraftCommand(null)} disabled={disabled}>
+              {t("common.cancel", "Cancel")}
+            </Button>
             <Button onClick={() => void saveDraft()} disabled={disabled || draftInvalid}>
               <SpinnerOrIcon busy={saving} icon={SaveIcon} />
               {t("common.save", "Save")}

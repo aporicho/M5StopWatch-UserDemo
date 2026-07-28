@@ -13,7 +13,6 @@ import {
   MODEL_OPTIONS,
   type Notice,
   type PageKey,
-  actionTitle,
   commandHistory,
   deriveDailyState,
   dictationHistory,
@@ -24,6 +23,7 @@ import {
   recentActivity,
   telemetryRenderKey,
 } from "@/lib/app-view-model"
+import { AutoSaveQueue, type AutoSaveState } from "@/lib/auto-save"
 import {
   formatBytes,
   clearPerformance,
@@ -106,13 +106,13 @@ function App() {
   const [language, setLanguage] = useState<LanguageCode>(() => detectInitialLanguage())
   const [mappingEnvelope, setMappingEnvelope] = useState<MappingEnvelope | null>(null)
   const [mappingEntries, setMappingEntries] = useState<MappingEntry[]>([])
-  const [mappingTouched, setMappingTouched] = useState(false)
   const [mappingRefreshing, setMappingRefreshing] = useState(false)
   const [commandEnvelope, setCommandEnvelope] = useState<CommandEnvelope | null>(null)
   const [commandEntries, setCommandEntries] = useState<CommandEntry[]>([])
   const [commandRefreshing, setCommandRefreshing] = useState(false)
   const [voicePreferences, setVoicePreferences] = useState<VoicePreferences | null>(null)
   const [voiceSettingsTouched, setVoiceSettingsTouched] = useState(false)
+  const [voiceSettingsSaveState, setVoiceSettingsSaveState] = useState<AutoSaveState>("idle")
   const [dictationHistoryClearedAt, setDictationHistoryClearedAt] = useState(() =>
     historyCutoff(DICTATION_HISTORY_CUTOFF_KEY)
   )
@@ -128,6 +128,8 @@ function App() {
   const latestTelemetryRenderKeyRef = useRef("")
   const permissionRestartInFlight = useRef(false)
   const logEndRef = useRef<HTMLDivElement | null>(null)
+  const voicePreferencesRef = useRef<VoicePreferences | null>(null)
+  const voiceSettingsSaveQueueRef = useRef<AutoSaveQueue<VoicePreferences> | null>(null)
 
   const status = statusEnvelope?.status ?? null
   const telemetry = telemetryEnvelope?.telemetry ?? null
@@ -163,7 +165,7 @@ function App() {
     () => commandHistory(logEntries, telemetry, commandHistoryClearedAt),
     [commandHistoryClearedAt, logEntries, telemetry]
   )
-  const activity = useMemo(() => recentActivity(logEntries), [logEntries])
+  const activity = useMemo(() => recentActivity(logEntries, t), [logEntries, t])
 
   const modelItems = useMemo(() => {
     const items: Array<{ label: string; value: string }> = MODEL_OPTIONS.map((model) => ({
@@ -225,7 +227,6 @@ function App() {
     latestMappingRef.current = nextMapping
     setMappingEnvelope(nextMapping)
     setMappingEntries(nextMapping.mapping.entries)
-    setMappingTouched(false)
   }, [])
 
   const applyCommandSnapshot = useCallback((nextCommands: CommandEnvelope) => {
@@ -240,17 +241,46 @@ function App() {
       level: Notice["level"] = "info",
       toastType?: "success" | "info" | "warning" | "error"
     ) => {
-      setNotice({ level, message })
-      if (toastType) {
-        toast.add({
-          title: level === "error" ? t("notice.action_failed", "Action failed") : "M5StopWatch",
-          description: message,
-          type: toastType,
-        })
+      const visibleMessage = level === "error"
+        ? t("notice.action_failed_description", "The action could not be completed. Open Diagnostics for details.")
+        : message
+      if (level === "error") console.error(message)
+      setNotice(level === "error" ? { level, message: visibleMessage } : null)
+      // Errors stay visible in the page-level alert until the next successful
+      // refresh. Showing the same text in a transient toast only duplicates the
+      // hierarchy and can cover the primary controls in a small window.
+      if (toastType && level !== "error") {
+        toast.add(
+          { title: visibleMessage, type: toastType }
+        )
       }
     },
     [t]
   )
+  const showNoticeRef = useRef(showNotice)
+  showNoticeRef.current = showNotice
+
+  if (!voiceSettingsSaveQueueRef.current) {
+    voiceSettingsSaveQueueRef.current = new AutoSaveQueue<VoicePreferences>({
+      delayMs: 500,
+      read: () => voicePreferencesRef.current,
+      save: async (preferences) => {
+        const payload = await saveVoiceSettings(preferences)
+        if (!payload.ok) throw new Error(payload.message || "could not save voice settings")
+        return payload.settings
+      },
+      onSaved: (preferences) => {
+        voicePreferencesRef.current = preferences
+        setVoicePreferences(preferences)
+        setVoiceSettingsTouched(false)
+      },
+      onStateChange: setVoiceSettingsSaveState,
+      onError: (error) => {
+        setVoiceSettingsTouched(true)
+        showNoticeRef.current(errorMessage(error), "error", "error")
+      },
+    })
+  }
 
   const refreshMappings = useCallback(
     async ({ notifyErrors = false }: { notifyErrors?: boolean } = {}) => {
@@ -296,7 +326,7 @@ function App() {
         showNotice("input permission granted; restarting service", "info")
         const payload = await invokeServiceAction("restart")
         showNotice(
-          payload.message,
+          payload.ok ? t("notice.action_completed", "Done.") : payload.message,
           payload.ok ? "info" : "error",
           payload.ok ? "success" : "error"
         )
@@ -314,7 +344,7 @@ function App() {
         permissionRestartInFlight.current = false
       }
     },
-    [applySnapshots, showNotice]
+    [applySnapshots, showNotice, t]
   )
 
   const refreshAll = useCallback(
@@ -438,12 +468,15 @@ function App() {
   useEffect(() => {
     if (!voiceSettingsTouched && status?.preferences) {
       setVoicePreferences(status.preferences)
+      voicePreferencesRef.current = status.preferences
     }
   }, [status?.preferences, voiceSettingsTouched])
 
   useEffect(() => {
     persistLanguage(language)
   }, [language])
+
+  useEffect(() => () => voiceSettingsSaveQueueRef.current?.dispose(), [])
 
   useEffect(() => {
     if (!autoFollowLogs || !diagnosticsOpen) {
@@ -460,7 +493,7 @@ function App() {
       try {
         const payload = await invokeServiceAction(action)
         showNotice(
-          payload.message,
+          payload.ok ? t("notice.action_completed", "Done.") : payload.message,
           payload.ok ? "info" : "error",
           payload.ok ? "success" : "error"
         )
@@ -474,7 +507,7 @@ function App() {
         setBusyAction(null)
       }
     },
-    [refreshAll, showNotice]
+    [refreshAll, showNotice, t]
   )
 
   const runModelAction = useCallback(
@@ -489,10 +522,9 @@ function App() {
         const serviceWasRunning = Boolean(latestStatusRef.current?.status.service.running)
         const serviceWasInstalled = Boolean(latestStatusRef.current?.status.service.installed)
 
-        showNotice(`${actionTitle(action)} ${model}`, "info")
         const payload = await invokeModelAction(action, model)
         showNotice(
-          modelActionMessage(payload),
+          payload.ok ? t("notice.action_completed", "Done.") : modelActionMessage(payload),
           payload.ok ? "info" : "error",
           payload.ok ? "success" : "error"
         )
@@ -504,20 +536,12 @@ function App() {
         if (payload.ok && action === "use" && serviceWasInstalled) {
           showNotice("model changed; updating service", "info")
           const install = await invokeServiceAction("install")
-          showNotice(
-            install.message,
-            install.ok ? "info" : "error",
-            install.ok ? "success" : "error"
-          )
+          if (!install.ok) showNotice(install.message, "error", "error")
           if (install.ok) {
             await sleep(SERVICE_SETTLE_MS)
             if (!serviceWasRunning) {
               const stop = await invokeServiceAction("stop")
-              showNotice(
-                stop.message,
-                stop.ok ? "info" : "error",
-                stop.ok ? "success" : "error"
-              )
+              if (!stop.ok) showNotice(stop.message, "error", "error")
             }
           }
         } else if (
@@ -527,11 +551,7 @@ function App() {
         ) {
           showNotice("model changed; restarting service", "info")
           const restart = await invokeServiceAction("restart")
-          showNotice(
-            restart.message,
-            restart.ok ? "info" : "error",
-            restart.ok ? "success" : "error"
-          )
+          if (!restart.ok) showNotice(restart.message, "error", "error")
           if (restart.ok) {
             await sleep(SERVICE_SETTLE_MS)
           }
@@ -544,39 +564,38 @@ function App() {
         setBusyAction(null)
       }
     },
-    [activeModel, refreshAll, showNotice]
+    [activeModel, refreshAll, showNotice, t]
   )
 
   const changeVoicePreferences = useCallback((preferences: VoicePreferences) => {
+    voicePreferencesRef.current = preferences
     setVoicePreferences(preferences)
     setVoiceSettingsTouched(true)
+    voiceSettingsSaveQueueRef.current?.changed()
   }, [])
 
-  const saveCurrentVoiceSettings = useCallback(async () => {
-    if (!voicePreferences) return
-    setBusyAction("voice-settings:save")
-    try {
-      const payload = await saveVoiceSettings(voicePreferences)
-      if (!payload.ok) throw new Error(payload.message || "could not save voice settings")
-      setVoicePreferences(payload.settings)
-      setVoiceSettingsTouched(false)
-      showNotice(
-        t("settings.voice_settings_saved", "Voice settings saved. They apply to the next dictation."),
-        "info",
-        "success"
-      )
-      await refreshAll({ notifyErrors: true })
-    } catch (error) {
-      showNotice(errorMessage(error), "error", "error")
-    } finally {
-      setBusyAction(null)
-    }
-  }, [refreshAll, showNotice, t, voicePreferences])
+  const persistPendingVoiceSettings = useCallback(
+    () => voiceSettingsSaveQueueRef.current?.flush() ?? Promise.resolve(true),
+    []
+  )
+
+  const changeSettingsOpen = useCallback(
+    async (open: boolean) => {
+      if (open) {
+        setSettingsOpen(true)
+        return
+      }
+      if (voiceSettingsTouched && !(await persistPendingVoiceSettings())) return
+      setSettingsOpen(false)
+    },
+    [persistPendingVoiceSettings, voiceSettingsTouched]
+  )
 
   const runCorrectionModelAction = useCallback(
     async (action: CorrectionModelAction) => {
       const model = activeCorrectionModel
       if (!model) return
+      if (voiceSettingsTouched && !(await voiceSettingsSaveQueueRef.current?.flush())) return
       setBusyAction(`correction-model:${action}`)
       const serviceWasRunning = Boolean(latestStatusRef.current?.status.service.running)
       try {
@@ -587,11 +606,13 @@ function App() {
         const payload = await invokeCorrectionModelAction(action, model)
         if (!payload.ok) throw new Error(payload.message || payload.correction_model.message)
         setVoicePreferences(payload.settings)
+        voicePreferencesRef.current = payload.settings
         setVoiceSettingsTouched(false)
+        voiceSettingsSaveQueueRef.current?.synchronize()
         if (action === "use-model") {
           setCorrectionModelSelectionTouched(false)
         }
-        showNotice(payload.correction_model.message, "info", "success")
+        showNotice(t("notice.action_completed", "Done."), "info", "success")
       } catch (error) {
         showNotice(errorMessage(error), "error", "error")
       } finally {
@@ -607,7 +628,7 @@ function App() {
         setBusyAction(null)
       }
     },
-    [activeCorrectionModel, refreshAll, showNotice]
+    [activeCorrectionModel, refreshAll, showNotice, t, voiceSettingsTouched]
   )
 
   const requestPermission = useCallback(
@@ -616,7 +637,7 @@ function App() {
       try {
         const payload = await openPermissionPanel(kind)
         showNotice(
-          payload.message,
+          payload.ok ? t("settings.system_settings_opened", "System Settings opened.") : payload.message,
           payload.ok ? "info" : "error",
           payload.ok ? "success" : "error"
         )
@@ -627,11 +648,7 @@ function App() {
         ) {
           showNotice("input permission granted; restarting service", "info")
           const restart = await invokeServiceAction("restart")
-          showNotice(
-            restart.message,
-            restart.ok ? "info" : "error",
-            restart.ok ? "success" : "error"
-          )
+          if (!restart.ok) showNotice(restart.message, "error", "error")
           if (restart.ok) {
             await sleep(SERVICE_SETTLE_MS)
           }
@@ -643,58 +660,20 @@ function App() {
         setBusyAction(null)
       }
     },
-    [refreshAll, showNotice]
+    [refreshAll, showNotice, t]
   )
 
-  const updateMappingEntry = useCallback((entry: MappingEntry) => {
-    setMappingEntries((currentEntries) => {
-      const nextEntry = {
-        ...entry,
-        flags: entry.flags ?? 0,
-      }
-      const index = currentEntries.findIndex((item) => item.event === nextEntry.event)
-      if (index === -1) {
-        return [...currentEntries, nextEntry]
-      }
-      const nextEntries = [...currentEntries]
-      nextEntries[index] = nextEntry
-      return nextEntries
-    })
-    setMappingTouched(true)
-  }, [])
-
-  const saveEventMappings = useCallback(async () => {
+  const saveEventMapping = useCallback(async (entry: MappingEntry) => {
     setBusyAction("mapping:save")
     try {
-      const payload = await saveMappings(mappingEntries)
+      const normalized = { ...entry, flags: entry.flags ?? 0 }
+      const exists = mappingEntries.some((item) => item.event === normalized.event)
+      const nextEntries = exists
+        ? mappingEntries.map((item) => (item.event === normalized.event ? normalized : item))
+        : [...mappingEntries, normalized]
+      const payload = await saveMappings(nextEntries)
       applyMappingSnapshot(payload)
-      showNotice("event map saved", "info", "success")
-    } catch (error) {
-      showNotice(errorMessage(error), "error", "error")
-    } finally {
-      setBusyAction(null)
-    }
-  }, [applyMappingSnapshot, mappingEntries, showNotice])
-
-  const resetEventMappings = useCallback(async () => {
-    setBusyAction("mapping:reset")
-    try {
-      const payload = await resetMappings()
-      applyMappingSnapshot(payload)
-      showNotice("event map reset", "info", "success")
-    } catch (error) {
-      showNotice(errorMessage(error), "error", "error")
-    } finally {
-      setBusyAction(null)
-    }
-  }, [applyMappingSnapshot, showNotice])
-
-  const saveCommandMappings = useCallback(async (nextEntries: CommandEntry[]) => {
-    setBusyAction("commands:save")
-    try {
-      const payload = await saveCommands(nextEntries)
-      applyCommandSnapshot(payload)
-      showNotice("commands saved", "info", "success")
+      showNotice(t("mapping.saved", "Gesture saved."), "info", "success")
       return true
     } catch (error) {
       showNotice(errorMessage(error), "error", "error")
@@ -702,20 +681,48 @@ function App() {
     } finally {
       setBusyAction(null)
     }
-  }, [applyCommandSnapshot, showNotice])
+  }, [applyMappingSnapshot, mappingEntries, showNotice, t])
+
+  const resetEventMappings = useCallback(async () => {
+    setBusyAction("mapping:reset")
+    try {
+      const payload = await resetMappings()
+      applyMappingSnapshot(payload)
+      showNotice(t("mapping.reset_done", "Gestures reset."), "info", "success")
+    } catch (error) {
+      showNotice(errorMessage(error), "error", "error")
+    } finally {
+      setBusyAction(null)
+    }
+  }, [applyMappingSnapshot, showNotice, t])
+
+  const saveCommandMappings = useCallback(async (nextEntries: CommandEntry[]) => {
+    setBusyAction("commands:save")
+    try {
+      const payload = await saveCommands(nextEntries)
+      applyCommandSnapshot(payload)
+      showNotice(t("commands.saved", "Command saved."), "info", "success")
+      return true
+    } catch (error) {
+      showNotice(errorMessage(error), "error", "error")
+      return false
+    } finally {
+      setBusyAction(null)
+    }
+  }, [applyCommandSnapshot, showNotice, t])
 
   const resetCommandMappings = useCallback(async () => {
     setBusyAction("commands:reset")
     try {
       const payload = await resetCommands()
       applyCommandSnapshot(payload)
-      showNotice("commands reset", "info", "success")
+      showNotice(t("commands.reset_done", "Commands reset."), "info", "success")
     } catch (error) {
       showNotice(errorMessage(error), "error", "error")
     } finally {
       setBusyAction(null)
     }
-  }, [applyCommandSnapshot, showNotice])
+  }, [applyCommandSnapshot, showNotice, t])
 
   const openLogs = useCallback(async () => {
     setBusyAction("logs")
@@ -755,13 +762,13 @@ function App() {
           2
         )
       )
-      showNotice("diagnostics copied", "info", "success")
+      showNotice(t("diagnostics.copied", "Diagnostics copied."), "info", "success")
     } catch (error) {
       showNotice(errorMessage(error), "error", "error")
     } finally {
       setBusyAction(null)
     }
-  }, [performance, showNotice])
+  }, [performance, showNotice, t])
 
   const modelInstalled = Boolean(currentModel?.installed)
   const deleteModelDisabled =
@@ -827,6 +834,22 @@ function App() {
     diagnostics: t("action.open_diagnostics", "Open diagnostics"),
   }
 
+  const refreshCurrentPage = async () => {
+    setRefreshing(true)
+    try {
+      await Promise.all([
+        refreshAll({ clearNotice: true, notifyErrors: true }),
+        page === "map"
+          ? refreshMappings({ notifyErrors: true })
+          : page === "command"
+            ? refreshCommands({ notifyErrors: true })
+            : Promise.resolve(),
+      ])
+    } finally {
+      setRefreshing(false)
+    }
+  }
+
   return (
     <>
       <AppShell
@@ -836,7 +859,7 @@ function App() {
         busyAction={busyAction}
         refreshing={refreshing}
         onPageChange={setPage}
-        onRefresh={() => void refreshAll({ clearNotice: true, notifyErrors: true, showBusy: true })}
+        onRefresh={() => void refreshCurrentPage()}
         onOpenSettings={() => setSettingsOpen(true)}
         onOpenDiagnostics={() => setDiagnosticsOpen(true)}
         t={t}
@@ -860,13 +883,10 @@ function App() {
           <MappingPage
             envelope={mappingEnvelope}
             entries={mappingEntries}
-            touched={mappingTouched}
             busyAction={busyAction}
             refreshing={mappingRefreshing}
-            onRefresh={() => void refreshMappings({ notifyErrors: true })}
-            onSave={() => void saveEventMappings()}
+            onSaveEntry={saveEventMapping}
             onReset={() => void resetEventMappings()}
-            onChange={updateMappingEntry}
             t={t}
           />
         ) : (
@@ -876,7 +896,6 @@ function App() {
             history={commands}
             busyAction={busyAction}
             refreshing={commandRefreshing}
-            onRefresh={() => void refreshCommands({ notifyErrors: true })}
             onSaveEntries={saveCommandMappings}
             onReset={() => void resetCommandMappings()}
             onClearHistory={clearCommandHistory}
@@ -908,8 +927,8 @@ function App() {
         activeCorrectionModel={activeCorrectionModel}
         correctionModelItems={correctionModelItems}
         correctionModelSelectionTouched={correctionModelSelectionTouched}
-        voiceSettingsTouched={voiceSettingsTouched}
-        onOpenChange={setSettingsOpen}
+        voiceSettingsSaveState={voiceSettingsSaveState}
+        onOpenChange={(open) => void changeSettingsOpen(open)}
         onLanguageChange={setLanguage}
         onModelChange={(model) => {
           setModelSelectionTouched(true)
@@ -920,7 +939,7 @@ function App() {
         onRequestPermission={(kind) => void requestPermission(kind)}
         onRequestDeleteModel={() => setDeleteOpen(true)}
         onVoicePreferencesChange={changeVoicePreferences}
-        onSaveVoiceSettings={() => void saveCurrentVoiceSettings()}
+        onRetryVoiceSettings={() => void persistPendingVoiceSettings()}
         onCorrectionModelChange={(model) => {
           setCorrectionModelSelectionTouched(model !== currentCorrectionModel?.model)
           setSelectedCorrectionModel(model)
@@ -932,7 +951,6 @@ function App() {
       <DiagnosticsSheet
         open={diagnosticsOpen}
         status={status}
-        dailyState={dailyState}
         telemetry={telemetry}
         performance={performance}
         activity={activity}
@@ -961,6 +979,7 @@ function App() {
           setDeleteOpen(false)
           void runModelAction("delete")
         }}
+        t={t}
       />
     </>
   )

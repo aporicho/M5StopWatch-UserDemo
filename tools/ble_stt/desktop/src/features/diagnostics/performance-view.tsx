@@ -27,6 +27,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import type { PerformanceRecord, PerformanceSnapshot, PerformanceSpan } from "@/lib/helper-api"
+import { performanceValueLabel } from "@/lib/app-view-model"
 import type { Translator } from "@/lib/i18n"
 import { cn } from "@/lib/utils"
 
@@ -67,7 +68,7 @@ function visibleTimelineSpans(record: PerformanceRecord, mode: TimelineMode) {
   )
 }
 
-function Waterfall({ record, mode }: { record: PerformanceRecord; mode: TimelineMode }) {
+function Waterfall({ record, mode, t }: { record: PerformanceRecord; mode: TimelineMode; t: Translator }) {
   const spans = visibleTimelineSpans(record, mode)
   if (!spans.length) return null
   const start = Math.min(...spans.map((span) => span.start_ms ?? 0))
@@ -82,11 +83,13 @@ function Waterfall({ record, mode }: { record: PerformanceRecord; mode: Timeline
           const width = Math.max(0.8, (span.duration_ms / range) * 100)
           return (
             <div key={`${span.name}-${span.lane}-${index}`} className="grid grid-cols-[9rem_1fr_5rem] items-center gap-3 text-xs">
-              <span className="truncate text-muted-foreground">{span.lane} · {span.name}</span>
+              <span className="truncate text-muted-foreground">
+                {performanceValueLabel("lane", span.lane, t)} · {performanceValueLabel("stage", span.name, t)}
+              </span>
               <div className="relative h-5 overflow-hidden rounded-md bg-muted">
                 <Tooltip>
                   <TooltipTrigger
-                    aria-label={`${span.name} ${milliseconds(span.duration_ms)}`}
+                    aria-label={`${performanceValueLabel("stage", span.name, t)} ${milliseconds(span.duration_ms)}`}
                     className={cn(
                       "absolute top-0 h-full rounded-md",
                       span.category === "wait" || span.category === "intentional" ? "bg-secondary" : "bg-primary"
@@ -94,7 +97,7 @@ function Waterfall({ record, mode }: { record: PerformanceRecord; mode: Timeline
                     style={{ left: `${left}%`, width: `${width}%` }}
                   />
                   <TooltipContent>
-                    {span.name} · {span.category} · {milliseconds(span.duration_ms)}
+                    {performanceValueLabel("stage", span.name, t)} · {performanceValueLabel("category", span.category, t)} · {milliseconds(span.duration_ms)}
                   </TooltipContent>
                 </Tooltip>
               </div>
@@ -124,9 +127,9 @@ function SpanTable({ spans, t }: { spans: PerformanceSpan[]; t: Translator }) {
       <TableBody>
         {values.map((span, index) => (
           <TableRow key={`${span.name}-${span.lane}-${index}`}>
-            <TableCell className="font-medium">{span.name}</TableCell>
-            <TableCell>{span.lane}</TableCell>
-            <TableCell><Badge variant="outline">{span.category}</Badge></TableCell>
+            <TableCell className="font-medium">{performanceValueLabel("stage", span.name, t)}</TableCell>
+            <TableCell>{performanceValueLabel("lane", span.lane, t)}</TableCell>
+            <TableCell><Badge variant="outline">{performanceValueLabel("category", span.category, t)}</Badge></TableCell>
             <TableCell className="text-right tabular-nums">{milliseconds(span.duration_ms)}</TableCell>
             <TableCell className="text-right tabular-nums">{span.count ?? 1}</TableCell>
             <TableCell className="text-right tabular-nums">
@@ -178,16 +181,34 @@ export function PerformanceView({
 
   return (
     <div className="flex flex-col gap-4 p-px py-4">
+      <div className="flex justify-end">
+        <AlertDialog>
+          <AlertDialogTrigger render={<Button variant="outline" disabled={busy} />}>
+            <Trash2Icon data-icon="inline-start" />
+            {t("performance.clear", "Clear performance history")}
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>{t("performance.clear_title", "Clear all performance samples?")}</AlertDialogTitle>
+              <AlertDialogDescription>{t("performance.clear_description")}</AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>{t("common.cancel", "Cancel")}</AlertDialogCancel>
+              <AlertDialogAction onClick={onClear}>{t("common.clear", "Clear")}</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
       {latest ? <Card>
         <CardHeader>
           <div>
             <CardTitle>{t("performance.latest", "最近一次链路")}</CardTitle>
             <CardDescription>
-              {latest.mode} · {latest.configuration.stt_model ?? "unknown"} · {latest.outcome} · {milliseconds(latest.duration_ms)}
+              {performanceValueLabel("mode", latest.mode, t)} · {latest.configuration.stt_model ?? "—"} · {performanceValueLabel("outcome", latest.outcome, t)} · {milliseconds(latest.duration_ms)}
             </CardDescription>
           </div>
           <CardAction>
-            {bottleneck ? <Badge variant="secondary">{t("performance.longest", "最长处理")}：{bottleneck.name}</Badge> : null}
+            {bottleneck ? <Badge variant="secondary">{t("performance.longest", "Longest work")}：{performanceValueLabel("stage", bottleneck.name, t)}</Badge> : null}
           </CardAction>
         </CardHeader>
         <CardContent className="flex flex-col gap-4">
@@ -204,7 +225,7 @@ export function PerformanceView({
             <ToggleGroupItem value="processing">{t("performance.processing", "处理路径")}</ToggleGroupItem>
             <ToggleGroupItem value="full">{t("performance.full", "完整链路")}</ToggleGroupItem>
           </ToggleGroup>
-          <Waterfall record={latest} mode={timelineMode} />
+          <Waterfall record={latest} mode={timelineMode} t={t} />
         </CardContent>
       </Card> : null}
 
@@ -265,26 +286,6 @@ export function PerformanceView({
                 : t("performance.clock_unaligned", "固件时钟未可靠对齐时，不计算虚假的单向 BLE 延迟。")}
             </CardDescription>
           </div>
-          <CardAction>
-            <AlertDialog>
-              <AlertDialogTrigger render={<Button variant="outline" disabled={busy} />}>
-                <Trash2Icon data-icon="inline-start" />
-                {t("performance.clear", "清空性能历史")}
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>{t("performance.clear_title", "清空全部性能样本？")}</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    {t("performance.clear_description", "这会删除最近 200 次会话和生命周期统计，不影响转写历史、模型或设置。")}
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>{t("common.cancel", "取消")}</AlertDialogCancel>
-                  <AlertDialogAction onClick={onClear}>{t("common.clear", "清空")}</AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          </CardAction>
         </CardHeader>
         <CardContent><SpanTable spans={latest.spans} t={t} /></CardContent>
       </Card> : null}
@@ -295,12 +296,12 @@ export function PerformanceView({
             <div>
               <CardTitle>{t("performance.lifecycle", "最近一次服务准备")}</CardTitle>
               <CardDescription>
-                {latestLifecycle.outcome} · {milliseconds(latestLifecycle.duration_ms)}
+                {performanceValueLabel("outcome", latestLifecycle.outcome, t)} · {milliseconds(latestLifecycle.duration_ms)}
               </CardDescription>
             </div>
           </CardHeader>
           <CardContent className="flex flex-col gap-4">
-            <Waterfall record={latestLifecycle} mode="full" />
+            <Waterfall record={latestLifecycle} mode="full" t={t} />
             <SpanTable spans={latestLifecycle.spans} t={t} />
           </CardContent>
         </Card>

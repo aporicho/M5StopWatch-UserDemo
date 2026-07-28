@@ -1,7 +1,5 @@
-import { AlertCircleIcon, CheckCircle2Icon, FileTextIcon, PlayIcon, SettingsIcon, Trash2Icon } from "lucide-react"
+import { FileTextIcon, PlayIcon, SettingsIcon, Trash2Icon } from "lucide-react"
 
-import { StatusBadge } from "@/components/common/status-badge"
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import {
@@ -24,6 +22,7 @@ import {
   type DailyState,
   type DictationHistoryItem,
   modelDisplayLabel,
+  modelStateLabel,
   modelVariant,
   percent,
   progressValue,
@@ -50,7 +49,7 @@ function ReadinessTable({ status, t }: { status: StatusPayload | null; t: Transl
     {
       label: t("home.service", "Service"),
       ok: status.service.running && !status.service.error,
-      detail: status.service.running ? t("settings.running", "running") : status.service.error || t("settings.stopped", "stopped"),
+      detail: status.service.running ? t("status.running", "Running") : t("status.stopped", "Stopped"),
     },
     {
       label: t("home.watch", "Watch"),
@@ -59,17 +58,17 @@ function ReadinessTable({ status, t }: { status: StatusPayload | null; t: Transl
         ? t("status.connected", "connected")
         : status.watch.connection_state === "waiting_system_connection"
           ? t("status.waiting_system_connection", "waiting for system connection")
-          : status.watch.label,
+          : t("status.disconnected", "Disconnected"),
     },
     {
       label: t("home.voice", "Voice"),
       ok: status.voice.ready,
-      detail: status.voice.message,
+      detail: status.voice.ready ? t("status.ready", "Ready") : t("status.preparing", "Preparing"),
     },
     {
-      label: t("home.model", "Model"),
-      ok: status.model.installed,
-      detail: `${modelDisplayLabel(status.model.selected, t)} / ${status.model.state}`,
+      label: t("home.text_input", "Text input"),
+      ok: status.permissions.input.ok,
+      detail: status.permissions.input.ok ? t("status.granted", "Granted") : t("status.required", "Required"),
     },
   ]
 
@@ -116,24 +115,16 @@ function StatusCard({
           <CardTitle>{state.title}</CardTitle>
           <CardDescription>{state.description}</CardDescription>
         </div>
-        <CardAction>
-          <StatusBadge state={state} />
-        </CardAction>
-      </CardHeader>
-      <CardContent className="flex flex-col gap-3">
         {state.action && (
-          <Alert variant={state.badgeVariant === "destructive" ? "destructive" : "default"}>
-            {state.badgeVariant === "destructive" ? <AlertCircleIcon /> : <CheckCircle2Icon />}
-            <AlertTitle>{state.label}</AlertTitle>
-            <AlertDescription className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-              <span>{state.description}</span>
-              <Button onClick={onAction} disabled={busyAction !== null}>
-                <PlayIcon data-icon="inline-start" />
-                {primaryActionLabel[state.action]}
-              </Button>
-            </AlertDescription>
-          </Alert>
+          <CardAction>
+            <Button onClick={onAction} disabled={busyAction !== null}>
+              <PlayIcon data-icon="inline-start" />
+              {primaryActionLabel[state.action]}
+            </Button>
+          </CardAction>
         )}
+      </CardHeader>
+      <CardContent>
         <ReadinessTable status={status} t={t} />
       </CardContent>
       <CardFooter className="text-sm text-muted-foreground">
@@ -162,9 +153,7 @@ function DictationHistoryCard({
         <CardTitle>{t("home.transcript", "Dictation history")}</CardTitle>
         <CardAction>
           <div className="flex items-center gap-2">
-            <Badge variant={latest?.final ? "default" : "outline"}>
-              {latest?.final ? t("home.final", "Final") : t("home.live", "Live")}
-            </Badge>
+            {latest && !latest.final && <Badge variant="outline">{t("home.live", "Live")}</Badge>}
             <Button size="sm" variant="ghost" onClick={onClear} disabled={!dictations.length}>
               <Trash2Icon data-icon="inline-start" />
               {t("common.clear", "Clear")}
@@ -185,11 +174,11 @@ function DictationHistoryCard({
                         <span className="text-sm text-muted-foreground">{item.time}</span>
                       </div>
                     </TableCell>
-                    <TableCell className="w-20 align-top text-right">
-                      <Badge variant={item.final ? "default" : "outline"}>
-                        {item.final ? t("home.final", "Final") : t("home.live", "Live")}
-                      </Badge>
-                    </TableCell>
+                    {!item.final && (
+                      <TableCell className="w-20 align-top text-right">
+                        <Badge variant="outline">{t("home.live", "Live")}</Badge>
+                      </TableCell>
+                    )}
                   </TableRow>
                 ))}
               </TableBody>
@@ -225,7 +214,6 @@ export function RuntimeCard({
   const fresh = telemetryFresh(telemetry)
   const level = fresh ? telemetry?.audio.level : 0
   const peak = fresh ? telemetry?.audio.peak : 0
-  const seconds = fresh ? telemetry?.audio.seconds ?? 0 : 0
   const latestPerformance = telemetry?.performance?.latest
   const performanceMetrics = latestPerformance?.metrics ?? {}
   const formatLatency = (value: number | string | null | undefined) =>
@@ -279,13 +267,6 @@ export function RuntimeCard({
           </Table>
         ) : null}
       </CardContent>
-      <CardFooter>
-        <p className="text-sm text-muted-foreground">
-          {t("home.stage", "Stage")} {telemetry?.stage ?? t("common.unknown", "unknown")} · {t("home.audio", "Audio")} {seconds.toFixed(1)}s · {t("home.age", "Age")}{" "}
-          {telemetry?.age_seconds == null ? t("common.unknown", "unknown") : `${telemetry.age_seconds.toFixed(1)}s`}
-          {telemetry?.stale ? ` / ${t("home.stale", "stale")}` : ""}
-        </p>
-      </CardFooter>
     </Card>
   )
 }
@@ -302,12 +283,9 @@ function ModelCard({
   return (
     <Card size="sm" className="shrink-0">
       <CardHeader>
-        <div>
-          <CardTitle>{t("home.model", "Model")}</CardTitle>
-          <CardDescription>{model?.message ?? t("home.model_loading", "Model status is loading.")}</CardDescription>
-        </div>
+        <CardTitle>{t("home.model", "Model")}</CardTitle>
         <CardAction>
-          <Badge variant={modelVariant(model)}>{model?.state ?? t("common.unknown", "Unknown")}</Badge>
+          <Badge variant={modelVariant(model)}>{modelStateLabel(model?.state, t)}</Badge>
         </CardAction>
       </CardHeader>
       <CardContent>

@@ -1,4 +1,4 @@
-import { AlertCircleIcon, BugIcon, CheckCircle2Icon, HomeIcon, KeyboardIcon, MapIcon, RefreshCwIcon, SettingsIcon } from "lucide-react"
+import { AlertCircleIcon, BugIcon, HomeIcon, KeyboardIcon, MapIcon, RefreshCwIcon, SettingsIcon } from "lucide-react"
 import type { ReactNode } from "react"
 
 import { SpinnerOrIcon } from "@/components/common/spinner-or-icon"
@@ -81,11 +81,9 @@ export function AppShell({
         </header>
 
         {notice && (
-          <Alert className="shrink-0" variant={notice.level === "error" ? "destructive" : "default"}>
-            {notice.level === "error" ? <AlertCircleIcon /> : <CheckCircle2Icon />}
-            <AlertTitle>
-              {notice.level === "error" ? t("notice.needs_attention", "Needs attention") : t("notice.notice", "Notice")}
-            </AlertTitle>
+          <Alert className="shrink-0" variant="destructive">
+            <AlertCircleIcon />
+            <AlertTitle>{t("notice.needs_attention", "Needs attention")}</AlertTitle>
             <AlertDescription>{notice.message}</AlertDescription>
           </Alert>
         )}

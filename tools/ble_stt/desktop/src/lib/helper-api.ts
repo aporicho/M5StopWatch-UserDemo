@@ -404,7 +404,7 @@ export function sleep(ms: number) {
 
 export function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) {
-    return "Not installed"
+    return "—"
   }
 
   const units = ["B", "KB", "MB", "GB"]

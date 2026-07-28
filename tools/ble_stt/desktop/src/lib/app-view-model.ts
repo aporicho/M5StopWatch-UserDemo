@@ -188,6 +188,42 @@ export function modelDetail(value: string, t: Translator) {
     : t("settings.custom_model_detail", "Custom model selected by the helper.")
 }
 
+export function modelStateLabel(state: string | null | undefined, t: Translator) {
+  if (!state) return t("common.unknown", "Unknown")
+  const normalized = state.toLowerCase().replace(/[^a-z0-9]+/g, "_")
+  return t(`model.state.${normalized}`, humanizeIdentifier(state))
+}
+
+export function commandReasonLabel(reason: string | null | undefined, t: Translator) {
+  if (!reason) return t("commands.reason.no_match", "No match")
+  const normalized = reason.toLowerCase().replace(/[^a-z0-9]+/g, "_")
+  if (["below_threshold", "low_confidence", "low_score", "score_too_low"].includes(normalized)) {
+    return t("commands.reason.low_score", "Similarity too low")
+  }
+  if (["empty", "empty_transcript", "no_speech"].includes(normalized)) {
+    return t("commands.reason.empty", "Nothing heard")
+  }
+  if (normalized === "matched") return t("commands.reason.matched", "Matched")
+  return t(`commands.reason.${normalized}`, t("commands.reason.no_match", "No match"))
+}
+
+export function humanizeIdentifier(value: string | null | undefined) {
+  if (!value) return "—"
+  return value
+    .replace(/[._-]+/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+export function performanceValueLabel(
+  kind: "mode" | "outcome" | "category" | "lane" | "stage",
+  value: string | null | undefined,
+  t: Translator
+) {
+  if (!value) return t("common.unknown", "Unknown")
+  const normalized = value.toLowerCase().replace(/[^a-z0-9]+/g, "_")
+  return t(`performance.${kind}.${normalized}`, humanizeIdentifier(value))
+}
+
 export function localizedDailyState(state: DailyState, t: Translator): DailyState {
   if (state.key === "needs_attention") {
     switch (state.action) {
@@ -217,6 +253,7 @@ export function localizedDailyState(state: DailyState, t: Translator): DailyStat
           ...state,
           label: t("state.service_error.label"),
           title: t("state.service_error.title"),
+          description: t("state.service_error.description"),
         }
     }
   }
@@ -838,7 +875,7 @@ export function deriveDailyState(
   }
 }
 
-function activityFromEntry(entry: StructuredLogEntry): ActivityItem | null {
+function activityFromEntry(entry: StructuredLogEntry, t: Translator): ActivityItem | null {
   const message = entry.message
   const lower = message.toLowerCase()
 
@@ -846,8 +883,8 @@ function activityFromEntry(entry: StructuredLogEntry): ActivityItem | null {
     return {
       key: `connected-${entry.time}`,
       time: entry.time,
-      label: "Connected",
-      detail: "Watch connection is active.",
+      label: t("activity.connected.label", "Connected"),
+      detail: t("activity.connected.detail", "The watch is connected."),
       variant: "default",
     }
   }
@@ -856,8 +893,8 @@ function activityFromEntry(entry: StructuredLogEntry): ActivityItem | null {
     return {
       key: `listening-${entry.time}`,
       time: entry.time,
-      label: "Listening",
-      detail: "Speech capture started from the watch.",
+      label: t("activity.listening.label", "Listening"),
+      detail: t("activity.listening.detail", "Voice capture started."),
       variant: "default",
     }
   }
@@ -866,8 +903,8 @@ function activityFromEntry(entry: StructuredLogEntry): ActivityItem | null {
     return {
       key: `recognizing-${entry.time}`,
       time: entry.time,
-      label: "Recognizing",
-      detail: "Speech is being converted to text.",
+      label: t("activity.recognizing.label", "Recognizing"),
+      detail: t("activity.recognizing.detail", "Speech is being converted to text."),
       variant: "secondary",
     }
   }
@@ -876,8 +913,8 @@ function activityFromEntry(entry: StructuredLogEntry): ActivityItem | null {
     return {
       key: `inserted-${entry.time}`,
       time: entry.time,
-      label: "Inserted text",
-      detail: "Dictation was sent to the active app.",
+      label: t("activity.inserted.label", "Text inserted"),
+      detail: t("activity.inserted.detail", "Text was sent to the active app."),
       variant: "default",
     }
   }
@@ -886,8 +923,8 @@ function activityFromEntry(entry: StructuredLogEntry): ActivityItem | null {
     return {
       key: `ready-${entry.time}`,
       time: entry.time,
-      label: "Voice ready",
-      detail: "Hold the watch button to talk.",
+      label: t("activity.ready.label", "Voice ready"),
+      detail: t("activity.ready.detail", "Voice input is ready."),
       variant: "outline",
     }
   }
@@ -896,8 +933,8 @@ function activityFromEntry(entry: StructuredLogEntry): ActivityItem | null {
     return {
       key: `connecting-${entry.time}`,
       time: entry.time,
-      label: "Connecting",
-      detail: "Attaching voice input to the system-owned HID connection.",
+      label: t("activity.connecting.label", "Connecting"),
+      detail: t("activity.connecting.detail", "Voice input is connecting."),
       variant: "secondary",
     }
   }
@@ -906,8 +943,8 @@ function activityFromEntry(entry: StructuredLogEntry): ActivityItem | null {
     return {
       key: `disconnected-${entry.time}`,
       time: entry.time,
-      label: "Disconnected",
-      detail: "Waiting for the operating system to connect the watch.",
+      label: t("activity.disconnected.label", "Disconnected"),
+      detail: t("activity.disconnected.detail", "Waiting for the watch."),
       variant: "secondary",
     }
   }
@@ -916,8 +953,8 @@ function activityFromEntry(entry: StructuredLogEntry): ActivityItem | null {
     return {
       key: `preparing-${entry.time}`,
       time: entry.time,
-      label: "Preparing",
-      detail: "Speech model is loading.",
+      label: t("activity.preparing.label", "Preparing"),
+      detail: t("activity.preparing.detail", "The speech model is loading."),
       variant: "secondary",
     }
   }
@@ -925,12 +962,12 @@ function activityFromEntry(entry: StructuredLogEntry): ActivityItem | null {
   return null
 }
 
-export function recentActivity(entries: StructuredLogEntry[]) {
+export function recentActivity(entries: StructuredLogEntry[], t: Translator) {
   const result: ActivityItem[] = []
   const seen = new Set<string>()
 
   for (const entry of entries.slice().reverse()) {
-    const item = activityFromEntry(entry)
+    const item = activityFromEntry(entry, t)
     if (!item || seen.has(item.label)) {
       continue
     }
@@ -945,28 +982,36 @@ export function recentActivity(entries: StructuredLogEntry[]) {
   return result
 }
 
-export function diagnosticDetail(status: StatusPayload | null, key: DiagnosticKey) {
+export function diagnosticLabel(key: DiagnosticKey, t: Translator) {
+  return t(`diagnostics.status.${key}`, humanizeIdentifier(key))
+}
+
+export function diagnosticDetail(status: StatusPayload | null, key: DiagnosticKey, t: Translator) {
   if (!status) {
-    return "Unknown"
+    return t("common.unknown", "Unknown")
   }
   switch (key) {
     case "overall":
-      return `${status.overall.label} (${status.overall.code})`
+      return status.overall.ready ? t("common.ok", "OK") : t("common.check", "Check")
     case "service":
-      return status.service.running ? "running" : status.service.error || "stopped"
+      return status.service.running ? t("status.running", "Running") : t("status.stopped", "Stopped")
     case "watch":
       if (status.watch.connected) {
-        return `connected as ${status.watch.id}`
+        return status.watch.id
+          ? `${t("status.connected", "Connected")} · ${status.watch.id}`
+          : t("status.connected", "Connected")
       }
-      return status.watch.paired ? `paired as ${status.watch.id}; waiting for system connection` : status.watch.label
+      return status.watch.paired
+        ? t("status.waiting_system_connection", "Waiting for system connection")
+        : t("status.disconnected", "Disconnected")
     case "voice":
-      return status.voice.message
+      return status.voice.ready ? t("status.ready", "Ready") : t("status.preparing", "Preparing")
     case "model":
-      return `${modelLabel(status.model.selected)} / ${status.model.message}`
+      return `${modelDisplayLabel(status.model.selected, t)} · ${modelStateLabel(status.model.state, t)}`
     case "input":
-      return status.permissions.input.message
+      return status.permissions.input.ok ? t("status.granted", "Granted") : t("status.required", "Required")
     case "bluetooth":
-      return status.permissions.bluetooth.message
+      return status.permissions.bluetooth.ok ? t("status.granted", "Granted") : t("status.required", "Required")
     case "logs":
       return status.logs.directory
   }

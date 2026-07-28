@@ -1,24 +1,38 @@
 import {
   AlertCircleIcon,
-  BookOpenIcon,
   CheckCircle2Icon,
   DownloadIcon,
+  EllipsisIcon,
   PlayIcon,
   RefreshCwIcon,
   RotateCcwIcon,
   SquareIcon,
   Trash2Icon,
-  SaveIcon,
-  SparklesIcon,
-  KeyboardIcon,
   WrenchIcon,
 } from "lucide-react"
+import { useState } from "react"
 
 import { SpinnerOrIcon } from "@/components/common/spinner-or-icon"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import { ButtonGroup } from "@/components/ui/button-group"
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuGroup,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import {
   Card,
   CardContent,
@@ -45,17 +59,16 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { Slider } from "@/components/ui/slider"
+import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
-import { Toggle } from "@/components/ui/toggle"
 import {
   Sheet,
   SheetContent,
-  SheetDescription,
   SheetHeader,
   SheetTitle,
 } from "@/components/ui/sheet"
 import { PermissionPanel } from "@/features/settings/permission-panel"
-import { modelDisplayLabel, readinessVariant } from "@/lib/app-view-model"
+import { modelDisplayLabel, modelStateLabel, readinessVariant } from "@/lib/app-view-model"
 import {
   formatBytes,
   type CorrectionModelAction,
@@ -96,7 +109,7 @@ type SettingsSheetProps = {
   activeCorrectionModel: string
   correctionModelItems: SelectItemOption[]
   correctionModelSelectionTouched: boolean
-  voiceSettingsTouched: boolean
+  voiceSettingsSaveState: "idle" | "pending" | "saving" | "saved" | "error"
   onOpenChange: (open: boolean) => void
   onLanguageChange: (language: LanguageCode) => void
   onModelChange: (model: string) => void
@@ -105,7 +118,7 @@ type SettingsSheetProps = {
   onRequestPermission: (kind: PermissionKind) => void
   onRequestDeleteModel: () => void
   onVoicePreferencesChange: (preferences: VoicePreferences) => void
-  onSaveVoiceSettings: () => void
+  onRetryVoiceSettings: () => void
   onCorrectionModelChange: (model: string) => void
   onRunCorrectionModelAction: (action: CorrectionModelAction) => void
   t: Translator
@@ -134,7 +147,7 @@ export function SettingsSheet({
   activeCorrectionModel,
   correctionModelItems,
   correctionModelSelectionTouched,
-  voiceSettingsTouched,
+  voiceSettingsSaveState,
   onOpenChange,
   onLanguageChange,
   onModelChange,
@@ -143,11 +156,12 @@ export function SettingsSheet({
   onRequestPermission,
   onRequestDeleteModel,
   onVoicePreferencesChange,
-  onSaveVoiceSettings,
+  onRetryVoiceSettings,
   onCorrectionModelChange,
   onRunCorrectionModelAction,
   t,
 }: SettingsSheetProps) {
+  const [correctionDeleteOpen, setCorrectionDeleteOpen] = useState(false)
   const correctionModelDetail =
     activeCorrectionModel === "balanced"
       ? t(
@@ -163,8 +177,23 @@ export function SettingsSheet({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-[min(760px,calc(100vw-2rem))] sm:max-w-2xl">
         <SheetHeader>
-          <SheetTitle>{t("settings.title", "Settings")}</SheetTitle>
-          <SheetDescription>{t("settings.description", "Model, permissions, and voice service controls.")}</SheetDescription>
+          <div className="flex items-center justify-between gap-3 pr-8">
+            <SheetTitle>{t("settings.title", "Settings")}</SheetTitle>
+            {voiceSettingsSaveState === "pending" && (
+              <Badge variant="outline">{t("settings.save_pending", "Waiting to save")}</Badge>
+            )}
+            {voiceSettingsSaveState === "saving" && (
+              <Badge variant="secondary">{t("common.saving", "Saving…")}</Badge>
+            )}
+            {voiceSettingsSaveState === "saved" && (
+              <Badge variant="outline">{t("common.saved", "Saved")}</Badge>
+            )}
+            {voiceSettingsSaveState === "error" && (
+              <Button size="sm" variant="destructive" onClick={onRetryVoiceSettings}>
+                {t("common.save_failed", "Save failed")} · {t("common.retry", "Retry")}
+              </Button>
+            )}
+          </div>
         </SheetHeader>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
@@ -172,14 +201,12 @@ export function SettingsSheet({
             <Card>
               <CardHeader>
                 <CardTitle>{t("settings.general", "General")}</CardTitle>
-                <CardDescription>{t("settings.general_description", "App preferences for this computer.")}</CardDescription>
               </CardHeader>
               <CardContent>
                 <FieldGroup>
                   <Field orientation="horizontal">
                     <FieldContent>
                       <FieldTitle>{t("settings.language", "Language")}</FieldTitle>
-                      <FieldDescription>{t("settings.language_description", "Changes apply immediately.")}</FieldDescription>
                     </FieldContent>
                     <Select
                       items={languageItems}
@@ -212,16 +239,7 @@ export function SettingsSheet({
             {voicePreferences && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <SparklesIcon className="size-4" />
-                    {t("settings.smart_correction", "Smart correction")}
-                  </CardTitle>
-                  <CardDescription>
-                    {t(
-                      "settings.smart_correction_description",
-                      "Conservative local correction for Simplified Chinese and English."
-                    )}
-                  </CardDescription>
+                  <CardTitle>{t("settings.smart_correction", "Smart correction")}</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <FieldGroup>
@@ -232,45 +250,38 @@ export function SettingsSheet({
                           {t("settings.enable_correction_description", "Runs locally after recognition and keeps numbers, English, and personal terms unchanged.")}
                         </FieldDescription>
                       </FieldContent>
-                      <Toggle
-                        variant="outline"
-                        pressed={voicePreferences.correction.enabled}
-                        onPressedChange={(pressed) =>
+                      <Switch
+                        aria-label={t("settings.enable_correction", "Enable smart correction")}
+                        checked={voicePreferences.correction.enabled}
+                        onCheckedChange={(checked) =>
                           onVoicePreferencesChange({
                             ...voicePreferences,
-                            correction: { ...voicePreferences.correction, enabled: pressed },
+                            correction: { ...voicePreferences.correction, enabled: checked },
                           })
                         }
-                      >
-                        {voicePreferences.correction.enabled ? t("common.on", "On") : t("common.off", "Off")}
-                      </Toggle>
+                      />
                     </Field>
 
                     <Field orientation="horizontal">
                       <FieldContent>
-                        <FieldTitle className="flex items-center gap-2">
-                          <BookOpenIcon className="size-4" />
-                          {t("settings.standard_lexicon", "Built-in word packs")}
-                        </FieldTitle>
+                        <FieldTitle>{t("settings.standard_lexicon", "Built-in word packs")}</FieldTitle>
                         <FieldDescription>
                           {t("settings.standard_lexicon_description", "Bias recognition toward common computing and M5StopWatch terms without forcing replacements.")}
                         </FieldDescription>
                       </FieldContent>
-                      <Toggle
-                        variant="outline"
-                        pressed={voicePreferences.correction.standard_lexicon_enabled}
-                        onPressedChange={(pressed) =>
+                      <Switch
+                        aria-label={t("settings.standard_lexicon", "Built-in word packs")}
+                        checked={voicePreferences.correction.standard_lexicon_enabled}
+                        onCheckedChange={(checked) =>
                           onVoicePreferencesChange({
                             ...voicePreferences,
                             correction: {
                               ...voicePreferences.correction,
-                              standard_lexicon_enabled: pressed,
+                              standard_lexicon_enabled: checked,
                             },
                           })
                         }
-                      >
-                        {voicePreferences.correction.standard_lexicon_enabled ? t("common.on", "On") : t("common.off", "Off")}
-                      </Toggle>
+                      />
                     </Field>
 
                     <Field>
@@ -340,11 +351,13 @@ export function SettingsSheet({
                           </>
                         ) : t("common.loading", "Loading")}
                       </FieldDescription>
-                      <FieldDescription>
-                        {t("settings.current_model", "Current")}: {currentCorrectionModel?.display_name ?? t("common.unknown", "Unknown")}
-                      </FieldDescription>
+                      {correctionModelSelectionTouched && (
+                        <FieldDescription>
+                          {t("settings.current_model", "Current")}: {currentCorrectionModel?.display_name ?? t("common.unknown", "Unknown")}
+                        </FieldDescription>
+                      )}
                       <Badge variant={correctionModel?.state === "legacy" ? "secondary" : readinessVariant(Boolean(correctionModel?.ready))}>
-                        {correctionModel?.state ?? "unknown"}
+                        {modelStateLabel(correctionModel?.state, t)}
                       </Badge>
                     </Field>
 
@@ -373,51 +386,51 @@ export function SettingsSheet({
                   </FieldGroup>
                 </CardContent>
                 <CardFooter className="flex flex-wrap gap-2">
-                  <Button
-                    onClick={() => onRunCorrectionModelAction("use-model")}
-                    disabled={controlsDisabled || !correctionModelSelectionTouched}
-                  >
-                    <SpinnerOrIcon busy={busyAction === "correction-model:use-model"} icon={CheckCircle2Icon} />
-                    {t("settings.use", "Use")}
-                  </Button>
-                  <Button onClick={onSaveVoiceSettings} disabled={controlsDisabled || !voiceSettingsTouched}>
-                    <SpinnerOrIcon busy={busyAction === "voice-settings:save"} icon={SaveIcon} />
-                    {t("common.save", "Save")}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => onRunCorrectionModelAction("install-model")}
-                    disabled={controlsDisabled || Boolean(correctionModel?.installed)}
-                  >
-                    <SpinnerOrIcon busy={busyAction === "correction-model:install-model"} icon={DownloadIcon} />
-                    {correctionModel && correctionModel.stale_disk_bytes > 0
-                      ? t("settings.replace_model", "Replace legacy model")
-                      : t("settings.install_model", "Install model")}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => onRunCorrectionModelAction("update-model")}
-                    disabled={controlsDisabled || !correctionModel?.installed}
-                  >
-                    <SpinnerOrIcon busy={busyAction === "correction-model:update-model"} icon={RefreshCwIcon} />
-                    {t("settings.update", "Update")}
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => onRunCorrectionModelAction("repair-model")}
-                    disabled={controlsDisabled || !(correctionModel?.disk_bytes ?? 0)}
-                  >
-                    <SpinnerOrIcon busy={busyAction === "correction-model:repair-model"} icon={WrenchIcon} />
-                    {t("settings.repair", "Repair")}
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    onClick={() => onRunCorrectionModelAction("delete-model")}
-                    disabled={controlsDisabled || (!correctionModel?.disk_bytes && !((correctionModel?.stale_disk_bytes ?? 0) > 0))}
-                  >
-                    <Trash2Icon data-icon="inline-start" />
-                    {t("settings.delete", "Delete")}
-                  </Button>
+                  {correctionModelSelectionTouched ? (
+                    <Button onClick={() => onRunCorrectionModelAction("use-model")} disabled={controlsDisabled}>
+                      <SpinnerOrIcon busy={busyAction === "correction-model:use-model"} icon={CheckCircle2Icon} />
+                      {t("settings.use", "Use")}
+                    </Button>
+                  ) : !correctionModel?.installed ? (
+                    <Button onClick={() => onRunCorrectionModelAction("install-model")} disabled={controlsDisabled}>
+                      <SpinnerOrIcon busy={busyAction === "correction-model:install-model"} icon={DownloadIcon} />
+                      {correctionModel && correctionModel.stale_disk_bytes > 0
+                        ? t("settings.replace_model", "Replace legacy model")
+                        : t("settings.install_model", "Install model")}
+                    </Button>
+                  ) : null}
+                  <DropdownMenu>
+                    <DropdownMenuTrigger render={<Button variant="outline" disabled={controlsDisabled} />}>
+                      <EllipsisIcon data-icon="inline-start" />
+                      {t("common.more", "More")}
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent align="end">
+                      <DropdownMenuGroup>
+                        <DropdownMenuItem
+                          onClick={() => onRunCorrectionModelAction("update-model")}
+                          disabled={!correctionModel?.installed}
+                        >
+                          <RefreshCwIcon />
+                          {t("settings.update", "Update")}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          onClick={() => onRunCorrectionModelAction("repair-model")}
+                          disabled={!(correctionModel?.disk_bytes ?? 0)}
+                        >
+                          <WrenchIcon />
+                          {t("settings.repair", "Repair")}
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          variant="destructive"
+                          onClick={() => setCorrectionDeleteOpen(true)}
+                          disabled={!correctionModel?.disk_bytes && !((correctionModel?.stale_disk_bytes ?? 0) > 0)}
+                        >
+                          <Trash2Icon />
+                          {t("common.delete", "Delete")}
+                        </DropdownMenuItem>
+                      </DropdownMenuGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
                 </CardFooter>
               </Card>
             )}
@@ -425,13 +438,7 @@ export function SettingsSheet({
             {voicePreferences && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <KeyboardIcon className="size-4" />
-                    {t("settings.typing_effect", "Typing effect")}
-                  </CardTitle>
-                  <CardDescription>
-                    {t("settings.typing_effect_description", "Show live recognition as a natural typing animation in the target app.")}
-                  </CardDescription>
+                  <CardTitle>{t("settings.typing_effect", "Typing effect")}</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <FieldGroup>
@@ -440,20 +447,18 @@ export function SettingsSheet({
                         <FieldTitle>{t("settings.enable_typing_effect", "Animate inserted text")}</FieldTitle>
                         <FieldDescription>{t("settings.enable_typing_effect_description", "Disable to insert each recognized chunk immediately.")}</FieldDescription>
                       </FieldContent>
-                      <Toggle
-                        variant="outline"
-                        pressed={voicePreferences.typing.enabled}
-                        onPressedChange={(pressed) =>
+                      <Switch
+                        aria-label={t("settings.enable_typing_effect", "Animate inserted text")}
+                        checked={voicePreferences.typing.enabled}
+                        onCheckedChange={(checked) =>
                           onVoicePreferencesChange({
                             ...voicePreferences,
-                            typing: { ...voicePreferences.typing, enabled: pressed },
+                            typing: { ...voicePreferences.typing, enabled: checked },
                           })
                         }
-                      >
-                        {voicePreferences.typing.enabled ? t("common.on", "On") : t("common.off", "Off")}
-                      </Toggle>
+                      />
                     </Field>
-                    <Field>
+                    <Field data-disabled={!voicePreferences.typing.enabled ? true : undefined}>
                       <div className="flex items-center justify-between gap-4">
                         <FieldLabel>{t("settings.typing_speed", "Typing speed")}</FieldLabel>
                         <Badge variant="outline">{voicePreferences.typing.characters_per_second} {t("settings.characters_per_second", "chars/s")}</Badge>
@@ -474,33 +479,25 @@ export function SettingsSheet({
                         }}
                       />
                     </Field>
-                    <Field orientation="horizontal">
+                    <Field orientation="horizontal" data-disabled={!voicePreferences.typing.enabled ? true : undefined}>
                       <FieldContent>
                         <FieldTitle>{t("settings.auto_accelerate", "Auto accelerate")}</FieldTitle>
                         <FieldDescription>{t("settings.auto_accelerate_description", "Speed up smoothly when recognized text is waiting, up to 120 chars/s.")}</FieldDescription>
                       </FieldContent>
-                      <Toggle
-                        variant="outline"
-                        pressed={voicePreferences.typing.auto_accelerate}
+                      <Switch
+                        aria-label={t("settings.auto_accelerate", "Auto accelerate")}
+                        checked={voicePreferences.typing.auto_accelerate}
                         disabled={!voicePreferences.typing.enabled}
-                        onPressedChange={(pressed) =>
+                        onCheckedChange={(checked) =>
                           onVoicePreferencesChange({
                             ...voicePreferences,
-                            typing: { ...voicePreferences.typing, auto_accelerate: pressed },
+                            typing: { ...voicePreferences.typing, auto_accelerate: checked },
                           })
                         }
-                      >
-                        {voicePreferences.typing.auto_accelerate ? t("common.on", "On") : t("common.off", "Off")}
-                      </Toggle>
+                      />
                     </Field>
                   </FieldGroup>
                 </CardContent>
-                <CardFooter>
-                  <Button onClick={onSaveVoiceSettings} disabled={controlsDisabled || !voiceSettingsTouched}>
-                    <SpinnerOrIcon busy={busyAction === "voice-settings:save"} icon={SaveIcon} />
-                    {t("common.save", "Save")}
-                  </Button>
-                </CardFooter>
               </Card>
             )}
 
@@ -538,7 +535,7 @@ export function SettingsSheet({
                     </SelectContent>
                   </Select>
                   <FieldDescription>
-                    {t("settings.current_model", "Current")}: {modelDisplayLabel(currentModel?.selected, t)} / {currentModel?.message ?? t("common.unknown", "Unknown")}
+                    {t("settings.current_model", "Current")}: {modelDisplayLabel(currentModel?.selected, t)}
                   </FieldDescription>
                 </Field>
                 <Field orientation="horizontal">
@@ -547,7 +544,7 @@ export function SettingsSheet({
                     <FieldDescription>{formatBytes(currentModel?.disk_bytes ?? 0)}</FieldDescription>
                   </FieldContent>
                   <Badge variant={readinessVariant(Boolean(currentModel?.installed))}>
-                    {currentModel?.state ?? "unknown"}
+                    {modelStateLabel(currentModel?.state, t)}
                   </Badge>
                 </Field>
                 <Field orientation="horizontal">
@@ -564,26 +561,40 @@ export function SettingsSheet({
               </FieldGroup>
             </CardContent>
             <CardFooter className="flex flex-wrap gap-2">
-              <Button onClick={() => onRunModelAction("use")} disabled={useModelDisabled}>
-                <SpinnerOrIcon busy={busyAction === "model:use"} icon={CheckCircle2Icon} />
-                {t("settings.use", "Use")}
-              </Button>
-              <Button variant="outline" onClick={() => onRunModelAction("install")} disabled={installModelDisabled}>
-                <SpinnerOrIcon busy={busyAction === "model:install"} icon={DownloadIcon} />
-                {t("settings.install", "Install")}
-              </Button>
-              <Button variant="outline" onClick={() => onRunModelAction("update")} disabled={updateModelDisabled}>
-                <SpinnerOrIcon busy={busyAction === "model:update"} icon={RefreshCwIcon} />
-                {t("settings.update", "Update")}
-              </Button>
-              <Button variant="outline" onClick={() => onRunModelAction("repair")} disabled={repairModelDisabled}>
-                <SpinnerOrIcon busy={busyAction === "model:repair"} icon={WrenchIcon} />
-                {t("settings.repair", "Repair")}
-              </Button>
-              <Button variant="destructive" onClick={onRequestDeleteModel} disabled={deleteModelDisabled}>
-                <Trash2Icon data-icon="inline-start" />
-                {t("settings.delete", "Delete")}
-              </Button>
+              {!useModelDisabled ? (
+                <Button onClick={() => onRunModelAction("use")}>
+                  <SpinnerOrIcon busy={busyAction === "model:use"} icon={CheckCircle2Icon} />
+                  {t("settings.use", "Use")}
+                </Button>
+              ) : !installModelDisabled ? (
+                <Button onClick={() => onRunModelAction("install")}>
+                  <SpinnerOrIcon busy={busyAction === "model:install"} icon={DownloadIcon} />
+                  {t("settings.install", "Install")}
+                </Button>
+              ) : !updateModelDisabled ? (
+                <Button onClick={() => onRunModelAction("update")}>
+                  <SpinnerOrIcon busy={busyAction === "model:update"} icon={RefreshCwIcon} />
+                  {t("settings.update", "Update")}
+                </Button>
+              ) : null}
+              <DropdownMenu>
+                <DropdownMenuTrigger render={<Button variant="outline" disabled={controlsDisabled} />}>
+                  <EllipsisIcon data-icon="inline-start" />
+                  {t("common.more", "More")}
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuGroup>
+                    <DropdownMenuItem onClick={() => onRunModelAction("repair")} disabled={repairModelDisabled}>
+                      <WrenchIcon />
+                      {t("settings.repair", "Repair")}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem variant="destructive" onClick={onRequestDeleteModel} disabled={deleteModelDisabled}>
+                      <Trash2Icon />
+                      {t("common.delete", "Delete")}
+                    </DropdownMenuItem>
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </CardFooter>
           </Card>
 
@@ -604,13 +615,13 @@ export function SettingsSheet({
                 <Field orientation="horizontal">
                   <FieldContent>
                     <FieldTitle>{t("settings.login_service", "Login service")}</FieldTitle>
-                    <FieldDescription>
-                      {status?.service.installed ? t("settings.installed", "installed") : t("settings.not_installed", "not installed")} /{" "}
-                      {status?.service.running ? t("settings.running", "running") : t("settings.stopped", "stopped")}
-                    </FieldDescription>
                   </FieldContent>
                   <Badge variant={readinessVariant(Boolean(status?.service.running))}>
-                    {status?.service.running ? t("settings.running_badge", "Running") : t("settings.stopped_badge", "Stopped")}
+                    {!status?.service.installed
+                      ? t("settings.not_installed", "Not installed")
+                      : status.service.running
+                        ? t("settings.running_badge", "Running")
+                        : t("settings.stopped_badge", "Stopped")}
                   </Badge>
                 </Field>
                 {serviceModelBlocked && (
@@ -622,30 +633,66 @@ export function SettingsSheet({
                 )}
               </FieldGroup>
             </CardContent>
-            <CardFooter>
-              <ButtonGroup className="flex-wrap">
-                <Button variant="outline" onClick={() => onRunServiceAction("install")} disabled={controlsDisabled}>
+            <CardFooter className="flex flex-wrap gap-2">
+              {!status?.service.installed ? (
+                <Button onClick={() => onRunServiceAction("install")} disabled={controlsDisabled}>
                   <SpinnerOrIcon busy={busyAction === "service:install"} icon={DownloadIcon} />
                   {t("settings.install", "Install")}
                 </Button>
+              ) : !status.service.running ? (
                 <Button onClick={() => onRunServiceAction("start")} disabled={controlsDisabled || serviceModelBlocked}>
                   <SpinnerOrIcon busy={busyAction === "service:start"} icon={PlayIcon} />
                   {t("settings.start", "Start")}
                 </Button>
-                <Button variant="outline" onClick={() => onRunServiceAction("stop")} disabled={controlsDisabled}>
-                  <SpinnerOrIcon busy={busyAction === "service:stop"} icon={SquareIcon} />
-                  {t("settings.stop", "Stop")}
-                </Button>
+              ) : (
                 <Button variant="outline" onClick={() => onRunServiceAction("restart")} disabled={controlsDisabled || serviceModelBlocked}>
                   <SpinnerOrIcon busy={busyAction === "service:restart"} icon={RotateCcwIcon} />
                   {t("settings.restart", "Restart")}
                 </Button>
-              </ButtonGroup>
+              )}
+              {status?.service.running && (
+                <DropdownMenu>
+                  <DropdownMenuTrigger render={<Button variant="outline" disabled={controlsDisabled} />}>
+                    <EllipsisIcon data-icon="inline-start" />
+                    {t("common.more", "More")}
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuGroup>
+                      <DropdownMenuItem onClick={() => onRunServiceAction("stop")}>
+                        <SquareIcon />
+                        {t("settings.stop", "Stop")}
+                      </DropdownMenuItem>
+                    </DropdownMenuGroup>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              )}
             </CardFooter>
           </Card>
           </div>
         </div>
       </SheetContent>
+      <AlertDialog open={correctionDeleteOpen} onOpenChange={setCorrectionDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("settings.delete_model_title", "Delete model?")}</AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("settings.delete_model_description", "The downloaded {model} files will be removed from this computer.")
+                .replace("{model}", correctionModel?.display_name ?? activeCorrectionModel)}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>{t("common.cancel", "Cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setCorrectionDeleteOpen(false)
+                onRunCorrectionModelAction("delete-model")
+              }}
+            >
+              {t("settings.delete_model_action", "Delete model")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Sheet>
   )
 }

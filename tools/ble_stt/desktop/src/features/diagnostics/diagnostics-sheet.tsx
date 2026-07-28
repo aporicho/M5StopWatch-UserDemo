@@ -4,38 +4,24 @@ import type { RefObject } from "react"
 import { SpinnerOrIcon } from "@/components/common/spinner-or-icon"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
-import {
-  Card,
-  CardAction,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card"
+import { Card, CardAction, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet"
+import { Sheet, SheetContent, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { RuntimeCard } from "@/features/home/home-page"
 import { PerformanceView } from "@/features/diagnostics/performance-view"
 import {
   type ActivityItem,
-  type DailyState,
   DIAGNOSTIC_ROWS,
   compactTime,
   diagnosticDetail,
+  diagnosticLabel,
   diagnosticOk,
   logLevelVariant,
   percent,
+  performanceValueLabel,
   readinessVariant,
 } from "@/lib/app-view-model"
 import type { PerformanceSnapshot, RuntimeTelemetry, StatusPayload, StructuredLogEntry } from "@/lib/helper-api"
@@ -45,7 +31,6 @@ import { cn } from "@/lib/utils"
 type DiagnosticsSheetProps = {
   open: boolean
   status: StatusPayload | null
-  dailyState: DailyState
   telemetry: RuntimeTelemetry | null
   performance: PerformanceSnapshot | null
   activity: ActivityItem[]
@@ -65,7 +50,6 @@ type DiagnosticsSheetProps = {
 export function DiagnosticsSheet({
   open,
   status,
-  dailyState,
   telemetry,
   performance,
   activity,
@@ -85,47 +69,45 @@ export function DiagnosticsSheet({
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-[min(1040px,calc(100vw-2rem))] sm:max-w-5xl">
         <SheetHeader>
-          <SheetTitle>Diagnostics</SheetTitle>
-          <SheetDescription>Technical state and logs for troubleshooting.</SheetDescription>
+          <SheetTitle>{t("diagnostics.title", "Diagnostics")}</SheetTitle>
         </SheetHeader>
 
         <Tabs defaultValue="overview" className="min-h-0 flex-1 px-4">
           <TabsList className="shrink-0">
-            <TabsTrigger value="overview">Overview</TabsTrigger>
-            <TabsTrigger value="runtime">Runtime</TabsTrigger>
-            <TabsTrigger value="performance">Performance</TabsTrigger>
-            <TabsTrigger value="logs">Logs</TabsTrigger>
+            <TabsTrigger value="overview">{t("diagnostics.overview", "Overview")}</TabsTrigger>
+            <TabsTrigger value="runtime">{t("diagnostics.runtime", "Runtime")}</TabsTrigger>
+            <TabsTrigger value="performance">{t("diagnostics.performance", "Performance")}</TabsTrigger>
+            <TabsTrigger value="logs">{t("diagnostics.logs", "Logs")}</TabsTrigger>
           </TabsList>
 
           <TabsContent value="overview" className="min-h-0">
             <ScrollArea className="h-full pr-3">
               <div className="flex flex-col gap-4 p-px py-4">
                 <Card>
-                  <CardHeader>
-                    <CardTitle>Status details</CardTitle>
-                    <CardDescription>Raw readiness checks from the helper.</CardDescription>
-                  </CardHeader>
+                  <CardHeader><CardTitle>{t("diagnostics.status", "Health checks")}</CardTitle></CardHeader>
                   <CardContent>
                     {status ? (
                       <Table>
                         <TableHeader>
                           <TableRow>
-                            <TableHead>Check</TableHead>
-                            <TableHead>State</TableHead>
-                            <TableHead>Detail</TableHead>
+                            <TableHead>{t("diagnostics.check", "Check")}</TableHead>
+                            <TableHead>{t("diagnostics.state", "State")}</TableHead>
+                            <TableHead>{t("diagnostics.detail", "Detail")}</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
-                          {DIAGNOSTIC_ROWS.map(([key, label]) => {
+                          {DIAGNOSTIC_ROWS.map(([key]) => {
                             const ok = diagnosticOk(status, key)
                             return (
                               <TableRow key={key}>
-                                <TableCell className="font-medium">{label}</TableCell>
+                                <TableCell className="font-medium">{diagnosticLabel(key, t)}</TableCell>
                                 <TableCell>
-                                  <Badge variant={readinessVariant(ok)}>{ok ? "OK" : "Check"}</Badge>
+                                  <Badge variant={readinessVariant(ok)}>
+                                    {ok ? t("common.ok", "OK") : t("common.check", "Check")}
+                                  </Badge>
                                 </TableCell>
                                 <TableCell className="whitespace-normal text-muted-foreground">
-                                  {diagnosticDetail(status, key)}
+                                  {diagnosticDetail(status, key, t)}
                                 </TableCell>
                               </TableRow>
                             )
@@ -143,10 +125,7 @@ export function DiagnosticsSheet({
                 </Card>
 
                 <Card>
-                  <CardHeader>
-                    <CardTitle>Recent activity</CardTitle>
-                    <CardDescription>User-facing events derived from logs.</CardDescription>
-                  </CardHeader>
+                  <CardHeader><CardTitle>{t("diagnostics.activity", "Recent activity")}</CardTitle></CardHeader>
                   <CardContent>
                     {activity.length ? (
                       <Table>
@@ -154,9 +133,7 @@ export function DiagnosticsSheet({
                           {activity.map((item) => (
                             <TableRow key={item.key}>
                               <TableCell className="w-28 text-xs tabular-nums">{compactTime(item.time)}</TableCell>
-                              <TableCell className="w-40">
-                                <Badge variant={item.variant}>{item.label}</Badge>
-                              </TableCell>
+                              <TableCell className="w-40"><Badge variant={item.variant}>{item.label}</Badge></TableCell>
                               <TableCell className="whitespace-normal text-muted-foreground">{item.detail}</TableCell>
                             </TableRow>
                           ))}
@@ -165,11 +142,9 @@ export function DiagnosticsSheet({
                     ) : (
                       <Empty>
                         <EmptyHeader>
-                          <EmptyMedia variant="icon">
-                            <ActivityIcon />
-                          </EmptyMedia>
-                          <EmptyTitle>No events yet</EmptyTitle>
-                          <EmptyDescription>Events appear after the service starts.</EmptyDescription>
+                          <EmptyMedia variant="icon"><ActivityIcon /></EmptyMedia>
+                          <EmptyTitle>{t("diagnostics.no_events", "No activity yet")}</EmptyTitle>
+                          <EmptyDescription>{t("diagnostics.no_events_description", "Activity appears after the voice service starts.")}</EmptyDescription>
                         </EmptyHeader>
                       </Empty>
                     )}
@@ -181,41 +156,32 @@ export function DiagnosticsSheet({
 
           <TabsContent value="runtime" className="min-h-0">
             <ScrollArea className="h-full pr-3">
-              <div className="flex flex-col gap-4 p-px py-4">
-                <RuntimeCard state={dailyState} telemetry={telemetry} t={t} />
+              <div className="p-px py-4">
                 <Card>
-                  <CardHeader>
-                    <CardTitle>Runtime telemetry</CardTitle>
-                    <CardDescription>Live data produced by the speech helper.</CardDescription>
-                  </CardHeader>
+                  <CardHeader><CardTitle>{t("diagnostics.runtime", "Runtime")}</CardTitle></CardHeader>
                   <CardContent>
                     <Table>
                       <TableBody>
                         <TableRow>
-                          <TableCell className="font-medium">Stage</TableCell>
-                          <TableCell>{telemetry?.stage ?? "unknown"}</TableCell>
+                          <TableCell className="font-medium">{t("performance.stage", "Stage")}</TableCell>
+                          <TableCell>{performanceValueLabel("stage", telemetry?.stage, t)}</TableCell>
                         </TableRow>
                         <TableRow>
-                          <TableCell className="font-medium">Session</TableCell>
-                          <TableCell>{telemetry?.session_id ?? "none"}</TableCell>
+                          <TableCell className="font-medium">{t("diagnostics.mode", "Mode")}</TableCell>
+                          <TableCell>{performanceValueLabel("mode", telemetry?.recognition.mode, t)}</TableCell>
                         </TableRow>
                         <TableRow>
-                          <TableCell className="font-medium">Audio level</TableCell>
+                          <TableCell className="font-medium">{t("home.audio_level", "Audio level")}</TableCell>
                           <TableCell>{percent(telemetry?.audio.level)}</TableCell>
                         </TableRow>
                         <TableRow>
-                          <TableCell className="font-medium">Peak</TableCell>
+                          <TableCell className="font-medium">{t("home.peak", "Peak")}</TableCell>
                           <TableCell>{percent(telemetry?.audio.peak)}</TableCell>
                         </TableRow>
                         <TableRow>
-                          <TableCell className="font-medium">Mode</TableCell>
-                          <TableCell>{telemetry?.recognition.mode ?? "unknown"}</TableCell>
-                        </TableRow>
-                        <TableRow>
-                          <TableCell className="font-medium">Age</TableCell>
+                          <TableCell className="font-medium">{t("diagnostics.age", "Updated")}</TableCell>
                           <TableCell>
-                            {telemetry?.age_seconds == null ? "unknown" : `${telemetry.age_seconds.toFixed(2)}s`}
-                            {telemetry?.stale ? " / stale" : ""}
+                            {telemetry?.age_seconds == null ? "—" : `${telemetry.age_seconds.toFixed(2)}s`}
                           </TableCell>
                         </TableRow>
                       </TableBody>
@@ -226,20 +192,22 @@ export function DiagnosticsSheet({
             </ScrollArea>
           </TabsContent>
 
+          <TabsContent value="performance" className="min-h-0">
+            <ScrollArea className="h-full pr-3">
+              <PerformanceView snapshot={performance} busy={busyAction !== null} onClear={onClearPerformance} t={t} />
+            </ScrollArea>
+          </TabsContent>
+
           <TabsContent value="logs" className="min-h-0">
             <div className="flex h-full min-h-0 flex-col gap-4 p-px py-4">
               <Card className="min-h-0 flex-1">
                 <CardHeader>
-                  <div>
-                    <CardTitle>Logs</CardTitle>
-                    <CardDescription>Structured helper events from the local log directory.</CardDescription>
-                  </div>
+                  <CardTitle>{t("diagnostics.logs", "Logs")}</CardTitle>
                   <CardAction>
-                    <Button
-                      variant={autoFollowLogs ? "secondary" : "outline"}
-                      onClick={onToggleAutoFollowLogs}
-                    >
-                      {autoFollowLogs ? "Following" : "Follow latest"}
+                    <Button variant={autoFollowLogs ? "secondary" : "outline"} onClick={onToggleAutoFollowLogs}>
+                      {autoFollowLogs
+                        ? t("diagnostics.following", "Following")
+                        : t("diagnostics.follow_latest", "Follow latest")}
                     </Button>
                   </CardAction>
                 </CardHeader>
@@ -249,19 +217,17 @@ export function DiagnosticsSheet({
                       <Table>
                         <TableHeader>
                           <TableRow>
-                            <TableHead className="w-44">Time</TableHead>
-                            <TableHead className="w-24">Level</TableHead>
-                            <TableHead className="w-36">Component</TableHead>
-                            <TableHead>Message</TableHead>
+                            <TableHead className="w-44">{t("diagnostics.time", "Time")}</TableHead>
+                            <TableHead className="w-24">{t("diagnostics.level", "Level")}</TableHead>
+                            <TableHead className="w-36">{t("diagnostics.component", "Component")}</TableHead>
+                            <TableHead>{t("diagnostics.message", "Message")}</TableHead>
                           </TableRow>
                         </TableHeader>
                         <TableBody>
                           {logEntries.map((entry, index) => (
                             <TableRow key={`${entry.source}-${entry.time}-${index}`}>
                               <TableCell className="text-xs tabular-nums">{entry.time || "--"}</TableCell>
-                              <TableCell>
-                                <Badge variant={logLevelVariant(entry.level)}>{entry.level}</Badge>
-                              </TableCell>
+                              <TableCell><Badge variant={logLevelVariant(entry.level)}>{entry.level}</Badge></TableCell>
                               <TableCell className="text-xs">{entry.component}</TableCell>
                               <TableCell
                                 className={cn(
@@ -278,11 +244,9 @@ export function DiagnosticsSheet({
                     ) : (
                       <Empty>
                         <EmptyHeader>
-                          <EmptyMedia variant="icon">
-                            <FileTextIcon />
-                          </EmptyMedia>
-                          <EmptyTitle>No logs yet</EmptyTitle>
-                          <EmptyDescription>Logs appear once the helper has started.</EmptyDescription>
+                          <EmptyMedia variant="icon"><FileTextIcon /></EmptyMedia>
+                          <EmptyTitle>{t("diagnostics.no_logs", "No logs yet")}</EmptyTitle>
+                          <EmptyDescription>{t("diagnostics.no_logs_description", "Logs appear after the voice service starts.")}</EmptyDescription>
                         </EmptyHeader>
                       </Empty>
                     )}
@@ -292,27 +256,16 @@ export function DiagnosticsSheet({
               </Card>
             </div>
           </TabsContent>
-
-          <TabsContent value="performance" className="min-h-0">
-            <ScrollArea className="h-full pr-3">
-              <PerformanceView
-                snapshot={performance}
-                busy={busyAction !== null}
-                onClear={onClearPerformance}
-                t={t}
-              />
-            </ScrollArea>
-          </TabsContent>
         </Tabs>
 
         <SheetFooter>
           <Button variant="outline" onClick={onOpenLogs} disabled={busyAction !== null}>
             <SpinnerOrIcon busy={busyAction === "logs"} icon={FolderOpenIcon} />
-            Open logs
+            {t("diagnostics.open_logs", "Open logs")}
           </Button>
           <Button onClick={onCopyDiagnostics} disabled={busyAction !== null}>
             <SpinnerOrIcon busy={busyAction === "diagnostics"} icon={ClipboardIcon} />
-            Copy diagnostics
+            {t("diagnostics.copy", "Copy diagnostics")}
           </Button>
         </SheetFooter>
       </SheetContent>
