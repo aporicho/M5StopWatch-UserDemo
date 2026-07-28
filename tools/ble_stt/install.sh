@@ -4,6 +4,10 @@ set -eu
 REPOSITORY="aporicho/M5StopWatch-UserDemo"
 MODEL="${BLE_STT_MODEL:-small}"
 ENGINE="${BLE_STT_ENGINE:-auto}"
+MODEL_OVERRIDE_SET=0
+ENGINE_OVERRIDE_SET=0
+[ "${BLE_STT_MODEL+x}" = "x" ] && MODEL_OVERRIDE_SET=1
+[ "${BLE_STT_ENGINE+x}" = "x" ] && ENGINE_OVERRIDE_SET=1
 MODE="install"
 SKIP_TEST="${BLE_STT_SKIP_TEST:-0}"
 PURGE_MODELS=0
@@ -438,7 +442,14 @@ install_macos_app() {
     app_executable="$(macos_app_executable "$MAC_APP")"
 
     say "Registering the login service"
-    "$app_executable" service install -- --engine "$ENGINE" --model "$MODEL"
+    # The service reads its model selection from the persistent user config.
+    # Keeping model flags out of the LaunchAgent means an app upgrade preserves
+    # the current selection and later changes in the UI actually take effect.
+    # Explicit installer overrides still win, but are persisted first.
+    if [ "$ENGINE_OVERRIDE_SET" = "1" ] || [ "$MODEL_OVERRIDE_SET" = "1" ]; then
+        "$app_executable" models use --engine "$ENGINE" --model "$MODEL"
+    fi
+    "$app_executable" service install
 
     say "Waiting for the login service to become healthy"
     service_attempt=0

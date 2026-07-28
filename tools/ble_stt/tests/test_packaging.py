@@ -82,6 +82,12 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertIn('macos_validate_app_structure "$MAC_APP"', public_install)
         self.assertIn('"$MAC_APP"/Contents/MacOS/*', public_install)
         self.assertNotIn('app_executable="$MAC_APP/Contents/MacOS/M5StopWatch"', public_install)
+        self.assertIn('"$app_executable" service install', public_install)
+        self.assertNotIn(
+            '"$app_executable" service install -- --engine "$ENGINE" --model "$MODEL"',
+            public_install,
+        )
+        self.assertIn('"$app_executable" models use --engine "$ENGINE" --model "$MODEL"', public_install)
 
     def test_release_packages_outer_desktop_app_with_signed_nested_helper(self):
         workflow = (
