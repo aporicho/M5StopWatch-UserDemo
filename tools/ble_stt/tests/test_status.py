@@ -153,26 +153,37 @@ class StatusTests(unittest.TestCase):
     def test_snapshot_dict_exposes_ui_state(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            model_snapshot = (
+                root
+                / "cache"
+                / "hub"
+                / "models--Systran--faster-whisper-medium"
+                / "snapshots"
+                / "revision"
+            )
+            model_snapshot.mkdir(parents=True)
+            (model_snapshot / "model.bin").write_text("weights", encoding="utf-8")
             event_log = root / "ble-stt-events.log"
             event_log.write_text(
                 "2026-07-25 20:00:00.000 INFO [123:MainThread] ble_stt.runtime: "
                 "connected mtu=185 services=[]\n",
                 encoding="utf-8",
             )
-            snapshot = collect_status(
-                manager=FakeManager(installed=True, active=True),
-                config=FakeConfig(
-                    {
-                        "device_id": "watch-123",
-                        "engine": "auto",
-                        "model": "medium",
-                        "prepared_model": "mlx-community/whisper-medium-mlx",
-                    }
-                ),
-                platform_adapter=FakePlatform(),
-                log_directory=root,
-                log_paths=(event_log,),
-            )
+            with patch("ble_stt.models.model_cache_dir", return_value=root / "cache"):
+                snapshot = collect_status(
+                    manager=FakeManager(installed=True, active=True),
+                    config=FakeConfig(
+                        {
+                            "device_id": "watch-123",
+                            "engine": "faster-whisper",
+                            "model": "medium",
+                            "prepared_model": "medium",
+                        }
+                    ),
+                    platform_adapter=FakePlatform(),
+                    log_directory=root,
+                    log_paths=(event_log,),
+                )
 
         payload = snapshot_to_dict(snapshot)
 

@@ -5,7 +5,7 @@ import sys
 import tempfile
 import types
 import unittest
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from unittest.mock import MagicMock, Mock, call, patch
 
 from ble_stt.config import UserConfig, config_dir, install_dir, model_cache_dir
@@ -707,8 +707,8 @@ class ServiceRenderingTests(unittest.TestCase):
         value = plistlib.loads(
             render_launch_agent(
                 ["/usr/bin/open", "-W", "-g", "-j", "/tmp/M5StopWatch.app", "--args", "run"],
-                Path("/tmp/out"),
-                Path("/tmp/err"),
+                PurePosixPath("/tmp/out"),
+                PurePosixPath("/tmp/err"),
             )
         )
         self.assertEqual(

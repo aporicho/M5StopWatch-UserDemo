@@ -56,7 +56,10 @@ class RuntimeDefaultTests(unittest.TestCase):
             config.set("model", "small")
             args = SimpleNamespace(engine="auto", model="small", device="auto", cpu_threads=2)
 
-            with patch("ble_stt.models.model_cache_dir", return_value=cache):
+            with (
+                patch("ble_stt.models.model_cache_dir", return_value=cache),
+                patch("ble_stt.models.resolve_engine", return_value="mlx"),
+            ):
                 with patch("ble_stt.main.create_recognizer", return_value=object()) as create:
                     _create_configured_recognizer(args, config)
                 status = model_status(config, "auto", "small")

@@ -102,7 +102,10 @@ class ModelManagementTests(unittest.TestCase):
             (snapshot / "weights.npz").write_text("weights", encoding="utf-8")
             config = UserConfig(root / "ble-stt.json")
 
-            with patch("ble_stt.models.model_cache_dir", return_value=cache):
+            with (
+                patch("ble_stt.models.model_cache_dir", return_value=cache),
+                patch("ble_stt.models.resolve_engine", return_value="mlx"),
+            ):
                 engine, model = selected_model(config)
                 status = model_status(config)
 
@@ -125,7 +128,10 @@ class ModelManagementTests(unittest.TestCase):
             config.set("engine", "auto")
             config.set("model", "small")
 
-            with patch("ble_stt.models.model_cache_dir", return_value=cache):
+            with (
+                patch("ble_stt.models.model_cache_dir", return_value=cache),
+                patch("ble_stt.models.resolve_engine", return_value="mlx"),
+            ):
                 status = model_status(config)
 
         self.assertFalse(status.installed)
@@ -149,7 +155,10 @@ class ModelManagementTests(unittest.TestCase):
             config.set("engine", "auto")
             config.set("model", "small")
 
-            with patch("ble_stt.models.model_cache_dir", return_value=cache):
+            with (
+                patch("ble_stt.models.model_cache_dir", return_value=cache),
+                patch("ble_stt.models.resolve_engine", return_value="mlx"),
+            ):
                 runtime = runtime_model_name("auto", "small", config)
 
         self.assertEqual(Path(runtime), snapshot)
@@ -170,7 +179,10 @@ class ModelManagementTests(unittest.TestCase):
             config.set("engine", "auto")
             config.set("model", "small")
 
-            with patch("ble_stt.models.model_cache_dir", return_value=cache):
+            with (
+                patch("ble_stt.models.model_cache_dir", return_value=cache),
+                patch("ble_stt.models.resolve_engine", return_value="mlx"),
+            ):
                 status = model_status(config)
                 runtime = runtime_model_name("auto", "small", config)
 
@@ -212,7 +224,10 @@ class ModelManagementTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with patch("ble_stt.models.model_cache_dir", return_value=cache):
+            with (
+                patch("ble_stt.models.model_cache_dir", return_value=cache),
+                patch("ble_stt.models.resolve_engine", return_value="mlx"),
+            ):
                 status = model_status(config)
                 runtime = runtime_model_name("auto", "small", config)
                 saved = json.loads(metadata_path.read_text(encoding="utf-8"))
