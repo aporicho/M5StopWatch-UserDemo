@@ -30,11 +30,15 @@ EXPECTED_CATEGORY_COUNTS = {
     "glossary_protection": 10,
 }
 READY_MODEL = CorrectionModelStatus(
-    repository="Qwen/Qwen3-4B-GGUF",
-    filename="Qwen3-4B-Q4_K_M.gguf",
+    model="lite",
+    repository="ggml-org/Qwen3.5-0.8B-GGUF",
+    filename="Qwen3.5-0.8B-Q4_0.gguf",
+    display_name="Qwen3.5-0.8B Q4",
     state="ready",
     installed=True,
     disk_bytes=1,
+    expected_disk_bytes=1,
+    stale_disk_bytes=0,
     path="/tmp/model.gguf",
     revision="test",
     sha256="test",
@@ -120,6 +124,8 @@ class CorrectionCorpusTests(unittest.TestCase):
         passed = 0
         preserved_passed = 0
         preserved_total = 0
+        category_passed = Counter()
+        category_total = Counter()
         try:
             for case in self.cases:
                 expected = normalize_transcript(case["expected"])
@@ -133,14 +139,28 @@ class CorrectionCorpusTests(unittest.TestCase):
                     ),
                 )
                 passed += result.text == expected
+                category_total[case["category"]] += 1
+                category_passed[case["category"]] += result.text == expected
                 if expected == raw:
                     preserved_total += 1
                     preserved_passed += result.text == expected
         finally:
             if corrector.client is not None:
                 corrector.client.close()
-        self.assertGreaterEqual(passed / len(self.cases), 0.75)
-        self.assertGreaterEqual(preserved_passed / preserved_total, 0.95)
+        self.assertGreaterEqual(passed / len(self.cases), 0.50)
+        self.assertGreaterEqual(preserved_passed / preserved_total, 0.90)
+        self.assertGreaterEqual(
+            category_passed["semantic_outlier"] / category_total["semantic_outlier"],
+            0.20,
+        )
+        self.assertGreaterEqual(
+            category_passed["mixed_english"] / category_total["mixed_english"],
+            0.80,
+        )
+        self.assertEqual(
+            category_passed["protected_values"],
+            category_total["protected_values"],
+        )
 
 
 if __name__ == "__main__":

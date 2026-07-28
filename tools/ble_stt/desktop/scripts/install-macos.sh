@@ -158,6 +158,16 @@ APP_EXECUTABLE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$
 APP_EXEC="$APP_TARGET/Contents/MacOS/$APP_EXECUTABLE_NAME"
 [ -x "$APP_EXEC" ] || { printf 'Missing app executable: %s\n' "$APP_EXEC" >&2; exit 1; }
 
+BIN_DIR="$HOME/.local/bin"
+SHIM="$BIN_DIR/ble-stt"
+if [ -e "$SHIM" ] && [ ! -L "$SHIM" ]; then
+  printf '%s already exists and is not an M5StopWatch symlink. Move it aside and retry.\n' "$SHIM" >&2
+  exit 1
+fi
+/bin/mkdir -p "$BIN_DIR"
+/bin/ln -sfn "$APP_EXEC" "$SHIM"
+[ -x "$SHIM" ] || { printf 'Command link is not executable: %s\n' "$SHIM" >&2; exit 1; }
+
 "$APP_EXEC" status --json >/dev/null
 "$APP_EXEC" service install --json
 LAUNCH_AGENT="$HOME/Library/LaunchAgents/com.aporicho.m5stopwatch-ble-stt.plist"

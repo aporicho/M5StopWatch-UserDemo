@@ -17,12 +17,61 @@ from pathlib import Path
 from typing import Any
 
 from .config import UserConfig, model_cache_dir
-from .preferences import DEFAULT_CORRECTION_FILE, DEFAULT_CORRECTION_REPOSITORY
+from .preferences import (
+    DEFAULT_CORRECTION_FILE,
+    DEFAULT_CORRECTION_MODEL,
+    DEFAULT_CORRECTION_REPOSITORY,
+    read_voice_preferences,
+    save_voice_preferences,
+)
 from .recognizers import configure_hf_environment
 
 
+MAX_CORRECTION_MODEL_BYTES = 1_000_000_000
+
+
+@dataclass(frozen=True)
+class CorrectionModelPreset:
+    id: str
+    display_name: str
+    description: str
+    repository: str
+    filename: str
+    revision: str
+    sha256: str
+    expected_bytes: int
+
+
+CORRECTION_MODEL_PRESETS: tuple[CorrectionModelPreset, ...] = (
+    CorrectionModelPreset(
+        id="lite",
+        display_name="Qwen3.5-0.8B Q4",
+        description="Smallest recommended model",
+        repository=DEFAULT_CORRECTION_REPOSITORY,
+        filename=DEFAULT_CORRECTION_FILE,
+        revision="8fea620810c4afa23dd6443f999a48574c1611a3",
+        sha256="57d1997790d1744fba5b40a7317df71ea5e2acee28c47e78f0cce39c0703f8cf",
+        expected_bytes=563_036_064,
+    ),
+    CorrectionModelPreset(
+        id="balanced",
+        display_name="Qwen2.5-1.5B Q3_K_M",
+        description="Better correction, still under 1 GB",
+        repository="Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+        filename="qwen2.5-1.5b-instruct-q3_k_m.gguf",
+        revision="91cad51170dc346986eccefdc2dd33a9da36ead9",
+        sha256="58cb5c05ecef48e82961f1a2be6544145ea26136f69dddda4bbbd092f0e4b993",
+        expected_bytes=924_455_968,
+    ),
+)
+CORRECTION_MODEL_PRESET_MAP = {preset.id: preset for preset in CORRECTION_MODEL_PRESETS}
+DEFAULT_CORRECTION_PRESET = CORRECTION_MODEL_PRESET_MAP[DEFAULT_CORRECTION_MODEL]
 CORRECTION_MODEL_DIRECTORY = "correction"
 CORRECTION_METADATA_FILE = "model.json"
+DEFAULT_CORRECTION_DISPLAY_NAME = DEFAULT_CORRECTION_PRESET.display_name
+DEFAULT_CORRECTION_REVISION = DEFAULT_CORRECTION_PRESET.revision
+DEFAULT_CORRECTION_SHA256 = DEFAULT_CORRECTION_PRESET.sha256
+DEFAULT_CORRECTION_EXPECTED_BYTES = DEFAULT_CORRECTION_PRESET.expected_bytes
 LLAMA_RUNTIME_VERSION = "b9000"
 LLAMA_RUNTIME_ASSETS = {
     "darwin-arm64": ("llama-b9000-bin-macos-arm64.tar.gz", "e4531e819dd9fe4add199db998df55cf8bd20e18a67cbd1449b49409dc01c642"),
@@ -36,11 +85,15 @@ LLAMA_RUNTIME_ASSETS = {
 
 @dataclass(frozen=True)
 class CorrectionModelStatus:
+    model: str
     repository: str
     filename: str
+    display_name: str
     state: str
     installed: bool
     disk_bytes: int
+    expected_disk_bytes: int
+    stale_disk_bytes: int
     path: str
     revision: str | None
     sha256: str | None
@@ -60,8 +113,23 @@ def correction_model_dir(platform_name: str | None = None) -> Path:
     return model_cache_dir(platform_name) / CORRECTION_MODEL_DIRECTORY
 
 
-def correction_model_path(platform_name: str | None = None) -> Path:
-    return correction_model_dir(platform_name) / "models" / DEFAULT_CORRECTION_FILE
+def correction_model_preset(
+    model: str | None = None,
+    config: UserConfig | None = None,
+) -> CorrectionModelPreset:
+    selected = model or read_voice_preferences(config).correction.model
+    try:
+        return CORRECTION_MODEL_PRESET_MAP[selected]
+    except KeyError as exc:
+        raise ValueError(f"unknown correction model: {selected}") from exc
+
+
+def correction_model_path(
+    platform_name: str | None = None,
+    model: str | None = None,
+) -> Path:
+    preset = correction_model_preset(model)
+    return correction_model_dir(platform_name) / "models" / preset.filename
 
 
 def correction_metadata_path(platform_name: str | None = None) -> Path:
@@ -70,6 +138,18 @@ def correction_metadata_path(platform_name: str | None = None) -> Path:
 
 def correction_runtime_dir(platform_name: str | None = None) -> Path:
     return correction_model_dir(platform_name) / "runtime"
+
+
+def _stale_model_paths(platform_name: str | None = None) -> list[Path]:
+    directory = correction_model_dir(platform_name) / "models"
+    if not directory.exists():
+        return []
+    known_files = {preset.filename for preset in CORRECTION_MODEL_PRESETS}
+    return [
+        path
+        for path in directory.glob("*.gguf")
+        if path.name not in known_files and path.is_file()
+    ]
 
 
 def _read_metadata(platform_name: str | None = None) -> dict[str, Any]:
@@ -86,6 +166,38 @@ def _write_metadata(value: dict[str, Any], platform_name: str | None = None) -> 
     temporary = path.with_suffix(".tmp")
     temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     temporary.replace(path)
+
+
+def _model_metadata(preset: CorrectionModelPreset, platform_name: str | None = None) -> dict[str, Any]:
+    metadata = _read_metadata(platform_name)
+    models = metadata.get("models")
+    if isinstance(models, dict):
+        value = models.get(preset.id)
+        return value if isinstance(value, dict) else {}
+    if metadata.get("filename") == preset.filename:
+        return metadata
+    return {}
+
+
+def _write_model_metadata(
+    preset: CorrectionModelPreset,
+    value: dict[str, Any] | None,
+    platform_name: str | None = None,
+) -> None:
+    metadata = _read_metadata(platform_name)
+    models = metadata.get("models")
+    if not isinstance(models, dict):
+        models = {}
+        if metadata.get("filename"):
+            for candidate in CORRECTION_MODEL_PRESETS:
+                if metadata.get("filename") == candidate.filename:
+                    models[candidate.id] = metadata
+                    break
+    if value is None:
+        models.pop(preset.id, None)
+    else:
+        models[preset.id] = value
+    _write_metadata({"schema": 2, "models": models}, platform_name)
 
 
 def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
@@ -149,29 +261,50 @@ def llama_server_path(platform_name: str | None = None) -> Path | None:
 def correction_model_status(
     config: UserConfig | None = None,
     platform_name: str | None = None,
+    model: str | None = None,
 ) -> CorrectionModelStatus:
-    del config  # Reserved for future per-model selection without changing this interface.
-    path = correction_model_path(platform_name)
-    metadata = _read_metadata(platform_name)
+    preset = correction_model_preset(model, config)
+    path = correction_model_path(platform_name, preset.id)
+    metadata = _model_metadata(preset, platform_name)
     runtime = llama_server_path(platform_name)
     installed = path.exists() and path.is_file() and path.stat().st_size > 0
-    state = "ready" if installed else "missing"
-    message = "correction model ready" if installed else "correction model is not installed"
-    if installed and metadata.get("sha256"):
+    stale_disk_bytes = sum(candidate.stat().st_size for candidate in _stale_model_paths(platform_name))
+    state = "ready" if installed else ("legacy" if stale_disk_bytes else "missing")
+    message = (
+        f"{preset.display_name} ready"
+        if installed
+        else (
+            f"legacy correction model found; replace it with {preset.display_name}"
+            if stale_disk_bytes
+            else f"{preset.display_name} is not installed"
+        )
+    )
+    if installed:
         recorded_size = int(metadata.get("size", 0) or 0)
-        if recorded_size and path.stat().st_size != recorded_size:
+        recorded_sha256 = str(metadata.get("sha256", "") or "").casefold()
+        recorded_revision = str(metadata.get("revision", "") or "")
+        if (
+            path.stat().st_size != preset.expected_bytes
+            or recorded_size != preset.expected_bytes
+            or recorded_sha256 != preset.sha256.casefold()
+            or recorded_revision != preset.revision
+        ):
             installed = False
             state = "partial"
-            message = "correction model size does not match metadata; use Repair"
+            message = f"{preset.display_name} failed pinned metadata checks; use Repair"
     if installed and runtime is None:
         state = "runtime_missing"
         message = "llama-server runtime is not bundled"
     return CorrectionModelStatus(
-        repository=DEFAULT_CORRECTION_REPOSITORY,
-        filename=DEFAULT_CORRECTION_FILE,
+        model=preset.id,
+        repository=preset.repository,
+        filename=preset.filename,
+        display_name=preset.display_name,
         state=state,
         installed=installed,
         disk_bytes=path.stat().st_size if path.exists() else 0,
+        expected_disk_bytes=preset.expected_bytes,
+        stale_disk_bytes=stale_disk_bytes,
         path=str(path),
         revision=str(metadata.get("revision")) if metadata.get("revision") else None,
         sha256=str(metadata.get("sha256")) if metadata.get("sha256") else None,
@@ -181,22 +314,70 @@ def correction_model_status(
     )
 
 
-def _remote_metadata() -> tuple[str | None, str | None, int | None]:
+def list_correction_models(config: UserConfig | None = None) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": preset.id,
+            "label": preset.display_name,
+            "description": preset.description,
+            "status": correction_model_status(config, model=preset.id).to_dict(),
+        }
+        for preset in CORRECTION_MODEL_PRESETS
+    ]
+
+
+def _remote_metadata(
+    preset: CorrectionModelPreset | None = None,
+) -> tuple[str | None, str | None, int | None]:
+    preset = preset or DEFAULT_CORRECTION_PRESET
+    if preset.expected_bytes > MAX_CORRECTION_MODEL_BYTES:
+        raise RuntimeError("configured correction model exceeds the 1 GB product limit")
     configure_hf_environment()
     from huggingface_hub import HfApi
 
-    info = HfApi().model_info(DEFAULT_CORRECTION_REPOSITORY, revision="main", files_metadata=True)
+    info = HfApi().model_info(
+        preset.repository,
+        revision=preset.revision,
+        files_metadata=True,
+    )
     digest: str | None = None
     size: int | None = None
     for sibling in info.siblings or ():
-        if getattr(sibling, "rfilename", None) != DEFAULT_CORRECTION_FILE:
+        if getattr(sibling, "rfilename", None) != preset.filename:
             continue
         lfs = getattr(sibling, "lfs", None)
         digest = str(getattr(lfs, "sha256", "") or "") or None
         raw_size = getattr(lfs, "size", None) or getattr(sibling, "size", None)
         size = int(raw_size) if raw_size is not None else None
         break
-    return str(info.sha) if getattr(info, "sha", None) else None, digest, size
+    revision = str(info.sha) if getattr(info, "sha", None) else None
+    if revision != preset.revision:
+        raise RuntimeError("correction model revision does not match the pinned revision")
+    if size != preset.expected_bytes or size > MAX_CORRECTION_MODEL_BYTES:
+        raise RuntimeError("correction model size does not match the pinned size")
+    if not digest or digest.casefold() != preset.sha256.casefold():
+        raise RuntimeError("correction model SHA-256 does not match the pinned digest")
+    return revision, digest, size
+
+
+def _download_model(
+    preset: CorrectionModelPreset,
+    revision: str,
+    destination: Path,
+    cache: Path,
+) -> Path:
+    configure_hf_environment()
+    from huggingface_hub import hf_hub_download
+
+    return Path(
+        hf_hub_download(
+            repo_id=preset.repository,
+            filename=preset.filename,
+            revision=revision,
+            local_dir=destination,
+            cache_dir=cache,
+        )
+    )
 
 
 def _runtime_asset_key(platform_name: str | None = None, machine: str | None = None) -> str:
@@ -317,63 +498,111 @@ def install_correction_runtime(
     return destination / server_name
 
 
-def install_correction_model(config: UserConfig | None = None) -> CorrectionModelStatus:
-    del config
-    configure_hf_environment()
-    from huggingface_hub import hf_hub_download
-
-    install_correction_runtime()
-
-    revision, expected_sha256, expected_size = _remote_metadata()
-    destination = correction_model_path()
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    downloaded = Path(
-        hf_hub_download(
-            repo_id=DEFAULT_CORRECTION_REPOSITORY,
-            filename=DEFAULT_CORRECTION_FILE,
-            revision=revision or "main",
-            local_dir=destination.parent,
-            cache_dir=correction_model_dir() / "hub",
-        )
-    )
-    if downloaded.resolve() != destination.resolve():
-        shutil.copy2(downloaded, destination)
-    if expected_size is not None and destination.stat().st_size != expected_size:
-        raise RuntimeError("downloaded correction model has an unexpected size")
-    actual_sha256 = sha256_file(destination)
-    if expected_sha256 and actual_sha256.casefold() != expected_sha256.casefold():
-        destination.unlink(missing_ok=True)
-        raise RuntimeError("downloaded correction model failed SHA-256 verification")
-    _write_metadata(
+def use_correction_model(
+    model: str,
+    config: UserConfig | None = None,
+) -> CorrectionModelStatus:
+    config = config or UserConfig()
+    preset = correction_model_preset(model, config)
+    settings = read_voice_preferences(config).to_dict()
+    settings["correction"].update(
         {
-            "schema": 1,
-            "repository": DEFAULT_CORRECTION_REPOSITORY,
-            "filename": DEFAULT_CORRECTION_FILE,
-            "revision": revision,
-            "sha256": expected_sha256 or actual_sha256,
-            "size": destination.stat().st_size,
-            "installed_at": time.time(),
+            "model": preset.id,
+            "repository": preset.repository,
+            "filename": preset.filename,
         }
     )
-    for stale_model in destination.parent.glob("*.gguf"):
-        if stale_model != destination:
-            stale_model.unlink(missing_ok=True)
-    return correction_model_status()
+    save_voice_preferences(settings, config)
+    return correction_model_status(config, model=preset.id)
 
 
-def delete_correction_model(config: UserConfig | None = None) -> CorrectionModelStatus:
-    del config
+def install_correction_model(
+    config: UserConfig | None = None,
+    model: str | None = None,
+) -> CorrectionModelStatus:
+    config = config or UserConfig()
+    preset = correction_model_preset(model, config)
+    revision, expected_sha256, expected_size = _remote_metadata(preset)
+    install_correction_runtime()
+    destination = correction_model_path(model=preset.id)
+    destination.parent.mkdir(parents=True, exist_ok=True)
     root = correction_model_dir()
-    shutil.rmtree(root / "models", ignore_errors=True)
+    staging = root / "model-staging"
+    temporary = destination.with_name(f".{destination.name}.installing")
+    shutil.rmtree(staging, ignore_errors=True)
+    temporary.unlink(missing_ok=True)
+    try:
+        downloaded = _download_model(
+            preset,
+            revision or preset.revision,
+            staging,
+            root / "hub",
+        )
+        if expected_size is not None and downloaded.stat().st_size != expected_size:
+            raise RuntimeError("downloaded correction model has an unexpected size")
+        actual_sha256 = sha256_file(downloaded)
+        if expected_sha256 and actual_sha256.casefold() != expected_sha256.casefold():
+            raise RuntimeError("downloaded correction model failed SHA-256 verification")
+        # local_dir may be backed by a cache link in older huggingface_hub
+        # versions. Copy into our own filesystem before deleting Hub caches.
+        shutil.copy2(downloaded, temporary)
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(root / "hub", ignore_errors=True)
+    _write_model_metadata(
+        preset,
+        {
+            "repository": preset.repository,
+            "filename": preset.filename,
+            "revision": revision,
+            "sha256": preset.sha256,
+            "size": destination.stat().st_size,
+            "installed_at": time.time(),
+        },
+    )
+    for stale_model in _stale_model_paths():
+        stale_model.unlink(missing_ok=True)
+    return correction_model_status(config, model=preset.id)
+
+
+def _delete_correction_model_files(
+    preset: CorrectionModelPreset,
+    *,
+    remove_legacy_if_missing: bool,
+) -> None:
+    root = correction_model_dir()
+    destination = correction_model_path(model=preset.id)
+    was_installed = destination.exists()
+    destination.unlink(missing_ok=True)
+    if remove_legacy_if_missing and not was_installed:
+        for path in _stale_model_paths():
+            path.unlink(missing_ok=True)
     shutil.rmtree(root / "hub", ignore_errors=True)
-    (root / CORRECTION_METADATA_FILE).unlink(missing_ok=True)
-    return correction_model_status()
+    shutil.rmtree(root / "model-staging", ignore_errors=True)
+    _write_model_metadata(preset, None)
 
 
-def repair_correction_model(config: UserConfig | None = None) -> CorrectionModelStatus:
-    delete_correction_model(config)
-    return install_correction_model(config)
+def delete_correction_model(
+    config: UserConfig | None = None,
+    model: str | None = None,
+) -> CorrectionModelStatus:
+    config = config or UserConfig()
+    preset = correction_model_preset(model, config)
+    _delete_correction_model_files(preset, remove_legacy_if_missing=True)
+    return correction_model_status(config, model=preset.id)
 
 
-def update_correction_model(config: UserConfig | None = None) -> CorrectionModelStatus:
-    return install_correction_model(config)
+def repair_correction_model(
+    config: UserConfig | None = None,
+    model: str | None = None,
+) -> CorrectionModelStatus:
+    return install_correction_model(config, model)
+
+
+def update_correction_model(
+    config: UserConfig | None = None,
+    model: str | None = None,
+) -> CorrectionModelStatus:
+    return install_correction_model(config, model)

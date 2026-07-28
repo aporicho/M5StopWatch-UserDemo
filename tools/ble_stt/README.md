@@ -93,7 +93,14 @@ macOS 安装成功后，在手表上打开 **BLE Remote**，再到“系统设�
 
 设置页提供三层语言信息：Whisper/Qwen 自带的语言知识、默认开启的精简常用词包，以及用户自己的个人词典。内置词包覆盖常见计算机词、固件/烧录/蓝牙等中文词和 M5StopWatch 产品名，只作为识别偏置，不会强制替换；个人词典优先级最高，并在最终纠错中受到严格保护。系统不会把大型通用词典整体塞进 Whisper 提示词，每次最多发送少量词条，避免拖慢识别或挤占音频上下文。
 
-智能纠错默认关闭。开启前在“设置 → 智能纠错”按需安装官方 `Qwen3-4B-Q4_K_M.gguf`，下载约 2.50 GB。推理通过只监听 `127.0.0.1`、带随机 API 密钥的 `llama-server` 完成；运行时固定为经过 SHA-256 校验的 llama.cpp `b9000`，macOS 包直接内置，Linux/Windows 首次安装纠错模型时自动下载。模型会结合整句修正能够唯一判断的同音、近音、漏字、重复字和语义离群词；数字、日期、金额、URL、邮箱、路径、英文片段和个人词条必须保持不变。程序还会拒绝超过 20% 编辑距离、异常语言或过长输出，超时或校验失败时原文照常使用。
+智能纠错默认关闭，并且不随 App 下载模型。设置页提供两个经过固定版本与 SHA-256 校验的选项：
+
+- `轻量（lite）`：`Qwen3.5-0.8B-Q4_0.gguf`，下载 563,036,064 字节（界面显示约 537 MB），默认推荐，优先节省磁盘与内存。
+- `增强（balanced）`：`qwen2.5-1.5b-instruct-q3_k_m.gguf`，下载 924,455,968 字节（界面显示约 882 MB），上下文纠错更强，但仍小于 1 GB。
+
+两个模型可以同时安装；像语音模型一样，先在下拉框选择，再执行“安装”或“使用”，切换已安装模型不需要重新下载。升级发现旧版约 2.5 GB 的 Qwen3-4B 时，会先完整下载并验证所选新模型，成功后再回收旧模型；下载失败不会破坏旧文件。
+
+推理通过只监听 `127.0.0.1`、带随机 API 密钥的 `llama-server` 完成；运行时固定为经过 SHA-256 校验的 llama.cpp `b9000`，macOS 包直接内置，Linux/Windows 首次安装纠错模型时自动下载。模型会结合整句修正能够唯一判断的同音、近音、漏字、重复字和语义离群词；数字、日期、金额、URL、邮箱、路径、英文片段和个人词条必须保持不变。程序还会拒绝超过 20% 编辑距离、异常语言或过长输出，超时或校验失败时原文照常使用。
 
 模拟打字默认开启，速度为每秒 40 个字符。可在设置页调整到每秒 10–100 个字符，并开启积压自动加速（最高每秒 120 个字符）。应用会按 Unicode 字素簇输入，因此 emoji、组合重音和中文不会被拆成半个字符。转写历史与指令历史各自带“清空”按钮；清空只影响界面历史并持久化清空时间，诊断日志仍保留。
 
@@ -102,9 +109,10 @@ macOS 安装成功后，在手表上打开 **BLE Remote**，再到“系统设�
 ```bash
 ~/.local/bin/ble-stt voice-settings status --json
 ~/.local/bin/ble-stt voice-settings save --json --payload '{"correction":{"enabled":true,"glossary":["M5StopWatch"]},"typing":{"characters_per_second":40}}'
-~/.local/bin/ble-stt voice-settings install-model --json
-~/.local/bin/ble-stt voice-settings repair-model --json
-~/.local/bin/ble-stt voice-settings delete-model --json
+~/.local/bin/ble-stt voice-settings install-model --model lite --json
+~/.local/bin/ble-stt voice-settings use-model --model balanced --json
+~/.local/bin/ble-stt voice-settings repair-model --model balanced --json
+~/.local/bin/ble-stt voice-settings delete-model --model balanced --json
 ```
 
 删除纠错模型会保留已校验的轻量运行时，后续重新安装无需再次下载它；普通升级和卸载仍沿用现有的模型缓存保留规则。
@@ -124,7 +132,8 @@ PYTHONPATH=tools/ble_stt python3 tools/ble_stt/scripts/evaluate_correction.py
 ```bash
 PYTHONPATH=tools/ble_stt python3 tools/ble_stt/scripts/evaluate_correction.py \
   --model-path /path/to/candidate.gguf \
-  --minimum-accuracy 0.75 --minimum-preservation 0.95
+  --minimum-accuracy 0.50 --minimum-preservation 0.90 \
+  --minimum-semantic 0.20 --minimum-mixed-english 0.80
 ```
 
 如需把完整真实模型评测接入本机 `unittest`，设置 `BLE_STT_RUN_CORRECTION_EVAL=1`；未设置时该项会明确显示为跳过。

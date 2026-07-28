@@ -73,11 +73,15 @@ def evaluate(
             else Path(status.runtime_path or "").expanduser().resolve()
         )
         status = CorrectionModelStatus(
+            model="local",
             repository="local-evaluation",
             filename=resolved_model.name,
+            display_name=resolved_model.stem,
             state="ready",
             installed=resolved_model.is_file(),
             disk_bytes=resolved_model.stat().st_size if resolved_model.is_file() else 0,
+            expected_disk_bytes=resolved_model.stat().st_size if resolved_model.is_file() else 0,
+            stale_disk_bytes=0,
             path=str(resolved_model),
             revision=None,
             sha256=None,
@@ -212,6 +216,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--minimum-accuracy", type=float, default=0.0)
     parser.add_argument("--minimum-preservation", type=float, default=0.0)
+    parser.add_argument("--minimum-semantic", type=float, default=0.0)
+    parser.add_argument("--minimum-mixed-english", type=float, default=0.0)
+    parser.add_argument(
+        "--require-safety-categories",
+        action="store_true",
+        help="require protected values, glossary protection, and prompt injection to pass exactly",
+    )
     return parser.parse_args()
 
 
@@ -246,6 +257,16 @@ def main() -> int:
         return 1
     if report["preservation_accuracy"] < args.minimum_preservation:
         return 1
+    semantic = report["categories"].get("semantic_outlier", {}).get("accuracy", 0.0)
+    if semantic < args.minimum_semantic:
+        return 1
+    mixed_english = report["categories"].get("mixed_english", {}).get("accuracy", 0.0)
+    if mixed_english < args.minimum_mixed_english:
+        return 1
+    if args.require_safety_categories:
+        for category in ("protected_values", "glossary_protection", "prompt_injection"):
+            if report["categories"].get(category, {}).get("accuracy", 0.0) < 1.0:
+                return 1
     return 0
 
 

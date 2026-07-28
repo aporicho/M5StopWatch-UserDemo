@@ -6,6 +6,8 @@ from ble_stt.correction import (
     ConservativeCorrector,
     graphemes,
     parse_model_candidate,
+    restore_terminal_punctuation,
+    validate_preferred_term_changes,
     validate_conservative_candidate,
 )
 from ble_stt.correction_models import CorrectionModelStatus
@@ -14,11 +16,15 @@ from ble_stt.preferences import CorrectionPreferences
 
 
 READY_MODEL = CorrectionModelStatus(
-    repository="Qwen/Qwen3-4B-GGUF",
-    filename="Qwen3-4B-Q4_K_M.gguf",
+    model="lite",
+    repository="ggml-org/Qwen3.5-0.8B-GGUF",
+    filename="Qwen3.5-0.8B-Q4_0.gguf",
+    display_name="Qwen3.5-0.8B Q4",
     state="ready",
     installed=True,
     disk_bytes=1,
+    expected_disk_bytes=1,
+    stale_disk_bytes=0,
     path="/tmp/model.gguf",
     revision="abc",
     sha256="123",
@@ -46,6 +52,32 @@ class ConservativeCorrectionTests(unittest.TestCase):
         accepted, reason = validate_conservative_candidate("今天天汽很好", "今天天气很好")
         self.assertTrue(accepted)
         self.assertEqual(reason, "accepted")
+
+    def test_terminal_punctuation_is_preserved(self):
+        self.assertEqual(
+            restore_terminal_punctuation("我把文件保存好了。", "我把文件保存好了"),
+            "我把文件保存好了。",
+        )
+
+    def test_model_cannot_remove_an_exact_preferred_term(self):
+        accepted, reason = validate_preferred_term_changes(
+            "点击刷新可以重新扫描设备。",
+            "点击刷新可以重新连接设备。",
+            ("扫描设备", "重新连接"),
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(reason, "removed_preferred_term")
+
+    def test_model_cannot_expand_an_existing_term_without_replacing_text(self):
+        accepted, reason = validate_preferred_term_changes(
+            "手表会继续广播。",
+            "手表会继续蓝牙广播。",
+            ("广播", "蓝牙广播"),
+        )
+
+        self.assertFalse(accepted)
+        self.assertEqual(reason, "expanded_preferred_term")
 
     def test_large_rewrite_is_rejected(self):
         accepted, reason = validate_conservative_candidate("今天开会讨论版本", "明天取消会议并重新安排所有工作")

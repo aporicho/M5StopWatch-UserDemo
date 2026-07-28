@@ -8,8 +8,16 @@ from .config import UserConfig
 
 CORRECTION_CONFIG_KEY = "correction"
 TYPING_CONFIG_KEY = "typing"
-DEFAULT_CORRECTION_REPOSITORY = "Qwen/Qwen3-4B-GGUF"
-DEFAULT_CORRECTION_FILE = "Qwen3-4B-Q4_K_M.gguf"
+DEFAULT_CORRECTION_MODEL = "lite"
+DEFAULT_CORRECTION_REPOSITORY = "ggml-org/Qwen3.5-0.8B-GGUF"
+DEFAULT_CORRECTION_FILE = "Qwen3.5-0.8B-Q4_0.gguf"
+CORRECTION_MODEL_FILES = {
+    "lite": (DEFAULT_CORRECTION_REPOSITORY, DEFAULT_CORRECTION_FILE),
+    "balanced": (
+        "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+        "qwen2.5-1.5b-instruct-q3_k_m.gguf",
+    ),
+}
 MAX_GLOSSARY_TERMS = 128
 MAX_GLOSSARY_TERM_LENGTH = 80
 
@@ -19,6 +27,7 @@ class CorrectionPreferences:
     enabled: bool = False
     mode: str = "conservative"
     languages: tuple[str, ...] = ("zh-CN", "en")
+    model: str = DEFAULT_CORRECTION_MODEL
     repository: str = DEFAULT_CORRECTION_REPOSITORY
     filename: str = DEFAULT_CORRECTION_FILE
     glossary: tuple[str, ...] = ()
@@ -76,6 +85,17 @@ def _glossary(value: Any) -> tuple[str, ...]:
     return tuple(result)
 
 
+def _correction_model(value: Any, repository: Any = None, filename: Any = None) -> str:
+    model = str(value or "").strip()
+    if model in CORRECTION_MODEL_FILES:
+        return model
+    pair = (str(repository or "").strip(), str(filename or "").strip())
+    for model_id, configured_pair in CORRECTION_MODEL_FILES.items():
+        if pair == configured_pair:
+            return model_id
+    return DEFAULT_CORRECTION_MODEL
+
+
 def read_voice_preferences(config: UserConfig | None = None) -> VoicePreferences:
     config = config or UserConfig()
     correction = _dictionary(config, CORRECTION_CONFIG_KEY)
@@ -101,6 +121,12 @@ def read_voice_preferences(config: UserConfig | None = None) -> VoicePreferences
         mode = "conservative"
     timeout = float(correction.get("timeout_seconds", 2.5))
     timeout = max(0.5, min(10.0, timeout))
+    correction_model = _correction_model(
+        correction.get("model"),
+        correction.get("repository"),
+        correction.get("filename"),
+    )
+    repository, filename = CORRECTION_MODEL_FILES[correction_model]
 
     cps = int(typing.get("characters_per_second", 40))
     cps = max(10, min(100, cps))
@@ -112,8 +138,9 @@ def read_voice_preferences(config: UserConfig | None = None) -> VoicePreferences
             enabled=bool(correction.get("enabled", False)),
             mode=mode,
             languages=languages,
-            repository=str(correction.get("repository", DEFAULT_CORRECTION_REPOSITORY)),
-            filename=str(correction.get("filename", DEFAULT_CORRECTION_FILE)),
+            model=correction_model,
+            repository=repository,
+            filename=filename,
             glossary=_glossary(correction.get("glossary", ())),
             standard_lexicon_enabled=bool(correction.get("standard_lexicon_enabled", True)),
             lexicon_packs=lexicon_packs,
@@ -140,20 +167,25 @@ def save_voice_preferences(payload: dict[str, Any], config: UserConfig | None = 
         if not isinstance(correction_update, dict):
             raise ValueError("correction settings must be an object")
         current["correction"].update(correction_update)
-        current["correction"]["repository"] = DEFAULT_CORRECTION_REPOSITORY
-        current["correction"]["filename"] = DEFAULT_CORRECTION_FILE
     if typing_update is not None:
         if not isinstance(typing_update, dict):
             raise ValueError("typing settings must be an object")
         current["typing"].update(typing_update)
 
+    correction_model = _correction_model(
+        current["correction"].get("model"),
+        current["correction"].get("repository"),
+        current["correction"].get("filename"),
+    )
+    repository, filename = CORRECTION_MODEL_FILES[correction_model]
     normalized = VoicePreferences(
         correction=CorrectionPreferences(
             enabled=bool(current["correction"].get("enabled", False)),
             mode="conservative",
             languages=("zh-CN", "en"),
-            repository=DEFAULT_CORRECTION_REPOSITORY,
-            filename=DEFAULT_CORRECTION_FILE,
+            model=correction_model,
+            repository=repository,
+            filename=filename,
             glossary=_glossary(current["correction"].get("glossary", ())),
             standard_lexicon_enabled=bool(
                 current["correction"].get("standard_lexicon_enabled", True)

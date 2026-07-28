@@ -10,7 +10,12 @@ from typing import Any, Iterable
 
 from .correction_models import CorrectionModelStatus, correction_model_status
 from .llama_runtime import LlamaServerClient, LlamaServerError
-from .lexicon import merge_prompt_terms
+from .lexicon import (
+    conservative_lexicon_correction,
+    contextual_prompt_terms,
+    merge_prompt_terms,
+    standard_terms,
+)
 from .preferences import CorrectionPreferences
 
 try:
@@ -24,6 +29,12 @@ PROTECTED_PATTERN = re.compile(
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|"
     r"(?:[A-Za-z]:[\\/]|[~/])[A-Za-z0-9_./\\+\-]+|"
     r"[A-Za-z][A-Za-z0-9_./+#\-]*|"
+    r"(?<![\w.])[-+]?\d+(?:[.,:/-]\d+)*(?:%|[A-Za-z]+)?"
+)
+IMMUTABLE_VALUE_PATTERN = re.compile(
+    r"(?:https?://|www\.)[^\s]+|"
+    r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|"
+    r"(?:[A-Za-z]:[\\/]|[~/])[A-Za-z0-9_./\\+\-]+|"
     r"(?<![\w.])[-+]?\d+(?:[.,:/-]\d+)*(?:%|[A-Za-z]+)?"
 )
 SPACE_PATTERN = re.compile(r"[\t\f\v ]+")
@@ -108,6 +119,32 @@ def protected_tokens(text: str, glossary: Iterable[str] = ()) -> Counter[str]:
         count = text.count(term)
         values.extend([term] * count)
     return Counter(values)
+
+
+def restore_terminal_punctuation(raw_text: str, candidate: str) -> str:
+    raw = normalize_transcript(raw_text)
+    corrected = normalize_transcript(candidate)
+    if raw and corrected and raw[-1] in "。！？!?" and corrected[-1] not in "。！？!?":
+        return corrected + raw[-1]
+    return corrected
+
+
+def validate_preferred_term_changes(
+    raw_text: str,
+    candidate: str,
+    terms: Iterable[str],
+) -> tuple[bool, str]:
+    raw = normalize_transcript(raw_text)
+    corrected = normalize_transcript(candidate)
+    values = tuple(dict.fromkeys(str(term).strip() for term in terms if str(term).strip()))
+    exact = tuple(term for term in values if term in raw)
+    if any(term not in corrected for term in exact):
+        return False, "removed_preferred_term"
+    if len(graphemes(corrected)) > len(graphemes(raw)):
+        for term in values:
+            if term in corrected and term not in raw and any(value in term for value in exact):
+                return False, "expanded_preferred_term"
+    return True, "accepted"
 
 
 def _semantic_graphemes(text: str) -> list[str]:
@@ -219,7 +256,7 @@ class ConservativeCorrector:
         model_status = (
             client_status
             if isinstance(client_status, CorrectionModelStatus)
-            else correction_model_status()
+            else correction_model_status(model=preferences.model)
         )
         if not model_status.ready:
             return CorrectionResult(
@@ -232,13 +269,43 @@ class ConservativeCorrector:
                 model_status.filename,
             )
 
+        packs = preferences.lexicon_packs if preferences.standard_lexicon_enabled else ()
+        lexical_candidate = conservative_lexicon_correction(raw, standard_terms(packs))
+        if lexical_candidate != raw:
+            accepted, reason = validate_conservative_candidate(raw, lexical_candidate, preferences.glossary)
+            if accepted:
+                return CorrectionResult(
+                    raw,
+                    lexical_candidate,
+                    "corrected",
+                    True,
+                    f"lexicon:{reason}",
+                    int((time.monotonic() - started) * 1000),
+                    model_status.filename,
+                )
+
+        if IMMUTABLE_VALUE_PATTERN.search(raw):
+            return CorrectionResult(
+                raw,
+                raw,
+                "skipped",
+                False,
+                "immutable_value",
+                int((time.monotonic() - started) * 1000),
+                model_status.filename,
+            )
+
         if self.client is None:
             self.client = LlamaServerClient(model_status)
         client = self.client
         glossary = tuple(preferences.glossary)
-        preferred_terms = merge_prompt_terms(
-            glossary,
-            preferences.lexicon_packs if preferences.standard_lexicon_enabled else (),
+        preferred_terms = contextual_prompt_terms(
+            raw,
+            merge_prompt_terms(
+                glossary,
+                packs,
+                limit=160,
+            ),
         )
         prompt = json.dumps(
             {
@@ -268,7 +335,22 @@ class ConservativeCorrector:
                 model_status.filename,
             )
 
-        candidate = normalize_transcript(candidate)
+        candidate = restore_terminal_punctuation(raw, candidate)
+        preferred_ok, preferred_reason = validate_preferred_term_changes(
+            raw,
+            candidate,
+            preferred_terms,
+        )
+        if not preferred_ok:
+            return CorrectionResult(
+                raw,
+                raw,
+                "fallback",
+                False,
+                preferred_reason,
+                int((time.monotonic() - started) * 1000),
+                model_status.filename,
+            )
         accepted, reason = validate_conservative_candidate(raw, candidate, glossary)
         if not accepted:
             return CorrectionResult(

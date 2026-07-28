@@ -33,6 +33,16 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertIn("llama-b9000-bin-macos-arm64.tar.gz", script)
         self.assertIn('Contents/Resources/llama/llama-server', build)
 
+    def test_correction_model_is_pinned_below_one_gigabyte(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "ble_stt" / "correction_models.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("MAX_CORRECTION_MODEL_BYTES = 1_000_000_000", source)
+        self.assertIn("DEFAULT_CORRECTION_REVISION", source)
+        self.assertIn("DEFAULT_CORRECTION_SHA256", source)
+        self.assertIn("correction model SHA-256 does not match", source)
+
     def test_desktop_control_uses_single_product_identity(self):
         root = Path(__file__).resolve().parents[1] / "desktop"
         service = (Path(__file__).resolve().parents[1] / "ble_stt" / "service.py").read_text(encoding="utf-8")
@@ -59,6 +69,8 @@ class MacOSPackagingTests(unittest.TestCase):
         self.assertNotIn("lsregister", install)
         self.assertNotIn("killall Dock", install)
         self.assertIn('APP_TARGET="$USER_APP_TARGET"', install)
+        self.assertIn('SHIM="$BIN_DIR/ble-stt"', install)
+        self.assertIn('/bin/ln -sfn "$APP_EXEC" "$SHIM"', install)
         self.assertIn("BLE_STT_SKIP_LLAMA_RUNTIME=1 npm run build:mac:app", install)
         self.assertIn('"minimumSystemVersion": "15.0"', config)
         self.assertIn('"M5StopWatch.app", "Contents", "MacOS", "M5StopWatch"', sidecar)

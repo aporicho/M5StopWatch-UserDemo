@@ -25,6 +25,7 @@ import {
   telemetryRenderKey,
 } from "@/lib/app-view-model"
 import {
+  formatBytes,
   helperCommands,
   helperLogs,
   helperMappings,
@@ -91,6 +92,8 @@ function App() {
   const [refreshing, setRefreshing] = useState(false)
   const [selectedModel, setSelectedModel] = useState<string>("small")
   const [modelSelectionTouched, setModelSelectionTouched] = useState(false)
+  const [selectedCorrectionModel, setSelectedCorrectionModel] = useState<string>("lite")
+  const [correctionModelSelectionTouched, setCorrectionModelSelectionTouched] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
   const [deleteOpen, setDeleteOpen] = useState(false)
@@ -125,8 +128,11 @@ function App() {
   const status = statusEnvelope?.status ?? null
   const telemetry = telemetryEnvelope?.telemetry ?? null
   const currentModel = status?.model ?? null
+  const currentCorrectionModel = status?.correction_model ?? null
   const controlsDisabled = busyAction !== null
   const activeModel = selectedModel || currentModel?.selected || "small"
+  const activeCorrectionModel =
+    selectedCorrectionModel || currentCorrectionModel?.model || "lite"
   const isCurrentModel = activeModel === currentModel?.selected
   const t = useMemo(() => createTranslator(language), [language])
   const languageItems = useMemo(
@@ -173,6 +179,26 @@ function App() {
   const selectedModelDetail = useMemo(
     () => modelDetail(activeModel, t),
     [activeModel, t]
+  )
+
+  const correctionModelItems = useMemo(() => {
+    const models = status?.correction_models ?? []
+    if (models.length > 0) {
+      return models.map((model) => ({
+        label: `${model.label} · ${formatBytes(model.status.expected_disk_bytes)}`,
+        value: model.id,
+      }))
+    }
+    return currentCorrectionModel
+      ? [{ label: currentCorrectionModel.display_name, value: currentCorrectionModel.model }]
+      : [{ label: "Qwen3.5-0.8B Q4 · 537.0 MB", value: "lite" }]
+  }, [currentCorrectionModel, status?.correction_models])
+
+  const activeCorrectionModelStatus = useMemo(
+    () =>
+      status?.correction_models?.find((model) => model.id === activeCorrectionModel)
+        ?.status ?? currentCorrectionModel,
+    [activeCorrectionModel, currentCorrectionModel, status?.correction_models]
   )
 
   const applySnapshots = useCallback(
@@ -371,6 +397,13 @@ function App() {
   }, [currentModel?.selected, modelSelectionTouched])
 
   useEffect(() => {
+    const current = currentCorrectionModel?.model
+    if (current && !correctionModelSelectionTouched) {
+      setSelectedCorrectionModel(current)
+    }
+  }, [correctionModelSelectionTouched, currentCorrectionModel?.model])
+
+  useEffect(() => {
     if (!voiceSettingsTouched && status?.preferences) {
       setVoicePreferences(status.preferences)
     }
@@ -510,6 +543,8 @@ function App() {
 
   const runCorrectionModelAction = useCallback(
     async (action: CorrectionModelAction) => {
+      const model = activeCorrectionModel
+      if (!model) return
       setBusyAction(`correction-model:${action}`)
       const serviceWasRunning = Boolean(latestStatusRef.current?.status.service.running)
       try {
@@ -517,10 +552,13 @@ function App() {
           const stop = await invokeServiceAction("stop")
           if (!stop.ok) throw new Error(stop.message)
         }
-        const payload = await invokeCorrectionModelAction(action)
+        const payload = await invokeCorrectionModelAction(action, model)
         if (!payload.ok) throw new Error(payload.message || payload.correction_model.message)
         setVoicePreferences(payload.settings)
         setVoiceSettingsTouched(false)
+        if (action === "use-model") {
+          setCorrectionModelSelectionTouched(false)
+        }
         showNotice(payload.correction_model.message, "info", "success")
       } catch (error) {
         showNotice(errorMessage(error), "error", "error")
@@ -537,7 +575,7 @@ function App() {
         setBusyAction(null)
       }
     },
-    [refreshAll, showNotice]
+    [activeCorrectionModel, refreshAll, showNotice]
   )
 
   const requestPermission = useCallback(
@@ -831,7 +869,11 @@ function App() {
         useModelDisabled={useModelDisabled}
         deleteModelDisabled={deleteModelDisabled}
         voicePreferences={voicePreferences}
-        correctionModel={status?.correction_model ?? null}
+        currentCorrectionModel={currentCorrectionModel}
+        correctionModel={activeCorrectionModelStatus}
+        activeCorrectionModel={activeCorrectionModel}
+        correctionModelItems={correctionModelItems}
+        correctionModelSelectionTouched={correctionModelSelectionTouched}
         voiceSettingsTouched={voiceSettingsTouched}
         onOpenChange={setSettingsOpen}
         onLanguageChange={setLanguage}
@@ -845,6 +887,10 @@ function App() {
         onRequestDeleteModel={() => setDeleteOpen(true)}
         onVoicePreferencesChange={changeVoicePreferences}
         onSaveVoiceSettings={() => void saveCurrentVoiceSettings()}
+        onCorrectionModelChange={(model) => {
+          setCorrectionModelSelectionTouched(model !== currentCorrectionModel?.model)
+          setSelectedCorrectionModel(model)
+        }}
         onRunCorrectionModelAction={(action) => void runCorrectionModelAction(action)}
         t={t}
       />

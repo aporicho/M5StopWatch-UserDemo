@@ -44,8 +44,9 @@ fn helper_cli_args() -> Option<Vec<String>> {
     }
     match args[0].as_str() {
         "run" | "status" | "logs" | "telemetry" | "service" | "permissions" | "prepare"
-        | "models" | "mappings" | "commands" | "voice-settings" | "doctor" | "test" | "journey-test" | "restart" | "upgrade"
-        | "uninstall" | "help" | "--version" | "-h" | "--help" => Some(args),
+        | "models" | "mappings" | "commands" | "voice-settings" | "doctor" | "test"
+        | "journey-test" | "restart" | "upgrade" | "uninstall" | "help" | "--version" | "-h"
+        | "--help" => Some(args),
         _ => None,
     }
 }
@@ -484,7 +485,7 @@ fn validate_command_action(action: &str) -> Result<(), String> {
 
 fn validate_correction_model_action(action: &str) -> Result<(), String> {
     match action {
-        "install-model" | "update-model" | "repair-model" | "delete-model" => Ok(()),
+        "use-model" | "install-model" | "update-model" | "repair-model" | "delete-model" => Ok(()),
         _ => Err(format!("unsupported correction model action: {action}")),
     }
 }
@@ -526,7 +527,10 @@ fn mapping_status(app: tauri::AppHandle) -> Result<HelperResult, String> {
 #[tauri::command]
 fn mapping_save(app: tauri::AppHandle, payload: String) -> Result<HelperResult, String> {
     validate_mapping_action("save")?;
-    run_helper(Some(&app), ["mappings", "save", "--json", "--payload", payload.as_str()])
+    run_helper(
+        Some(&app),
+        ["mappings", "save", "--json", "--payload", payload.as_str()],
+    )
 }
 
 #[tauri::command]
@@ -543,7 +547,10 @@ fn command_status(app: tauri::AppHandle) -> Result<HelperResult, String> {
 #[tauri::command]
 fn command_save(app: tauri::AppHandle, payload: String) -> Result<HelperResult, String> {
     validate_command_action("save")?;
-    run_helper(Some(&app), ["commands", "save", "--json", "--payload", payload.as_str()])
+    run_helper(
+        Some(&app),
+        ["commands", "save", "--json", "--payload", payload.as_str()],
+    )
 }
 
 #[tauri::command]
@@ -556,7 +563,13 @@ fn command_reset(app: tauri::AppHandle) -> Result<HelperResult, String> {
 fn voice_settings_save(app: tauri::AppHandle, payload: String) -> Result<HelperResult, String> {
     run_helper(
         Some(&app),
-        ["voice-settings", "save", "--json", "--payload", payload.as_str()],
+        [
+            "voice-settings",
+            "save",
+            "--json",
+            "--payload",
+            payload.as_str(),
+        ],
     )
 }
 
@@ -564,10 +577,21 @@ fn voice_settings_save(app: tauri::AppHandle, payload: String) -> Result<HelperR
 async fn correction_model_action(
     app: tauri::AppHandle,
     action: String,
+    model: Option<String>,
 ) -> Result<HelperResult, String> {
     validate_correction_model_action(action.as_str())?;
+    let model = model.ok_or_else(|| format!("model is required for {action}"))?;
     tauri::async_runtime::spawn_blocking(move || {
-        run_helper(Some(&app), ["voice-settings", action.as_str(), "--json"])
+        run_helper(
+            Some(&app),
+            [
+                "voice-settings",
+                action.as_str(),
+                "--json",
+                "--model",
+                model.as_str(),
+            ],
+        )
     })
     .await
     .map_err(|error| format!("correction model action failed to join: {error}"))?
@@ -683,7 +707,6 @@ mod tests {
         let error = validate_command_action("wipe").unwrap_err();
         assert!(error.contains("unsupported command action"));
     }
-
 
     #[test]
     fn rejects_unknown_correction_model_action() {

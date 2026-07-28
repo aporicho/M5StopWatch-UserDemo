@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import UserConfig, log_dir
-from .correction_models import correction_model_status
+from .correction_models import correction_model_status, list_correction_models
 from .diagnostics import event_log_paths
 from .models import ModelStatus, model_status
 from .platforms import create_platform
@@ -169,6 +169,7 @@ def snapshot_to_dict(snapshot: StatusSnapshot) -> dict[str, Any]:
         "model": snapshot.model_state.to_dict(),
         "preferences": read_voice_preferences(config).to_dict(),
         "correction_model": correction_model_status(config).to_dict(),
+        "correction_models": list_correction_models(config),
         "permissions": {
             "input": {
                 "ok": input_permission.ok,

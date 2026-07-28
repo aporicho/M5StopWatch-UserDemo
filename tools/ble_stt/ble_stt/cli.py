@@ -14,11 +14,14 @@ from . import __version__
 from .commands import command_payload, read_commands, reset_commands, save_commands
 from .config import UserConfig, install_dir, log_dir
 from .correction_models import (
+    CORRECTION_MODEL_PRESET_MAP,
     correction_model_status,
     delete_correction_model,
     install_correction_model,
+    list_correction_models,
     repair_correction_model,
     update_correction_model,
+    use_correction_model,
 )
 from .diagnostics import event_log_paths
 from .mapping import mapping_payload, read_mapping, reset_mapping, save_mapping
@@ -270,8 +273,15 @@ def manage_voice_settings(argv: Sequence[str]) -> int:
     subparsers.add_parser("status")
     save_parser = subparsers.add_parser("save")
     save_parser.add_argument("--payload", required=True, help="JSON settings payload")
-    for action in ("install-model", "update-model", "repair-model", "delete-model"):
-        subparsers.add_parser(action)
+    for action in (
+        "use-model",
+        "install-model",
+        "update-model",
+        "repair-model",
+        "delete-model",
+    ):
+        action_parser = subparsers.add_parser(action)
+        action_parser.add_argument("--model", choices=tuple(CORRECTION_MODEL_PRESET_MAP))
 
     args = parser.parse_args(values)
     config = UserConfig()
@@ -284,14 +294,19 @@ def manage_voice_settings(argv: Sequence[str]) -> int:
         else:
             settings = read_voice_preferences(config)
 
-        if args.action == "install-model":
-            model = install_correction_model(config)
+        if args.action == "use-model":
+            if not args.model:
+                raise ValueError("correction model is required for use-model")
+            model = use_correction_model(args.model, config)
+            settings = read_voice_preferences(config)
+        elif args.action == "install-model":
+            model = install_correction_model(config, args.model)
         elif args.action == "update-model":
-            model = update_correction_model(config)
+            model = update_correction_model(config, args.model)
         elif args.action == "repair-model":
-            model = repair_correction_model(config)
+            model = repair_correction_model(config, args.model)
         elif args.action == "delete-model":
-            model = delete_correction_model(config)
+            model = delete_correction_model(config, args.model)
         else:
             model = correction_model_status(config)
         payload: dict[str, object] = {
@@ -299,6 +314,7 @@ def manage_voice_settings(argv: Sequence[str]) -> int:
             "action": args.action,
             "settings": settings.to_dict(),
             "correction_model": model.to_dict(),
+            "correction_models": list_correction_models(config),
         }
         code = 0
     except Exception as exc:
@@ -308,6 +324,7 @@ def manage_voice_settings(argv: Sequence[str]) -> int:
             "message": str(exc),
             "settings": read_voice_preferences(config).to_dict(),
             "correction_model": correction_model_status(config).to_dict(),
+            "correction_models": list_correction_models(config),
         }
         code = 1
 

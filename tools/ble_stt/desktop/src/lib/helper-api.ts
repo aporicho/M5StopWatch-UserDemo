@@ -43,6 +43,7 @@ export type VoicePreferences = {
     enabled: boolean
     mode: "conservative"
     languages: string[]
+    model: string
     repository: string
     filename: string
     glossary: string[]
@@ -59,18 +60,29 @@ export type VoicePreferences = {
 }
 
 export type CorrectionModelStatus = {
+  model: string
   repository: string
   filename: string
+  display_name: string
   state: string
   installed: boolean
   ready: boolean
   disk_bytes: number
+  expected_disk_bytes: number
+  stale_disk_bytes: number
   path: string
   revision: string | null
   sha256: string | null
   runtime_available: boolean
   runtime_path: string | null
   message: string
+}
+
+export type CorrectionModelPreset = {
+  id: string
+  label: string
+  description: string
+  status: CorrectionModelStatus
 }
 
 export type StatusPayload = {
@@ -105,6 +117,7 @@ export type StatusPayload = {
   model: ModelStatus
   preferences: VoicePreferences
   correction_model: CorrectionModelStatus
+  correction_models: CorrectionModelPreset[]
   permissions: {
     input: PermissionStatus
     bluetooth: PermissionStatus
@@ -201,7 +214,12 @@ export type TelemetryEnvelope = {
 
 export type ServiceAction = "install" | "start" | "stop" | "restart"
 export type ModelAction = "use" | "install" | "update" | "repair" | "delete"
-export type CorrectionModelAction = "install-model" | "update-model" | "repair-model" | "delete-model"
+export type CorrectionModelAction =
+  | "use-model"
+  | "install-model"
+  | "update-model"
+  | "repair-model"
+  | "delete-model"
 export type PermissionKind = "bluetooth" | "input"
 
 export type MappingDefinition = {
@@ -252,6 +270,7 @@ export type VoiceSettingsEnvelope = {
   message?: string
   settings: VoicePreferences
   correction_model: CorrectionModelStatus
+  correction_models: CorrectionModelPreset[]
 }
 
 export type MappingEnvelope = {
@@ -472,8 +491,11 @@ export async function saveVoiceSettings(settings: VoicePreferences) {
   return parseHelperJson<VoiceSettingsEnvelope>(result)
 }
 
-export async function invokeCorrectionModelAction(action: CorrectionModelAction) {
-  const result = await invoke<HelperResult>("correction_model_action", { action })
+export async function invokeCorrectionModelAction(
+  action: CorrectionModelAction,
+  model: string
+) {
+  const result = await invoke<HelperResult>("correction_model_action", { action, model })
   return parseHelperJson<VoiceSettingsEnvelope>(result)
 }
 

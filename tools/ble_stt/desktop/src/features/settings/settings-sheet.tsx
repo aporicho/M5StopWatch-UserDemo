@@ -91,7 +91,11 @@ type SettingsSheetProps = {
   useModelDisabled: boolean
   deleteModelDisabled: boolean
   voicePreferences: VoicePreferences | null
+  currentCorrectionModel: CorrectionModelStatus | null
   correctionModel: CorrectionModelStatus | null
+  activeCorrectionModel: string
+  correctionModelItems: SelectItemOption[]
+  correctionModelSelectionTouched: boolean
   voiceSettingsTouched: boolean
   onOpenChange: (open: boolean) => void
   onLanguageChange: (language: LanguageCode) => void
@@ -102,6 +106,7 @@ type SettingsSheetProps = {
   onRequestDeleteModel: () => void
   onVoicePreferencesChange: (preferences: VoicePreferences) => void
   onSaveVoiceSettings: () => void
+  onCorrectionModelChange: (model: string) => void
   onRunCorrectionModelAction: (action: CorrectionModelAction) => void
   t: Translator
 }
@@ -124,7 +129,11 @@ export function SettingsSheet({
   useModelDisabled,
   deleteModelDisabled,
   voicePreferences,
+  currentCorrectionModel,
   correctionModel,
+  activeCorrectionModel,
+  correctionModelItems,
+  correctionModelSelectionTouched,
   voiceSettingsTouched,
   onOpenChange,
   onLanguageChange,
@@ -135,9 +144,21 @@ export function SettingsSheet({
   onRequestDeleteModel,
   onVoicePreferencesChange,
   onSaveVoiceSettings,
+  onCorrectionModelChange,
   onRunCorrectionModelAction,
   t,
 }: SettingsSheetProps) {
+  const correctionModelDetail =
+    activeCorrectionModel === "balanced"
+      ? t(
+          "settings.correction_balanced_detail",
+          "Improved context correction while remaining below 1 GB."
+        )
+      : t(
+          "settings.correction_lite_detail",
+          "Smallest recommended option; good enough for everyday conservative correction."
+        )
+
   return (
     <Sheet open={open} onOpenChange={onOpenChange}>
       <SheetContent className="w-[min(760px,calc(100vw-2rem))] sm:max-w-2xl">
@@ -276,17 +297,69 @@ export function SettingsSheet({
                       </FieldDescription>
                     </Field>
 
-                    <Field orientation="horizontal">
-                      <FieldContent>
-                        <FieldTitle>{t("settings.correction_model", "Correction model")}</FieldTitle>
-                        <FieldDescription>
-                          {correctionModel?.message ?? t("common.loading", "Loading")} · {formatBytes(correctionModel?.disk_bytes ?? 0)}
-                        </FieldDescription>
-                      </FieldContent>
-                      <Badge variant={readinessVariant(Boolean(correctionModel?.ready))}>
+                    <Field>
+                      <FieldLabel>{t("settings.correction_model", "Correction model")}</FieldLabel>
+                      <Select
+                        items={correctionModelItems}
+                        value={activeCorrectionModel}
+                        onValueChange={(value) => {
+                          if (value) onCorrectionModelChange(value)
+                        }}
+                      >
+                        <SelectTrigger className="w-full">
+                          <SelectValue
+                            placeholder={t("settings.select_correction_model", "Select correction model")}
+                          />
+                        </SelectTrigger>
+                        <SelectContent alignItemWithTrigger={false}>
+                          <SelectGroup>
+                            <SelectLabel>
+                              {t("settings.available_models", "Available models")}
+                            </SelectLabel>
+                            {correctionModelItems.map((item) => (
+                              <SelectItem key={item.value} value={item.value}>
+                                {item.label}
+                              </SelectItem>
+                            ))}
+                          </SelectGroup>
+                        </SelectContent>
+                      </Select>
+                      <FieldDescription>
+                        {correctionModel ? (
+                          <>
+                            {correctionModel.installed
+                              ? t("settings.correction_installed_size", "Installed")
+                              : t("settings.correction_download_size", "Download")} {formatBytes(
+                              correctionModel.installed
+                                ? correctionModel.disk_bytes
+                                : correctionModel.expected_disk_bytes,
+                            )} · {correctionModelDetail}
+                            {correctionModel.stale_disk_bytes > 0 && (
+                              <> · {t("settings.correction_legacy_size", "Legacy model")} {formatBytes(correctionModel.stale_disk_bytes)}</>
+                            )}
+                          </>
+                        ) : t("common.loading", "Loading")}
+                      </FieldDescription>
+                      <FieldDescription>
+                        {t("settings.current_model", "Current")}: {currentCorrectionModel?.display_name ?? t("common.unknown", "Unknown")}
+                      </FieldDescription>
+                      <Badge variant={correctionModel?.state === "legacy" ? "secondary" : readinessVariant(Boolean(correctionModel?.ready))}>
                         {correctionModel?.state ?? "unknown"}
                       </Badge>
                     </Field>
+
+                    {correctionModel && correctionModel.stale_disk_bytes > 0 && (
+                      <Alert>
+                        <AlertCircleIcon />
+                        <AlertTitle>{t("settings.correction_legacy_title", "Legacy 4B model found")}</AlertTitle>
+                        <AlertDescription>
+                          {t(
+                            "settings.correction_legacy_description",
+                            "The old model stays untouched until the selected model is downloaded and verified, then this space is reclaimed automatically.",
+                          )}
+                        </AlertDescription>
+                      </Alert>
+                    )}
 
                     {correctionModel && !correctionModel.runtime_available && (
                       <Alert>
@@ -300,6 +373,13 @@ export function SettingsSheet({
                   </FieldGroup>
                 </CardContent>
                 <CardFooter className="flex flex-wrap gap-2">
+                  <Button
+                    onClick={() => onRunCorrectionModelAction("use-model")}
+                    disabled={controlsDisabled || !correctionModelSelectionTouched}
+                  >
+                    <SpinnerOrIcon busy={busyAction === "correction-model:use-model"} icon={CheckCircle2Icon} />
+                    {t("settings.use", "Use")}
+                  </Button>
                   <Button onClick={onSaveVoiceSettings} disabled={controlsDisabled || !voiceSettingsTouched}>
                     <SpinnerOrIcon busy={busyAction === "voice-settings:save"} icon={SaveIcon} />
                     {t("common.save", "Save")}
@@ -310,7 +390,9 @@ export function SettingsSheet({
                     disabled={controlsDisabled || Boolean(correctionModel?.installed)}
                   >
                     <SpinnerOrIcon busy={busyAction === "correction-model:install-model"} icon={DownloadIcon} />
-                    {t("settings.install_model", "Install model")}
+                    {correctionModel && correctionModel.stale_disk_bytes > 0
+                      ? t("settings.replace_model", "Replace legacy model")
+                      : t("settings.install_model", "Install model")}
                   </Button>
                   <Button
                     variant="outline"
@@ -323,7 +405,7 @@ export function SettingsSheet({
                   <Button
                     variant="outline"
                     onClick={() => onRunCorrectionModelAction("repair-model")}
-                    disabled={controlsDisabled || !correctionModel?.installed}
+                    disabled={controlsDisabled || !(correctionModel?.disk_bytes ?? 0)}
                   >
                     <SpinnerOrIcon busy={busyAction === "correction-model:repair-model"} icon={WrenchIcon} />
                     {t("settings.repair", "Repair")}
@@ -331,7 +413,7 @@ export function SettingsSheet({
                   <Button
                     variant="destructive"
                     onClick={() => onRunCorrectionModelAction("delete-model")}
-                    disabled={controlsDisabled || !correctionModel?.installed}
+                    disabled={controlsDisabled || (!correctionModel?.disk_bytes && !((correctionModel?.stale_disk_bytes ?? 0) > 0))}
                   >
                     <Trash2Icon data-icon="inline-start" />
                     {t("settings.delete", "Delete")}
