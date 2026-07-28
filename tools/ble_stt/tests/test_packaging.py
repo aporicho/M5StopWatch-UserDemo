@@ -78,6 +78,10 @@ class MacOSPackagingTests(unittest.TestCase):
 
         public_install = (Path(__file__).resolve().parents[1] / "install.sh").read_text(encoding="utf-8")
         self.assertNotIn("doctor --request-permissions --wait-forever", public_install)
+        self.assertIn("CFBundleExecutable", public_install)
+        self.assertIn('macos_validate_app_structure "$MAC_APP"', public_install)
+        self.assertIn('"$MAC_APP"/Contents/MacOS/*', public_install)
+        self.assertNotIn('app_executable="$MAC_APP/Contents/MacOS/M5StopWatch"', public_install)
 
     def test_release_packages_outer_desktop_app_with_signed_nested_helper(self):
         workflow = (

@@ -127,14 +127,23 @@ macos_verify_detached_signature() {
         >/dev/null 2>&1 || fail "release signature verification failed for $(basename "$signed_file")"
 }
 
-macos_validate_app() {
+macos_app_executable() {
     app="$1"
-    executable="$app/Contents/MacOS/M5StopWatch"
     info_plist="$app/Contents/Info.plist"
-    cert_prefix="$WORK/signing-certificate-"
+    [ -f "$info_plist" ] || fail "M5StopWatch.app has no Info.plist"
+    executable_name="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$info_plist" 2>/dev/null || true)"
+    case "$executable_name" in
+        ''|'.'|'..'|*/*) fail "M5StopWatch.app has an invalid executable name" ;;
+    esac
+    printf '%s\n' "$app/Contents/MacOS/$executable_name"
+}
+
+macos_validate_app_structure() {
+    app="$1"
+    info_plist="$app/Contents/Info.plist"
 
     [ -d "$app" ] || fail "macOS archive does not contain M5StopWatch.app"
-    [ -f "$info_plist" ] || fail "M5StopWatch.app has no Info.plist"
+    executable="$(macos_app_executable "$app")"
     [ -x "$executable" ] || fail "M5StopWatch.app has no executable"
 
     bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$info_plist" 2>/dev/null || true)"
@@ -145,6 +154,15 @@ macos_validate_app() {
         *" arm64 "*) ;;
         *) fail "M5StopWatch.app does not contain an arm64 executable" ;;
     esac
+    /usr/bin/codesign --verify --deep --strict "$app" >/dev/null 2>&1 \
+        || fail "M5StopWatch.app has an invalid code signature"
+}
+
+macos_validate_app() {
+    app="$1"
+    cert_prefix="$WORK/signing-certificate-"
+
+    macos_validate_app_structure "$app"
 
     rm -f "$cert_prefix"* 2>/dev/null || true
     /usr/bin/codesign --display --extract-certificates="$cert_prefix" "$app" >/dev/null 2>&1 \
@@ -344,7 +362,7 @@ install_macos_app() {
     if [ -L "$SHIM" ]; then
         MAC_OLD_SHIM_TARGET="$(readlink "$SHIM" 2>/dev/null || true)"
         case "$MAC_OLD_SHIM_TARGET" in
-            "$MAC_APP/Contents/MacOS/M5StopWatch"|\
+            "$MAC_APP"/Contents/MacOS/*|\
             "$ROOT/current/source/.venv/bin/ble-stt"|\
             "$ROOT"/versions/*/source/.venv/bin/ble-stt) ;;
             *) fail "$SHIM does not point to an M5StopWatch installation; move it aside and retry" ;;
@@ -365,7 +383,13 @@ install_macos_app() {
     macos_prepare_release_key "$WORK/M5StopWatch-signing-certificate.pem"
 
     if [ -d "$MAC_APP" ]; then
-        macos_validate_app "$MAC_APP"
+        macos_validate_app_structure "$MAC_APP"
+        case "$MAC_OLD_SHIM_TARGET" in
+            "$MAC_APP"/Contents/MacOS/*)
+                [ "$MAC_OLD_SHIM_TARGET" = "$(macos_app_executable "$MAC_APP")" ] \
+                    || fail "$SHIM does not point to the current M5StopWatch executable"
+                ;;
+        esac
         MAC_HAD_APP=1
     fi
     if [ -e "$MAC_INSTALLER" ]; then
@@ -411,7 +435,7 @@ install_macos_app() {
     MAC_NEW_APP_ACTIVATED=1
     mv "$MAC_APP_STAGE" "$MAC_APP"
     MAC_APP_STAGE=""
-    app_executable="$MAC_APP/Contents/MacOS/M5StopWatch"
+    app_executable="$(macos_app_executable "$MAC_APP")"
 
     say "Registering the login service"
     "$app_executable" service install -- --engine "$ENGINE" --model "$MODEL"
