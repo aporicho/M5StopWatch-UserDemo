@@ -200,9 +200,11 @@ void AlarmListView::createAlarmRow(int y, int alarmId, const model::AlarmClock::
     lv_obj_set_style_bg_opa(row->enabledSwitch->get(), LV_OPA_COVER, LV_PART_KNOB);
     lv_obj_set_style_border_width(row->enabledSwitch->get(), 0, LV_PART_KNOB);
     lv_obj_set_style_radius(row->enabledSwitch->get(), LV_RADIUS_CIRCLE, LV_PART_KNOB);
-    row->enabledSwitch->setBgColor(lv_color_hex(_switch_on_color), LV_PART_INDICATOR | LV_STATE_CHECKED);
-    row->enabledSwitch->setBgOpa(LV_OPA_COVER, LV_PART_INDICATOR | LV_STATE_CHECKED);
-    row->enabledSwitch->setBorderWidth(0, LV_PART_INDICATOR | LV_STATE_CHECKED);
+    const auto checkedIndicator =
+        static_cast<lv_style_selector_t>(LV_PART_INDICATOR) | static_cast<lv_style_selector_t>(LV_STATE_CHECKED);
+    row->enabledSwitch->setBgColor(lv_color_hex(_switch_on_color), checkedIndicator);
+    row->enabledSwitch->setBgOpa(LV_OPA_COVER, checkedIndicator);
+    row->enabledSwitch->setBorderWidth(0, checkedIndicator);
     row->enabledSwitch->onValueChanged().connect(
         [this, alarmId](bool enabled) { _alarm_clock.setAlarmEnabled(alarmId, enabled); });
 
